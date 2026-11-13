@@ -1,0 +1,160 @@
+# Research: real-time event delivery hub (issue #4)
+
+Scope: facts about the repository and the libraries that the later stages need for the contexts `notification/event-stream` and `internal/cluster`. The decisions themselves are in the design input and are only referenced here.
+
+Verification legend: **[repo]** read in this repository; **[src]** read in a crate source in the local cargo registry; **[doc]** known from the library or product documentation and not checkable here (the sources of `axum 0.8.9`, `sqlx 0.9.0`, `aws-sdk-sqs` and `tokio-tungstenite` are not in the local registry cache, and nothing was compiled or run in this stage).
+
+## Contradictions found
+
+These repository facts conflict with the design input or with the issue text. Each has a resolution proposed as an assumption in the last section.
+
+1. **The SQS long poll (wait 5 s) is longer than the client's operation timeout (2 s).** `shared_infrastructure::messaging::sqs_client` sets both `operation_attempt_timeout` and `operation_timeout` to `SQS_OPERATION_TIMEOUT`, default `2s` (`crates/shared/infrastructure/src/messaging.rs`, `crates/service/src/config.rs` `sqs()`). A `ReceiveMessage` with `WaitTimeSeconds=5` on that client is cut off after 2 s on every empty poll. Raising the default is not free: `Collector::cross_field_rules` requires `HEALTH_PROBE_TIMEOUT >= SQS_OPERATION_TIMEOUT` and `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT` (defaults 3 s and 10 s). **[repo]**
+2. **No timestamp type can cross the sqlx boundary today.** The workspace enables only `runtime-tokio, tls-rustls-aws-lc-rs, postgres, macros, migrate, uuid` on sqlx (`Cargo.toml`); neither `chrono` nor `time`. The only table (`example_api_resources`) has no time column and the three `.sqlx` files hold no timestamp. The `Clock` port returns `std::time::SystemTime` and the domain allow-list is `async-trait, thiserror, uuid`. A `timestamptz` column selected or bound in `sqlx::query!` will not compile as designed. **[repo]**
+3. **`release` must not delete the lease row.** The design says the term is monotonically increasing and that `release` "clears the lease". If clearing is a `DELETE`, the next `INSERT` starts the term again at its initial value. The term survives only if the row is kept and expired. **[design reasoning]**
+4. **Leader takeover "within the configured lease time" is not the worst case.** After a crash the lease stays valid for up to `CLUSTER_LEASE_TTL`, and a follower notices only at its next campaign, so the worst case is `CLUSTER_LEASE_TTL + CLUSTER_RENEW_INTERVAL` (13 s with the defaults). Only a graceful stop (release) is faster than the TTL. **[design reasoning]**
+5. **The K6 scenario of criterion 10 does not fit the shipped harness as described.** (a) The harness runs the pinned stock image `grafana/k6` ("nothing is built", `docs/load-testing.md`; `make/tool-versions.mk` is protected); stock K6 has WebSocket modules but, to my knowledge, no SSE client: `http.get` returns only when the response ends **[doc]**. (b) The protected `tests/Load/utils/thresholdsBuilder.js` puts the budget on `http_req_duration{test_type:<profile>}`, which for a held stream is the hold time **[repo]**. (c) K6 runs with `--network host`, and `docker-compose.load_test.override.yml` removes the published port of LocalStack (`ports: !reset []`), so the script cannot send to SQS in the isolated stack **[repo]**. (d) `ScenarioUtils` reads all four profiles of an endpoint, so a new scenario needs `smoke`, `average`, `stress` and `spike` entries **[repo]**.
+6. **The event-stream context cannot see the cluster context.** `architecture.toml` `[contexts] shared = ["shared"]` and `xtask/src/arch/rules.rs` allow a context to depend on itself and the shared kernel only. "Ingest and prune act only while the watch says Leader" can therefore only be combined in `crates/service`; `event-stream-application` must not import `cluster-application` or `cluster-domain`. **[repo]**
+7. **Fakes in `test-support` cannot use tokio.** The `test-support` layer allows `async-trait, fake, rand, tracing, uuid` and depends on domain crates only. The in-memory `EventSignal`, `EventSource` and `LeaseStore` fakes must be written with `std` primitives (the crate already polls futures by hand in `tests/support/src/lib.rs`). **[repo]**
+8. **GraphQL argument shape.** The committed schema declares paging arguments as non-null with a default (`itemsPerPage: Int! = 30, page: Int! = 1`, `.github/graphql-spec/spec`). The design writes `page: Int = 1`. **[repo]**
+9. **The WebSocket handler cannot be tested through `tower::ServiceExt::oneshot`.** The application dev allow-list is `http-body-util, proptest, rstest, serde_json, tokio, tower`: no WebSocket client and no `hyper`. Mutants are judged by the tests of their own crate (`.cargo/mutants.toml`, ADR 0008), so a test in `crates/service` does not kill a mutant in `event-stream-application`. See finding T3. **[repo]**
+
+## Current state of the touched areas
+
+| Area | What the template gives | Where |
+| --- | --- | --- |
+| Buses | `CommandBus`, `QueryBus`, `EventBus` ports with typed `dispatch`/`ask`; in-process adapters; handlers registered explicitly, a duplicate is a `BootstrapError` | `crates/shared/domain/src/bus/`, `crates/shared/infrastructure/src/bus/`, `crates/service/src/bootstrap.rs` |
+| Problem | `Problem` (RFC 9457) with `new`, `with_detail`, `validation_failed`, `dependency_unavailable`, `internal`; extractors `ValidatedQuery`, `ValidatedJson`, `ApiPath`, `ApiJson`; fallbacks; GraphQL `problem_to_error` | `crates/shared/application/src/http/`, `crates/shared/application/src/graphql.rs` |
+| Pagination | `PageRequest::new(page, items_per_page)` (page >= 1, size 1..=100, default 30), `limit()`/`offset()` as `i64`; the example list uses `LIMIT $1 OFFSET $2` | `crates/shared/domain/src/value_object/page_request.rs`, `crates/company-subdomain/some-module/infrastructure/src/persistence.rs` |
+| Time and ids | `Clock::now() -> SystemTime`, `UuidGenerator`; adapters `SystemClock`, `UuidV7Generator`; doubles `FixedClock` and an id double | `crates/shared/domain/src/port/`, `crates/shared/infrastructure/src/{clock,id}.rs`, `tests/support/src/{clock,id}.rs` |
+| SQS client factory | `sqs_client(&SqsSettings)`: region, optional endpoint, connect and operation timeouts, `max_attempts` (default 1); credentials from the SDK chain | `crates/shared/infrastructure/src/messaging.rs` |
+| Pool factory | `connect_lazy(&PostgresSettings)`: lazy pool, `max_connections` default 10, `statement_timeout` on every connection (default 5 s); `MIGRATOR` embeds `migrations/` | `crates/shared/infrastructure/src/persistence.rs` |
+| Health probes | Three probes (database, cache, message broker) behind `HealthProbe`; `Adapters::with_probe` replaces one | `crates/internal/health-check/`, `crates/service/src/bootstrap.rs` |
+| Composition root | `Adapters` (public fields, one per driven port), `bootstrap::router`, `AppState` with `FromRef`, `openapi::api_router` (nests each context under `/api`), `graphql::schema`, `Config::from_args` with a problem collector and cross-field rules | `crates/service/src/` |
+| Serve and shutdown | `serve` installs signals, binds, runs `axum::serve(..).with_graceful_shutdown`, waits `SHUTDOWN_GRACE_PERIOD`, then `runtime.shutdown_timeout(1 s)`; exit status 1 when a connection is still open. No background task exists yet | `crates/service/src/command/serve.rs` |
+| Middleware | Eight layers; `request_timeout` wraps `next.run(request)` in `tokio::time::timeout`, i.e. it bounds the time until the handler returns a `Response` (the head), not the body | `crates/service/src/http/router.rs`, `crates/shared/application/src/http/middleware.rs` |
+| Integration tests | `#[sqlx::test(migrator = "shared_infrastructure::persistence::MIGRATOR")]` gives each test its own migrated database; LocalStack reached through `AWS_ENDPOINT_URL_SQS`; service tests already bind real sockets in `tests/integration/support.rs` | `crates/*/infrastructure/tests/integration/`, `crates/service/tests/integration/` |
+| E2E harness | cucumber, 8 concurrent scenarios, one database per scenario, a **new application instance per request** sent with `oneshot` and the body collected to the end | `tests/e2e/{main.rs,world.rs,steps/}`, `features/` |
+| Load-test harness | One script per scenario in `tests/Load/scripts/`, settings per endpoint in `config.json.dist`, isolated compose project from `docker-compose.yml` plus the load-test override, production image | `tests/Load/`, `scripts/with-load-test-stack.sh` |
+| Scaffolding | `make new-context group=<g> context=<c>` creates the three crates and registers them; the context name is taken from the crate name (`event-stream-domain` -> `event-stream`, `cluster-domain` -> `cluster`) | `xtask/src/scaffold.rs`, `docs/new-service.md` section 5 |
+
+## Surface of the change
+
+- **New crates (6):** `crates/notification/event-stream/{domain,application,infrastructure}` and `crates/internal/cluster/{domain,application,infrastructure}`; `[workspace.members]` and `[workspace.dependencies]` path entries in `Cargo.toml` (only the table `workspace.lints` of that file is protected).
+- **Workspace dependency features:** `ws` on `axum`. This adds `tokio-tungstenite` and `tungstenite` to `Cargo.lock` (neither is there today; `sha1` and `base64` are), so the lock file changes and `make.check_security` (cargo-deny advisories, licences, `unmaintained = "all"`) judges the new crates.
+- **Composition root:** `Adapters` fields, `bootstrap::router`, `AppState`, `openapi::api_router` and the `tags` of `ApiDoc`, `graphql::schema`, `cli.rs` (`ServeArgs` with `env = ..`), `config.rs`, `command/serve.rs` (background tasks and shutdown order), the streaming routes in `http/router.rs` or in the context router.
+- **Migrations:** two new reversible pairs under `migrations/` (never edit `20261110000000_*`); `.sqlx/` regenerated with `make.sqlx_prepare` and committed (the gate also fails on a stale file).
+- **Contracts:** `.github/openapi-spec/spec.yaml` (two new paths), `.github/graphql-spec/spec` (one query, one type); `API_VERSION` in `crates/service/src/openapi.rs` goes to a new minor version because operations are added (its doc comment states the rule). Spectral runs with `--fail-severity=hint`.
+- **Architecture model:** six components and their relationships in `workspace.dsl`; the container description of the service and the message-broker relationship change (the service now consumes a queue).
+- **Docs:** `docs/environment.md` must list every new variable exactly (rule 5 of `make.docs_check` compares it with the `serve` help, the compose files, `.env` and `.env.test`); `docs/architecture.md` (crate count, context table, operational assumptions: per-connection state now exists); a new protocol document for SSE and WebSocket; ADRs (lease instead of Raft, log plus NOTIFY, SQS port); `docs/operations.md`, `docs/load-testing.md`, `SECURITY.md`, `README.md`, `docs/requests.http`.
+- **Tests:** fakes in `tests/support/src/` (and `tests/support/Cargo.toml` gains the two new domain crates); `features/*.feature` with new steps and a longer-lived world in `tests/e2e/`; a K6 script and its `config.json.dist` entry; bats tests are in a protected directory and stay untouched.
+- **Local stack:** `docker-compose.yml` (queue creation in LocalStack, `EVENT_QUEUE_URL` on `app`), `docker-compose.load_test.override.yml`, `.env`.
+
+## Comparison with Mercure
+
+| Aspect | Mercure | This hub | Verdict |
+| --- | --- | --- | --- |
+| Addressing | Topics are IRIs; subscribers use `topic` parameters with URI templates | Event types are flat names matching `^[a-z][a-z0-9]*([._-][a-z0-9]+)*$`; exact match, up to 100 per subscription | Different on purpose: the catalog must be enumerable, which URI templates are not |
+| Subscribe transport | SSE only | SSE and WebSocket (run-time subscribe and unsubscribe) | Extended |
+| Publish | HTTP `POST` to the hub with a publisher JWT | No HTTP publish; events enter only through the `EventSource` port (SQS now, Kafka later) | Different on purpose: the VilnaCRM bus is the single producer side |
+| Payload | Opaque `data` text, optional `id`, `type`, `retry` | Opaque UTF-8 `data`, `event` = event type, `id` = log sequence | Adopted |
+| Resume | `Last-Event-ID` header or `lastEventID` query parameter; ids are publisher-chosen or hub UUIDs; history depends on the transport | `Last-Event-ID` header or `lastEventId` query parameter; id is a monotonic sequence, so resume is a range read | Adopted, with a simpler cursor |
+| Discovery | `Link rel="mercure"` header; optional subscription API | REST and GraphQL catalog of event types | Different on purpose |
+| Authorization | JWT with publish and subscribe claims, private updates | None in this issue; every carried event must be public | Deferred (follow-up) |
+| HA transports | Open-source hub: single node (Bolt); clustering through commercial transports (Redis, Kafka, Pulsar, PostgreSQL) | PostgreSQL log plus `LISTEN/NOTIFY` and a poll fallback on every node; lease for the single ingester | The clustered mode is the baseline here |
+
+Spelling note: Mercure's query parameter is `lastEventID`; the design fixes `lastEventId`. A Mercure client library is therefore not drop-in compatible, and compatibility is not a goal.
+
+## Technical findings
+
+**T1. axum SSE.** `axum::response::sse::{Sse, Event, KeepAlive}` is behind axum's default `tokio` feature, which is already active (the lock file lists `tokio` under `axum`) **[repo]**. `Sse::new` takes a `Stream<Item = Result<Event, E>>`; `KeepAlive::new().interval(d).text(..)` emits comment lines; `Event::default().id(..).event(..).data(..)`; `data` splits on line breaks into several `data:` lines, while `id` and `event` panic on a line break **[doc]**. The `EventType` pattern and a numeric id exclude that; a panic inside a body stream would not be caught by `CatchPanicLayer`, which only wraps the handler future.
+
+**T2. Streams without `tokio-stream`.** The application allow-list has no `tokio-stream` (it is in `Cargo.lock` only transitively). `futures_util::stream::unfold` and `stream::poll_fn` exist without extra features **[src: futures-util 0.3.34]**; a `tokio::sync::mpsc::Receiver` becomes a stream with either. `StreamExt::split` is gated on the `sink` feature **[src]**, and the workspace enables only `alloc`; do not split the socket, drive it from one task with `tokio::select!` over `WebSocket::recv()` and the subscriber queue, and write with the inherent `WebSocket::send()` **[doc]**.
+
+**T3. axum WebSocket and its tests.** `axum::extract::ws::{WebSocketUpgrade, WebSocket, Message}` needs the `ws` feature; `on_upgrade` spawns the socket task, so it is not tracked by the graceful shutdown of `axum::serve` and ends only when the hub closes its queue or the runtime is dropped **[doc]**. The extractor needs hyper's upgrade extension, which a `oneshot` request does not carry, so it answers with a rejection before the handler body runs **[doc]**. Consequences: (1) keep the session logic (command parsing, subscribe and unsubscribe, frame selection, replay then live) independent of the socket type and unit-test it over channels; (2) cover the thin upgrade shell inside `event-stream-application` with an integration test that serves the router on a loopback listener (`tokio` with `net` is an allowed dev-dependency; binding needs `#[expect(clippy::disallowed_methods, reason = ..)]` as in `crates/service/tests/integration/support.rs`) and speaks the handshake and frames by hand over a `TcpStream` (a small test helper; client frames must be masked, a zero mask is valid); (3) `Message` must be matched with every variant named because `wildcard_enum_match_arm` is on.
+
+**T4. JSON in the application layer.** `serde_json` is a dev-dependency only for `*-application` **[repo]**. Inbound commands can be deserialised with serde derives through `axum::Json::<T>::from_bytes` **[doc]**; outbound frames need the hand-written string encoder from the design, property-tested against `serde_json` in the crate's tests. `humantime` is allowed in application and not in infrastructure, so an RFC 3339 `event-time` attribute is parsed in the application layer (`humantime::parse_rfc3339 -> SystemTime`); the `EventSource` port hands over raw attribute strings.
+
+**T5. Infrastructure without tokio.** `tokio` is a dev-dependency only for `*-infrastructure` **[repo]**. Adapters cannot sleep, time out, spawn or select. Every wait, retry delay and timeout lives in the application layer or in `crates/service`. `PgEventSignal::changed` and `SqsEventSource::receive` are single awaits on the driver.
+
+**T6. `PgListener`.** `sqlx::postgres::PgListener::connect_with(&pool)` takes one connection out of the pool for its lifetime; `listen(channel)`; `recv()` reconnects and re-subscribes by itself, and notifications sent during the gap are lost; `try_recv()` returns `None` when the connection was lost **[doc]**. The pool is lazy and `serve` must start while the database is down (`docs/architecture.md`), so the listener has to be created on first use, and a failure must be returned, not retried in the adapter (T5). The port therefore needs a fallible `changed`, and the relay falls back to its poll tick. `statement_timeout` does not end an idle `LISTEN` wait. `LISTEN` does not work through a transaction-pooling proxy (PgBouncer) **[doc]**. Each node spends one of `DATABASE_MAX_CONNECTIONS` (default 10) on the listener.
+
+**T7. NOTIFY and the advisory lock.** `pg_notify` in a transaction is delivered at commit; identical payloads of one transaction are folded into one **[doc]**. `pg_advisory_xact_lock(bigint)` is released at the end of the transaction and its key space is shared by the whole database, so the constant must be documented. PostgreSQL makes a commit visible to snapshots before it releases the transaction's locks, so with the lock taken before the first insert a reader never sees sequence `n+1` while `n` is uncommitted **[doc]**. A lock wait counts against `statement_timeout` (5 s), so a blocked appender fails instead of hanging. Identity values are consumed by `ON CONFLICT DO NOTHING` and by rollbacks: sequences have gaps, and no code or client may assume `n+1` follows `n`.
+
+**T8. Time mapping.** See contradiction 2. Two ways exist without touching a protected file. (a) Keep sqlx as it is and convert in SQL: bind microseconds since the epoch as `i64` (`timestamptz 'epoch' + $1 * interval '1 microsecond'`), read back with `(extract(epoch from col) * 1000000)::bigint AS "col!"`, and pass durations (TTL, retention) as integers into `make_interval`. (b) Add the `time` or `chrono` feature to the sqlx workspace dependency (both crates are already in `Cargo.lock`) and use `sqlx::types::..` in the adapter; the architecture gate checks declared dependencies only (`check_external` in `xtask/src/arch/rules.rs`), so no allow-list edit is needed. The client frames carry no timestamp, and expiry and pruning compare against `now()` in SQL, so the only timestamp that crosses the boundary is `occurred_at` on insert.
+
+**T9. Repository code shape.** In the example adapter every `#[async_trait]` method only delegates to an inherent method, rows are private structs, errors are translated in one function, and queries use `sqlx::query!`/`query_as!` with offline metadata (`SQLX_OFFLINE=true` in `.cargo/config.toml`) **[repo]**. ADR 0008 gives the reason: coverage and complexity tools do not see logic inside an `#[async_trait]` body. `bigint` maps to `i64`; `Sequence` and `Term` (`u64`) need `TryFrom` conversions because `as_conversions` is on.
+
+**T10. SQS.** `ReceiveMessage` returns message attributes only when asked (`message_attribute_names(["All"])` or the names); `max_number_of_messages` is at most 10 and `wait_time_seconds` at most 20; an attribute has a `data_type` (`String`) and `string_value`; a body cannot be empty, so an event with empty `data` cannot arrive through SQS **[doc]**. `DeleteMessageBatch` takes at most 10 entries, each with a batch-unique `Id` and the `ReceiptHandle`, and reports partial failure in `failed` with HTTP 200, so the adapter must read that list **[doc]**. A standard queue delivers at least once and unordered: the total order is the order of the log, not the order of publishing. A message that is not acknowledged returns after the queue's visibility timeout. The `MessageId` is stable across redeliveries and has UUID form on AWS and LocalStack, without a contractual guarantee **[doc]**.
+
+**T11. Coverage gate.** One run over the unit tests and the `integration` test targets of the whole workspace, `--fail-under-lines 100 --fail-under-functions 100`, no ignore pattern; the e2e suite is not instrumented (`make/gates.mk`, ADR 0008) **[repo]**. Every line of the six crates and of the new code in `crates/service` (loops, shutdown order, configuration) needs a unit or integration test. Every arm of a `tokio::select!` must be taken by a test.
+
+**T12. Mutation gate.** `make.mutation_tests_diff` mutates the Rust lines changed against the base ref; each mutant is tested with the unit and integration tests of its own crate under the nextest profile `mutants`; a mutant that times out (`max(120 s, 3 x baseline)`) counts as surviving; `exclude_re` is empty and protected (`.cargo/mutants.toml`, `scripts/mutation-diff.sh`) **[repo]**. This change is almost all new code, so the diff run is close to a full run of six crates. A mutant that removes a `send` or a `break` turns a waiting test into a hang, and each hang costs at least 120 s and fails the gate.
+
+**T13. Lint limits that shape the design.** Cognitive complexity 8, 50 lines, 5 arguments, nesting 5, 3 trait bounds (`clippy.toml`); `iter_over_hash_type` (the hub must not iterate a `HashMap` or `HashSet`; use `BTreeMap` or vectors), `infinite_loop` (a loop needs an exit, which the shutdown signal gives), `multiple_inherent_impl`, `impl_trait_in_params`, `arithmetic_side_effects`, `indexing_slicing`, `string_slice`, `unwrap_used`/`expect_used` (a poisoned `std::sync::Mutex` must be handled without `unwrap`), `missing_docs` under `-D warnings` (`Cargo.toml`) **[repo]**.
+
+**T14. Schemathesis.** The gate runs `--checks all --phases=examples,coverage` against the committed `spec.yaml` and the production image in the load-test stack (`Makefile`, `make/gates.mk`) **[repo]**. It calls documented operations only. A documented SSE route would never finish its response, so each generated case would wait for the client timeout and fail; a WebSocket route cannot be described in OpenAPI 3.1. Keeping both streaming routes out of the document is consistent with the gate. The two documented routes (`/api/event-types`, `/api/cluster`) must declare every status they return (the existing operations use a `default` problem response) and reject invalid query values with a 4xx, as `ValidatedQuery` does.
+
+**T15. E2E harness limits.** `AppWorld::send` builds a new application per request and collects the whole body (`tests/e2e/world.rs`) **[repo]**. Streaming scenarios need one instance that lives for the scenario, a relay running next to it, a way to inject events (a per-scenario LocalStack queue, or a fake `EventSource` assigned to a public field of `Adapters`), and a reader that takes frames with a deadline. The `e2e` layer may use any crate. `NOTIFY` channels are per database, so the concurrent scenarios stay isolated.
+
+**T16. Graceful shutdown.** An open SSE response keeps the graceful shutdown of `axum::serve` waiting until `SHUTDOWN_GRACE_PERIOD` ends, and then `serve` exits with status 1 (`Shutdown::Forced`) **[repo]**. Closing the hub must therefore happen as soon as the signal arrives, before or together with `stop.send_replace(true)`, so that every stream ends and the drain completes with status 0.
+
+**T17. Local stack.** LocalStack 3.x runs scripts mounted in `/etc/localstack/init/ready.d/` **[doc]**. The compose health check of `localstack` (`awslocal sqs list-queues`) can pass before the script has created the queue, so the ingest loop must treat a missing queue as a retryable error. Compose variables and `.env` names are checked against `docs/environment.md`.
+
+## Risks and mitigations
+
+| Risk | Mitigation |
+| --- | --- |
+| Ordering under concurrent appends: a reader pages past a sequence that commits later | `pg_advisory_xact_lock` as the first statement of the append transaction (T7); integration test with two appenders and a paging reader; gaps allowed |
+| Lost `NOTIFY` (listener reconnect, proxy, database restart) | Poll tick `EVENT_RELAY_POLL_INTERVAL` on every node, cursor-based read, so a lost signal costs at most one interval; fallible `changed` (T6) |
+| Slow consumers | Bounded queue per subscriber, `try_send`, eviction on a full queue, resume by `Last-Event-ID`; replay is paged so a large backlog is never held in memory |
+| Split leadership (two nodes ingest during a lease handover or a paused process) | Correctness does not depend on exclusivity: append is idempotent by event id and serialised by the advisory lock, SQS hides a received message from the other consumer, prune is idempotent; expiry is judged by the database clock; a node whose store call fails steps down at once |
+| PostgreSQL outage | Connections stay open and receive keep-alives; relay and elector log and retry on their ticks; ingestion stops, unacknowledged SQS messages return after the visibility timeout; replay requests answer 503; readiness already reports the database |
+| Mutation-test cost of async code | One-round functions (`campaign`, one relay step, one ingest step) with the endless loop in one small function; every awaiting test bounded by `tokio::time::timeout` (paused time in unit tests, real time against PostgreSQL and LocalStack) so a mutant fails fast instead of timing out; assert on effects, not only on completion |
+| Complexity limits (8 cognitive, 50 lines) | State machines split into small functions (parse command, apply command, next frame); `tokio::select!` with two arms per function; no `#[expect]` for complexity |
+| Listener connections exhaust the pool | Document that one connection per node is reserved; validate `DATABASE_MAX_CONNECTIONS >= 2` or state it in operations |
+| Long-lived streams block the drain (T16) | Close the hub on the signal; integration test that `serve` exits 0 with an open subscriber |
+| New transitive crates from `ws` fail the dependency audit | Run `make.check_security` in the first story that adds the feature |
+| K6 scenario cannot measure SSE delivery (contradiction 5) | See the assumption below; decide in the architecture stage before stories are written |
+| Events without authorization reach every client | State in `SECURITY.md` and the protocol document that only public events may be published until the authorization follow-up |
+
+## Assumptions
+
+> Assumption: the SSE and WebSocket query parameter is the comma-separated `types` (the issue text says `?type=<name>`); one parameter serves one or many types and matches the WebSocket command field.
+
+> Assumption: the ingestion adapter does not use the health-probe SQS timeouts. Either the receive call overrides its operation timeout to the wait time plus a margin, or `bootstrap` builds a second client from the same `SqsSettings` with a longer operation timeout; `SQS_OPERATION_TIMEOUT` and the cross-field rules keep their meaning for the probe. The architecture stage chooses one and verifies it against LocalStack.
+
+> Assumption: timestamps cross the sqlx boundary as integers converted in SQL (T8 option a), because it changes no dependency feature; `occurred_at` is `SystemTime` in the domain. If the query macros reject the casts, option (b) is the fallback and needs no protected-file change.
+
+> Assumption: `PgLeaseStore::release` keeps the row and sets `expires_at` to the past for the holder, so the term never decreases; the term starts at 1 and increases by 1 on every change of holder.
+
+> Assumption: acceptance criterion 6 is read as "another node holds the lease within `CLUSTER_LEASE_TTL + CLUSTER_RENEW_INTERVAL` after a crash and within `CLUSTER_RENEW_INTERVAL` after a graceful stop"; the PRD states both bounds.
+
+> Assumption: `CLUSTER_RENEW_INTERVAL` must be at most half of `CLUSTER_LEASE_TTL`, enforced as a cross-field rule in `config.rs`; the defaults (3 s, 10 s) leave two renewals per lease.
+
+> Assumption: leader gating of ingest and prune is wired in `crates/service` from the cluster status `watch` channel; `event-stream-application` exposes one-round use cases that know nothing about leadership.
+
+> Assumption: `EventSignal::changed` returns a `Result`; on an error the relay waits for its poll tick and tries again.
+
+> Assumption: when the `event-id` attribute is absent the SQS `MessageId` is used if it parses as a UUID; otherwise an id from `UuidGenerator` is used and redelivery of that one message is not deduplicated. An `event-id` that is present and not a UUID makes the message invalid (warn, acknowledge).
+
+> Assumption: `event-time` is optional RFC 3339 text parsed in the application layer; when absent or invalid, `occurred_at` is `Clock::now()` at ingestion (an invalid value is logged at warn and does not reject the event).
+
+> Assumption: a message whose data exceeds `EVENT_MAX_DATA_BYTES` or whose type is invalid is logged at warn and acknowledged; a dead-letter queue is a deployment concern outside this issue.
+
+> Assumption: the GraphQL query follows the committed convention: `eventTypes(page: Int! = 1, itemsPerPage: Int! = 30): [EventType!]!`.
+
+> Assumption: `API_VERSION` becomes `1.1.0` and the OpenAPI tags gain `EventStream` and `Cluster`.
+
+> Assumption: the K6 smoke scenario holds its subscribers with the means the stock image has, publishes through a LocalStack port that `docker-compose.load_test.override.yml` publishes on loopback for the load-test project, and keeps the protected `http_req_duration` budget on plain requests of the scenario (the catalog), with delivery latency recorded as a custom trend. If the stock image cannot read an SSE stream incrementally, the SSE subscribers are held open and delivery is asserted on WebSocket subscribers of the same scenario; no protected file, image pin or budget of the `health` scenario changes. The architecture stage must confirm the capabilities of `grafana/k6:2.3.0` before the story is written.
+
+> Assumption: the streaming routes are mounted outside `OpenApiRouter` documentation (plain `axum` routes in the context router) and are specified in a protocol document under `docs/`.
+
+> Assumption: a replay request with a `Last-Event-ID` older than the retention window is served from the oldest retained event without an error, as Mercure does; the protocol document says that loss is possible beyond `EVENT_RETENTION`.
+
+> Assumption: the advisory-lock key is one documented constant of `event-stream-infrastructure`; no other code in the service takes advisory locks.
+
+> Assumption: the example context `company-subdomain/some-module` and its table stay untouched.
+
+## Open questions
+
+None is left open for a person; items that the architecture stage must verify by compiling or running are contradiction 1 (the per-call timeout), T3 (the hand-written WebSocket test client), T8 (the SQL casts under `sqlx::query!`) and contradiction 5 (K6 and SSE).
