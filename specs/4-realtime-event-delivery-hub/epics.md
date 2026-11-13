@@ -8,7 +8,7 @@ This file slices the design of `architecture.md` of this bundle into stories for
 - Two stories of one round never write the same file. Each story lists the files it owns under "Scope". A file with several writers is chained through `Depends on:` edges, also where no code dependency exists; the story text calls such an edge "ownership".
 - A dependency enters a member manifest in the story whose code first uses it, because the unused-dependency gate of the hook refuses an entry without a use. A new manifest entry also changes `Cargo.lock`, so at most one story per round changes a manifest.
 - A crate-private item is added by the story of its first caller, because an item without a caller fails the lint gate.
-- Every story carries its own tests to the bar of the repository: 100 % line and function coverage of its code, both sides of every boundary, every error branch and every log entry asserted, every awaiting test bounded by `tokio::time::timeout`, paused tokio time wherever a timer is involved. No story plans a lint suppression, a coverage or mutation exclusion, a protected-file edit or a lowered bar.
+- Every story carries its own tests to the bar of the repository: 100 % line and function coverage of its code, both sides of every boundary, every error branch and every log entry asserted, every awaiting test bounded by `tokio::time::timeout`, paused tokio time wherever a timer is involved. No story plans an `allow` attribute, a coverage or mutation exclusion, a protected-file edit or a lowered bar. The only lint expectations are the ones architecture.md names, in the form the repository already uses: the item-level `#[expect(clippy::disallowed_methods, reason = "..")]` on a test helper that opens a socket (stories 4.4, 6.2) and the `unused_async` expectation of a handler that awaits nothing (story 1.2).
 
 **Single-writer chains (ownership edges):**
 
@@ -238,9 +238,9 @@ As a node of the cluster, I read new log rows after my cursor once per round, ha
 - `crates/notification/event-stream/application/Cargo.toml` (`tokio` and `tracing` as dependencies; `proptest` and `futures-util` as dev-dependencies; the dev features `test-util` and `io-util` of `tokio`).
 - `crates/notification/event-stream/application/src/{lib.rs,relay.rs,listen.rs,http.rs}`, `src/http/frame.rs`, each new file with its sibling tests.
 
-**Covers:** FR-5, FR-8, FR-18, NFR-2, NFR-3, NFR-18 (WebSocket through the `ws` feature), NFR-19 (property test).
+**Covers:** FR-5, FR-8, FR-18, NFR-2, NFR-3, NFR-15 (the entry `event signal failed`), NFR-18 (WebSocket through the `ws` feature), NFR-19 (property test).
 
-> Assumption: the frame encoders and the relay are one story. Each needs a manifest change (the `ws` feature and `proptest` for the frame, `tokio` and `tracing` for the relay and the listener), every manifest change rewrites `Cargo.lock`, and only one story per round may write that file; two stories would take two rounds for the hub to start.
+> Assumption: the frame encoders and the relay are one story. Each needs a manifest change (the `ws` feature and `proptest` for the frame, `tokio` and `tracing` for the relay and the listener), a new manifest entry rewrites `Cargo.lock`, and only one story per round may write that file; as two stories they would take two rounds before the hub can start.
 >
 > Assumption: `error_json` is not written here. Its first caller is the WebSocket session, so story 4.4 adds it to `http/frame.rs`.
 >
@@ -377,7 +377,7 @@ As a node, I fan one event out to the subscribers of its type only, never wait f
 - **Given** a registered subscriber, **When** it is dropped, **Then** `subscriber_count` falls by one and its senders are gone from every type entry
 - **Given** `Subscriber::subscribe` and `unsubscribe`, **When** the type set changes, **Then** frames of an added type arrive, frames of a removed type are no longer queued, and adding a held type or removing an absent type changes nothing
 - **Given** a hub with subscribers and queued frames, **When** `close` is called, **Then** each subscriber receives its queued frames and then `None` with `hub_closed()` true, `subscriber_count` is 0, `is_closed()` is true, and a later `register` fails with `HubError::Closed` (`the node is shutting down`)
-- **Given** a subscriber whose receiver was dropped without the hub noticing, **When** a frame of its type is delivered, **Then** the closed sender is counted as evicted and removed
+- **Given** a subscriber whose receiver was closed while its sender is still registered, **When** a frame of its type is delivered, **Then** the closed sender is counted as evicted and removed
 - **Given** the registry mutex was poisoned by a panicking thread, **When** `register` and `deliver` are called, **Then** both work on the recovered state, and the `Debug` output of the hub shows counts only
 - **Given** the story's files on top of story 3.2, **When** the session runs `make.format`, `make.lint_code`, `make.unit_tests`, `make.architecture` and `make.complexity` and the verify step runs `make.tests_with_coverage`, **Then** all pass (no `HashMap` is iterated, no lock is held across an await), `http/hub.rs` has 100 % line and function coverage, and the tests leave no surviving or timed-out mutant for `make.mutation_tests_diff`
 
@@ -563,7 +563,7 @@ As an operator, I start one binary that campaigns, relays, ingests when a queue 
 - **Given** the three `Adapters { .. }` literals, **When** the tests are compiled, **Then** they carry `ScriptedEventSource` or `None` and `ScriptedEventSignal`, and no literal test is deleted or skipped
 - **Given** a served binary with one open SSE stream, **When** SIGTERM arrives, **Then** the stream body ends, the process exits with status 0 within `SHUTDOWN_GRACE_PERIOD`, the entries `shutdown signal received` and `stopped` are written and `grace period elapsed, forcing shutdown` is not
 - **Given** a served binary that is leader, **When** it stops on SIGTERM, **Then** the row of `cluster_leases` has `expires_at` not after the database `now()` and keeps its holder and term
-- **Given** a served binary during shutdown, **When** a new stream is requested after the hub was closed and before the listener stops, **Then** the answer is the 503 problem
+- **Given** an `Application` whose background was spawned and shut down with `Running::shutdown`, **When** a stream is requested from its router afterwards, **Then** the answer is the 503 problem (`the node is shutting down`), the lease store fake recorded one `release` before the hub was closed, and no loop task is left running
 - **Given** a served binary with `EVENT_QUEUE_URL` unset, **When** it runs for several relay intervals, **Then** it serves the catalog, a stream and the cluster status, becomes leader, and writes no `ingestion failed` entry
 - **Given** the existing serve tests that list the entries written outside requests, **When** they run with the background loops, **Then** the lists are extended with `leadership changed` and with no other new entry on a healthy stack
 - **Given** a served binary whose database is unreachable, **When** it starts, **Then** it listens, `GET /api/cluster` answers 200 with `role` `follower` and `leader` `null`, a stream without a cursor is accepted, the catalog answers with the 500 problem, and the entries `lease store failed`, `event signal failed` and `relay failed` are written once per failed round
@@ -627,7 +627,7 @@ As a product owner, I read the behaviour of the streams in Gherkin: SSE delivery
 - **Given** an event of a type that was never registered, **When** it was ingested, **Then** `GET /api/event-types` lists the type
 - **Given** one election round was run through the kept application, **When** `GET /api/cluster` is read, **Then** `cluster.feature` sees `role` `leader`, `leader` equal to `nodeId` and `term` 1
 - **Given** the WebSocket scenarios, **When** the world binds its loopback listener, **Then** the binding function carries one item-level `#[expect(clippy::disallowed_methods, reason = "..")]` as the integration support of `crates/service` does, and no other lint expectation is added
-- **Given** the story's files on top of stories 4.4 and 5.3, **When** the session runs `make.format`, `make.lint_code`, `make.architecture` and `make.complexity` and the verify step runs `make.e2e_tests`, `make.unused_dependencies` and `make.check_security`, **Then** all pass, every step of the new features is defined, and the five existing features pass unchanged
+- **Given** the story's files on top of stories 4.4 and 5.3, **When** the session runs `make.format`, `make.lint_code`, `make.architecture` and `make.complexity` and the verify step runs `make.e2e_tests`, `make.unused_dependencies` and `make.check_security`, **Then** all pass, every step of the new features is defined, and the five features of the template and `event_catalog.feature` pass unchanged
 
 **Depends on:** 4.4, 5.3
 
@@ -732,7 +732,7 @@ As the maintainer who merges the change, I get the verification list of `AGENTS.
 **Acceptance Criteria:**
 
 - **Given** every story from 1.1 to 6.5 is committed on the feature branch, **When** `make.validate_configuration` (with `base_ref=<base>` and an empty `CONFIG_CHANGE_APPROVED=`), `make.validate_invariants`, `make.secrets_scan`, the lint targets `lint-repo` and `lint-load-tests` (no profile key) and `make.validate_architecture_model` run in this order, **Then** each passes: no item of `protected-config.toml` differs from the base, no secret is found, and the model has one component per workspace crate and one relationship per workspace-internal dependency
-- **Given** the preflight targets passed, **When** `make.format_check`, the target `validate-manifest` (no profile key), `make.check_crate_isolation`, `make.static_analysis`, `make.complexity`, `make.architecture`, `make.check_security`, `make.unused_dependencies`, the target `check-requirements` (no profile key) and `make.docs_check` run in this order, **Then** each reports zero findings, the diff against the base holds no `#[allow`, no `#[mutants::skip]`, no `#[coverage(off)]` and no new exclusion, and no `event-stream` crate depends on a `cluster` crate or the reverse
+- **Given** the preflight targets passed, **When** `make.format_check`, the target `validate-manifest` (no profile key), `make.check_crate_isolation`, `make.static_analysis`, `make.complexity`, `make.architecture`, `make.check_security`, `make.unused_dependencies`, the target `check-requirements` (no profile key) and `make.docs_check` run in this order, **Then** each reports zero findings, the diff against the base holds no `allow` attribute, no mutation-skip attribute, no coverage-off attribute and no new exclusion, and no `event-stream` crate depends on a `cluster` crate or the reverse
 - **Given** the static targets passed, **When** `make.setup_test_db`, `make.validate_sqlx_metadata`, `make.tests_with_coverage`, the target `doc-tests` (no profile key) and `make.e2e_tests` run in this order, one DB-backed target at a time, **Then** the twelve new files of `.sqlx/` are current, coverage is 100 % of lines and 100 % of functions with no exclusion added, and every feature passes
 - **Given** the test targets passed, **When** `make.validate_contract_snapshots`, `make.validate_openapi_spec`, `make.openapi_diff` and `make.graphql_diff` run in this order with `base_ref=<base>`, **Then** the snapshots equal the generated contracts, Spectral reports nothing, and the diffs report additions only: the paths `/api/event-types` and `/api/cluster`, the schemas `EventType`, `ClusterStatus` and `ClusterRole`, two tags, the GraphQL type `EventType` and the query field `eventTypes`
 - **Given** the whole change is committed, **When** `make.mutation_tests_diff` runs against the base ref, **Then** it reports zero surviving and zero timed-out mutants in the changed code
@@ -787,7 +787,7 @@ As the maintainer who merges the change, I get the verification list of `AGENTS.
 | NFR-12 | 3.4, 5.3, 6.1 |
 | NFR-13 | 6.5 |
 | NFR-14 | 2.1, 3.1, 3.4, 3.5, 4.3, 4.4, 5.1, 6.6 |
-| NFR-15 | 1.2, 3.5, 4.2, 4.3, 4.4, 5.2, 5.3, 6.5 |
+| NFR-15 | 1.2, 3.2, 3.5, 4.2, 4.3, 4.4, 5.2, 5.3, 6.5 |
 | NFR-16 | every story (own tests), 6.6 |
 | NFR-17 | every story (own lint and complexity runs), 6.6 |
 | NFR-18 | 1.1, 1.2, 3.2, 3.4, 6.6 |
