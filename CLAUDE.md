@@ -59,3 +59,19 @@ Use `/bmalph` to navigate phases. Use `/bmad-help` to discover all commands. Use
 | `/dev` | Developer | Implementation, coding |
 | `/ux-designer` | UX Designer | User experience, wireframes |
 | `/qa` | QA Engineer | Test automation, quality assurance |
+
+<!-- rust-backend-sdlc:begin -->
+
+## rust-backend-sdlc governance (managed block — do not edit between markers)
+
+The rust-backend-sdlc plugin writes this block and restores it when its setup command runs again. The values it refers to live in the project profile `.claude/rust-sdlc.yml`, which is committed together with this block.
+
+- Skill triage: before implementation or review work, every plugin skill receives a recorded verdict, EXECUTE with evidence or NOT APPLICABLE with a reason. The rule is: every skill verdict recorded, no silent skips. A full skill body is loaded only on EXECUTE.
+- Repository rules first: `AGENTS.md` and the skills listed in `.claude/skills/README.md` win over a plugin skill of the same name; the plugin skill adds only its loop, its evidence format and its escalation block.
+- Tighten-only quality bars: the `quality.*` keys of the profile may only equal or tighten the values of the gates, and a file listed in `protected-config.toml` is never changed to make a check pass.
+- Execution through make: every tool runs through the target that the `make.*` keys of the profile map; the order of the checks is the verification section of `AGENTS.md`.
+- Commits and pull-request titles use the form type(#issue): subject, and the git hooks are never bypassed.
+- Protected configuration is escalated to a maintainer with the approval label, never edited by an agent.
+- Plugin commands, named here in prose: /rs-sdlc drives a feature from issue to finished pull request; /rs-sdlc-setup restores this block; /rs-sdlc-new-service, /rs-sdlc-new-context, /rs-sdlc-issue, /rs-sdlc-plan, /rs-sdlc-implement, /rs-sdlc-review, /rs-sdlc-qa and /rs-sdlc-finish-pr run one step each.
+
+<!-- rust-backend-sdlc:end -->
