@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Rust Service Template API
-  description: This API provides endpoints to manage Rust Service Template data within VilnaCRM.
+  title: VilnaCRM Notification Service API
+  description: This API provides endpoints to manage VilnaCRM Notification Service data within VilnaCRM.
   contact:
     name: VilnaCRM Support
-    url: https://github.com/VilnaCRM-Org/rust-service-template
+    url: https://github.com/VilnaCRM-Org/notification-service
     email: support@vilnacrm.com
   license:
     name: CC0-1.0
