@@ -1,0 +1,13 @@
+[package]
+name = "rstest"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.txt"
+
+[dependencies]
+sqlx = { path = "../sqlx" }
+
+[workspace]

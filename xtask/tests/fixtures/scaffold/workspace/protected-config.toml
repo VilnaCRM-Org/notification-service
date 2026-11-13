@@ -1,0 +1,5 @@
+# The protected list of the scaffold fixture: the scaffolding command must not touch any item.
+approval_label = "approved-config-change"
+files = ["architecture.toml", "protected-config.toml"]
+directories = ["crates/retail/shop/domain/"]
+manifest_tables = [{ file = "Cargo.toml", table = "workspace.lints" }]

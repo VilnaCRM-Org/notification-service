@@ -1,0 +1,4 @@
+
+fn planted_clock() -> std::time::SystemTime {
+    std::time::SystemTime::now()
+}

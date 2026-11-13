@@ -1,0 +1,6 @@
+# .hadolint.yaml
+ignored:
+  - DL3008 # apt package versions are governed by the digest-pinned base image
+trustedRegistries:
+  - docker.io
+  - gcr.io

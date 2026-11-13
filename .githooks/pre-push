@@ -1,0 +1,10 @@
+#!/bin/sh
+# GNU Make is required: the one named by MAKE, else gmake (macOS keeps an old make as `make`), else make.
+if [ -n "${MAKE:-}" ]; then
+  make_command=$MAKE
+elif command -v gmake >/dev/null 2>&1; then
+  make_command=gmake
+else
+  make_command='make'
+fi
+exec "$make_command" --no-print-directory pre-push

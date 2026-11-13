@@ -1,0 +1,15 @@
+[package]
+name = "shop-application"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.txt"
+
+[dependencies]
+shop-domain = { path = "../domain" }
+test-support = { path = "../../test-support" }
+
+[lints]
+workspace = true

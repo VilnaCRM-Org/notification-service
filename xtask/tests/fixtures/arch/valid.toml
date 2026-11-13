@@ -1,0 +1,46 @@
+# Model of the fixture workspace: the layers of the real architecture.toml plus one layer whose pattern
+# overlaps `*-domain`, so that `overlap-domain` is ambiguous. Every key of the schema is used somewhere.
+
+[contexts]
+shared = ["shared"]
+
+[[layer]]
+name = "domain"
+crates = ["*-domain"]
+directory = "domain"
+depends_on = ["domain"]
+external = ["async-trait", "thiserror", "uuid"]
+dev_external = ["proptest", "rstest", "tokio"]
+forbidden_transitive = ["axum", "hyper", "reqwest", "sqlx", "tokio"]
+
+[[layer]]
+name = "application"
+crates = ["*-application"]
+directory = "application"
+depends_on = ["domain", "application"]
+dev_depends_on = ["test-support"]
+external = ["axum", "serde", "thiserror", "tokio"]
+dev_external = ["rstest", "serde_json"]
+forbidden_transitive = ["moka", "sqlx"]
+
+[[layer]]
+name = "infrastructure"
+crates = ["*-infrastructure"]
+directory = "infrastructure"
+depends_on = ["domain", "infrastructure"]
+dev_depends_on = ["test-support"]
+external = ["async-trait", "moka", "sqlx", "thiserror"]
+dev_external = ["rstest", "tokio"]
+forbidden_transitive = ["axum", "utoipa"]
+
+[[layer]]
+name = "test-support"
+crates = ["test-support"]
+depends_on = ["domain"]
+external = ["async-trait", "fake", "rand", "uuid"]
+
+[[layer]]
+name = "overlap"
+crates = ["overlap-*"]
+depends_on = ["domain"]
+external = []

@@ -1,0 +1,12 @@
+[alias]
+xtask = "run --quiet --locked --package xtask --"
+
+[env]
+# sqlx macros never contact a database at build time; `cargo sqlx prepare` overrides this itself.
+SQLX_OFFLINE = "true"
+# The seed recorded in the repository (FR51): the default of every test run. A value set by the caller wins;
+# the scheduled workflow sets a fresh one.
+TEST_SEED = "20261110"
+PROPTEST_RNG_SEED = "20261110"
+# FR8, AD-19: Swagger UI comes from the vendored crate; without the feature the build stops instead of downloading
+SWAGGER_UI_DOWNLOAD_URL = "vendored-only"

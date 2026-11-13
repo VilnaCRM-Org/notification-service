@@ -1,0 +1,6 @@
+# Settings of the pinned pnpm, which no longer reads the "pnpm" key of package.json.
+overrides:
+  # GHSA-g3hv-75wg-m249 (denial of service, minimatch >=7.0.0 <11.0.1): eslint 10.14.0 asks for ^10.2.6 and
+  # @eslint/config-array 0.23.5 for ^10.2.4, so no release of the 10 line is fixed. Remove the entry once ESLint
+  # asks for a fixed minimatch.
+  minimatch: 11.0.1

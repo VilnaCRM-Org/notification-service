@@ -1,0 +1,15 @@
+[package]
+name = "shop-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.txt"
+
+[dependencies]
+audit-core = { path = "../audit-core" }
+billing-core = { path = "../billing-core" }
+
+[lints]
+workspace = true

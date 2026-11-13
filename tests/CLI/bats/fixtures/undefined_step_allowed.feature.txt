@@ -1,0 +1,4 @@
+Feature: Planted by the Bats negative test
+  @allow.skipped
+  Scenario: A step that no function matches, in a scenario that allows skipped steps
+    Given a step that no step function defines

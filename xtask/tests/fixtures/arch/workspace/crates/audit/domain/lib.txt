@@ -1,0 +1,1 @@
+Placeholder: the architecture check reads manifests only and never compiles this crate.

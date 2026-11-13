@@ -1,0 +1,7 @@
+// Planted by the G24 test: a loose comparison and a console call, which the load-test lint rejects.
+export default function () {
+  const status = 204;
+  if (status == 204) {
+    console.log('planted');
+  }
+}

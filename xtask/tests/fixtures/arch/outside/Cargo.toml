@@ -1,0 +1,10 @@
+# Fixture workspace of the coverage rule for a local crate outside the members: `audit-core` and `billing-core` are excluded from
+# the workspace and `shop-app` depends on them by path (see ../outside.toml). It is only ever read with
+# `cargo metadata`, never compiled.
+[workspace]
+resolver = "3"
+members = ["crates/shop-app"]
+exclude = ["crates/audit-core", "crates/billing-core"]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

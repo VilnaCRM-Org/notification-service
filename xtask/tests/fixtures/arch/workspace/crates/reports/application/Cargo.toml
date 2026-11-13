@@ -1,0 +1,14 @@
+[package]
+name = "reports-application"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.txt"
+
+[dependencies]
+axum = { path = "../../../../vendor/axum" }
+
+[lints]
+workspace = true

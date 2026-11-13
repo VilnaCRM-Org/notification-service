@@ -1,0 +1,40 @@
+# Synthetic cases of the scan for host jq and python3 in make_general.bats. A line that ends with the marker
+# "# call" is a call outside a guarded chunk and must be reported; no other line may be.
+
+@test "calls without a guard" {
+  run bash -c 'jq . file.json' # call
+  value="$(printf '{}' | jq)" # call
+  value=$(printf '{}' | jq) # call
+  printf '{}' | jq; true # call
+  printf '{}' | jq| cat # call
+  printf '{}' | jq&& true # call
+  run bash -c "printf '{}' | jq" # call
+  run bash -c 'printf "{}" | jq' # call
+  value=`printf '{}' | jq` # call
+  /usr/bin/jq . file.json # call
+  jq # call
+  value="$(python3)" # call
+  run python3 -c 'print(1)' # call
+  run python -c 'print(1)' # call
+}
+
+helper() {
+  value="$(printf '{}' | jq)" # call
+}
+
+@test "calls in a guarded test" {
+  require_command jq
+  value="$(printf '{}' | jq)"
+  printf '{}' | jq; true
+}
+
+@test "a guard of one tool does not cover the other" {
+  require_command jq
+  value="$(python3)" # call
+}
+
+@test "names that are no call" {
+  echo jquery jq_path jq-like jq.json pyjq python3.11 python3x my_python3
+  # value="$(printf '{}' | jq)"
+  echo "the list jq,python3,python, names them"
+}

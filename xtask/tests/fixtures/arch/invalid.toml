@@ -1,0 +1,6 @@
+# Not a valid model: `typo` is not a key of a layer.
+
+[[layer]]
+name = "domain"
+crates = ["*-domain"]
+typo = true

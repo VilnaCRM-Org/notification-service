@@ -1,0 +1,4 @@
+# .gitleaks.toml — the default rule set; accepted findings go to .gitleaksignore, one fingerprint per line
+# with a dated comment above it.
+[extend]
+useDefault = true

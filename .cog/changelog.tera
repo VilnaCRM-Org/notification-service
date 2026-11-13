@@ -1,0 +1,12 @@
+{% if version.tag -%}
+## {{ version.tag }} ({{ date | date(format="%Y-%m-%d") }})
+{% else -%}
+## Unreleased
+{% endif %}
+{% for value in commits | group_by_type -%}
+### {{ value.0 | upper_first }}
+
+{% for commit in value.1 -%}
+- {% if commit.breaking_change %}**BREAKING** {% endif %}{% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.summary }} ({{ commit.id | truncate(length=7, end="") }})
+{% endfor %}
+{% endfor -%}

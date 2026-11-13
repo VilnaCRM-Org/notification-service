@@ -1,0 +1,22 @@
+# Model of the scaffold fixture: the three layers of the real architecture.toml, without third-party allow-lists.
+
+[contexts]
+shared = ["shared"]
+
+[[layer]]
+name = "domain"
+crates = ["*-domain"]
+directory = "domain"
+depends_on = ["domain"]
+
+[[layer]]
+name = "application"
+crates = ["*-application"]
+directory = "application"
+depends_on = ["domain", "application"]
+
+[[layer]]
+name = "infrastructure"
+crates = ["*-infrastructure"]
+directory = "infrastructure"
+depends_on = ["domain", "infrastructure"]

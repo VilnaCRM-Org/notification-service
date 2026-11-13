@@ -1,0 +1,4 @@
+
+fn planted_unwrap(text: &str) -> u32 {
+    text.parse::<u32>().unwrap()
+}

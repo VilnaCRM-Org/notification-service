@@ -1,0 +1,6 @@
+
+fn planted_raw_value(raw: &serde_json::value::RawValue) -> usize {
+    raw.get().len()
+}
+
+const _: fn(&serde_json::value::RawValue) -> usize = planted_raw_value;

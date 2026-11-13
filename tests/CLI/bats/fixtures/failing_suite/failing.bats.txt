@@ -1,0 +1,9 @@
+#!/usr/bin/env bats
+# Negative test of gate G16: a suite that must fail. In the repository this file keeps the
+# extension .bats.txt, which no linter and no default Bats run picks up; a test copies it to a
+# temporary directory as failing.bats and runs `make bats BATS_PATH=<that directory>`.
+
+@test "a planted failure is reported" {
+  run echo "planted"
+  [ "$status" -eq 1 ]
+}

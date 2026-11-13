@@ -1,0 +1,7 @@
+// Planted by the G24 test: a K6 script that ESLint accepts, written with double quotes and four-space
+// indentation, which Prettier rewrites under the root .prettierrc.yml.
+import { sleep } from "k6";
+
+export default function plantedFormat() {
+    sleep(1);
+}

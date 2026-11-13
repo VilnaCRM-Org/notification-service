@@ -1,0 +1,8 @@
+# Model of the fixture workspace `outside`: one layer that accepts every third-party crate, so that the only
+# finding is the local crate that is not a workspace member.
+
+[[layer]]
+name = "app"
+crates = ["*-app"]
+depends_on = ["app"]
+external = ["*"]

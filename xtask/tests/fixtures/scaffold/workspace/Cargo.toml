@@ -1,0 +1,19 @@
+# Fixture workspace of the scaffolding command: a minimal valid workspace that the scaffold tests copy into a
+# temporary directory. It sits outside the members of the real workspace and is never built in place.
+[workspace]
+resolver = "3"
+members = [
+    # The one context that exists before the command runs.
+    "crates/retail/shop/domain",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "CC0-1.0"
+publish = false
+repository = "https://example.com/fixture"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

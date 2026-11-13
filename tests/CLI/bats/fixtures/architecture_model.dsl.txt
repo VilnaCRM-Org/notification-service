@@ -1,0 +1,26 @@
+workspace "Fixture" "Two components for the model check." {
+    !identifiers hierarchical
+    model {
+        system = softwareSystem "Service" "The fixture system." {
+            service = container "Service binary" "The fixture container." "Rust" {
+                alpha = component "alpha-crate" "First component." "Rust crate"
+                beta = component "beta-crate" "Second component." "Rust crate"
+                alpha -> beta "Uses"
+            }
+        }
+    }
+    views {
+        systemContext system "SystemContext" "Context view." {
+            include *
+            autolayout lr
+        }
+        container system "Containers" "Container view." {
+            include *
+            autolayout lr
+        }
+        component system.service "Components" "Component view." {
+            include *
+            autolayout tb
+        }
+    }
+}

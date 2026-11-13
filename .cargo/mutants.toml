@@ -1,0 +1,21 @@
+# The mutation scope record (FR59(b), NFR20). cargo-mutants exits 2 when a mutant survives and 3 when one
+# times out: the exit code is the gate, and a timed-out mutant counts as surviving (FR59(c)).
+
+# Each mutant is judged by the unit and integration tests of its own crate, run with nextest.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile", "mutants"]
+
+# Scope: the production source minus these paths, each with its reason.
+#   **/main.rs    process entry points: one call into the library, exercised by the process-level tests
+#   **/build.rs   build script, not part of the service
+#   **/tests.rs   unit tests
+#   **/tests/**   integration tests, test-support and end-to-end crates: test code
+exclude_globs = ["**/main.rs", "**/build.rs", "**/tests.rs", "**/tests/**"]
+
+# A mutant whose tests do not finish within max(120 s, 3 x baseline) is reported as TIMEOUT; cargo-mutants
+# then exits 3 and the gate fails. A mutant that can only hang and is equivalent is listed in exclude_re.
+timeout_multiplier = 3.0
+minimum_test_timeout = 120
+
+# Equivalent mutants are listed here one by one, each with a comment that explains why.
+exclude_re = []

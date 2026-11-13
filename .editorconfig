@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,js,md,tera,http}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[make/*.mk]
+indent_style = tab
+
+[*.{bats,bash,sh}]
+indent_size = 2
+
+[{features/health_check.feature,.github/graphql-spec/spec,.github/openapi-spec/spec.yaml}]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

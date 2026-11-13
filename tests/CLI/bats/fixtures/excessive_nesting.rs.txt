@@ -1,0 +1,16 @@
+
+fn planted_excessive_nesting(seed: u32) -> u32 {
+    {
+        {
+            {
+                {
+                    {
+                        {
+                            seed
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

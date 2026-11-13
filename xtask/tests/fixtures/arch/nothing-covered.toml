@@ -1,0 +1,1 @@
+# A model without layers: no crate of any workspace is assigned to a layer, so every crate is `arch::uncovered`.

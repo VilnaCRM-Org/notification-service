@@ -1,0 +1,5 @@
+# Accepted secret-scan findings: one fingerprint per line, with the comment lines directly above it.
+# Entry format (the fingerprint is printed by `make secrets-scan`):
+#   # <date of acceptance>: <reason>. Review by <review date, at most three months later>.
+#   <commit>:<file>:<rule>:<line>      (history finding) or <file>:<rule>:<line> (working file)
+# A real secret is never accepted: revoke and rotate it, then remove it from the history.

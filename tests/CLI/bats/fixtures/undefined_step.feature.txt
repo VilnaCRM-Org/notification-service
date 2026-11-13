@@ -1,0 +1,3 @@
+Feature: Planted by the Bats negative test
+  Scenario: A step that no function matches
+    Given a step that no step function defines

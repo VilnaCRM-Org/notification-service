@@ -1,0 +1,5 @@
+# Planted title
+
+### Planted third level heading
+
+Text of the section.

@@ -1,0 +1,97 @@
+x-build: &build
+  context: .
+  target: prod
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ['no-new-privileges:true']
+
+services:
+  app:
+    <<: *hardening
+    image: ${APP_IMAGE:-service:prod}
+    build: *build
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-prod}
+      APP_PORT: '8081'
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${DB_USER:-app}:${DB_PASSWORD:-local-dev-only}@database:5432/${DB_NAME:-app}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      # Literal emulator placeholders: credentials of the host shell never reach a local container.
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_URL_SQS: http://localstack:4566
+    ports:
+      - '${APP_PORT:-8081}:8081'
+    healthcheck:
+      test: ['CMD', '/app/service', 'healthcheck'] # exec form: the image has no shell
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+      start_interval: 1s
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  migrate:
+    <<: *hardening
+    image: ${APP_IMAGE:-service:prod}
+    build: *build
+    command: ['migrate']
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-app}:${DB_PASSWORD:-local-dev-only}@database:5432/${DB_NAME:-app}
+    restart: 'no'
+
+  database:
+    # The one image without a digest: its tag is DB_VERSION, and a digest would override the tag.
+    image: postgres:${DB_VERSION:-16}-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-app}
+      POSTGRES_USER: ${DB_USER:-app}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-local-dev-only}
+      # From PostgreSQL 18 the image keeps the cluster in /var/lib/postgresql/<major>/docker and refuses a
+      # mount at /var/lib/postgresql/data. Naming the old path keeps the data in db_data for every DB_VERSION.
+      # A change of the major version still needs a fresh volume or pg_upgrade.
+      PGDATA: /var/lib/postgresql/data
+    ports:
+      - '127.0.0.1:${DB_PORT:-5432}:5432'
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+      start_interval: 1s
+    restart: unless-stopped
+
+  localstack:
+    image: localstack/localstack:3.4.0@sha256:54fcf172f6ff70909e1e26652c3bb4587282890aff0d02c20aa7695469476ac0
+    environment:
+      SERVICES: sqs
+      DEBUG: '0'
+    ports:
+      - '127.0.0.1:${LOCALSTACK_PORT:-4566}:4566'
+    volumes:
+      - localstack_data:/var/lib/localstack
+    healthcheck:
+      # Also warms SQS.
+      test: ['CMD-SHELL', 'awslocal sqs list-queues > /dev/null']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  localstack_data:

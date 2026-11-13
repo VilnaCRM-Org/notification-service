@@ -1,0 +1,6 @@
+# .github/zizmor.yml
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        '*': hash-pin

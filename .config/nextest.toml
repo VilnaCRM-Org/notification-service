@@ -1,0 +1,19 @@
+[profile.default]
+# The Gherkin runner is a custom harness that nextest cannot list; it runs with `cargo test`.
+default-filter = 'not binary(e2e)'
+fail-fast = false
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+[profile.ci]
+fail-fast = false
+retries = 0
+failure-output = "immediate-final"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[profile.mutants]
+# No `terminate-after`: a hanging mutant must reach the cargo-mutants timeout and count as surviving.
+fail-fast = true
+retries = 0
+slow-timeout = { period = "20s" }

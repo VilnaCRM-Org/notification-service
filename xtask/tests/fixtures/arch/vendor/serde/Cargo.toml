@@ -1,0 +1,10 @@
+[package]
+name = "serde"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.txt"
+
+[workspace]

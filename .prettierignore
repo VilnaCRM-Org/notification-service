@@ -1,0 +1,11 @@
+.github/openapi-spec/
+.github/graphql-spec/
+.sqlx/
+specs/
+.tools/
+_bmad/
+_bmad-output/
+.ralph/
+tests/CLI/bats/fixtures/
+tests/Load/
+*.md

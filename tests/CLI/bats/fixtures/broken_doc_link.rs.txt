@@ -1,0 +1,7 @@
+
+/// The planted value; its documentation links to [`NoSuchPlantedItem`], which does not exist.
+const fn planted_broken_doc_link() -> u8 {
+    1
+}
+
+const _: u8 = planted_broken_doc_link();

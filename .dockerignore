@@ -1,0 +1,30 @@
+# Version control, CI, guidance and planning: never needed by a build.
+.git/
+.github/
+.claude/
+.devcontainer/
+.githooks/
+.ralph/
+.tools/
+_bmad/
+_bmad-output/
+bmalph/
+specs/
+docs/
+# Build output and reports.
+target/
+mutants.out*/
+**/node_modules/
+# Tests that are not workspace members, and their data.
+features/
+tests/CLI/
+tests/Load/
+# Local configuration and container files.
+.env*
+*.md
+workspace.dsl
+Dockerfile
+docker-compose*.yml
+# The image tag is the toolchain; with this file in the context rustup would download three components
+# in the planner stage and again in the builder stage after every source change.
+rust-toolchain.toml

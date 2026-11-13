@@ -1,0 +1,8 @@
+plain
+a b
+literal ${PLAIN}
+x
+a#b
+q "uoted" \ end
+plain-plain
+

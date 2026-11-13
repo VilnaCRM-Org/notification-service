@@ -1,0 +1,576 @@
+name: Scheduled verification
+
+on:
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The two cargo settings the toolchain action gives every pull-request job: the clean-clone job installs the
+  # toolchain with rustup alone, and a cold build with debug information and incremental data does not fit the
+  # runner's disk (NFR34, NFR35).
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  TEST_SEED: ${{ github.run_id }}
+  PROPTEST_RNG_SEED: ${{ github.run_id }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  clean-bootstrap-ci:
+    name: Clean bootstrap and make ci
+    runs-on: ubuntu-24.04
+    # The one documented exception to the 45-minute limit: a cold build of the whole path (NFR39).
+    timeout-minutes: 75
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the seeds
+        run: |
+          {
+            echo '### Seeds'
+            echo "- TEST_SEED=${TEST_SEED}"
+            echo "- PROPTEST_RNG_SEED=${PROPTEST_RNG_SEED}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the pinned toolchain
+        run: rustup show
+
+      - name: Bootstrap
+        id: bootstrap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p target
+          make bootstrap 2>&1 | tee target/bootstrap.log
+
+      # NFR35: `make start` with images and build output present returns within 60 s. Timed before make ci, so that
+      # a dispatch on a branch, whose make ci stops at validate-configuration, measures it too.
+      - name: Stop the stack
+        id: stop
+        run: |
+          mkdir -p target
+          make stop 2>&1 | tee target/stop.log
+
+      - name: Start the stack and time it
+        id: start
+        run: |
+          mkdir -p target
+          started=$(date +%s)
+          make start 2>&1 | tee target/start.log
+          seconds=$(($(date +%s) - started))
+          line="make start: ${seconds} s (budget 60 s)"
+          echo "$line" | tee -a target/start.log
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$seconds" -gt 60 ]; then
+            echo "make start took ${seconds} s, above the budget of 60 s (NFR35)" | tee -a target/start.log >&2
+            exit 1
+          fi
+
+      - name: Run every gate
+        id: ci
+        run: |
+          mkdir -p target
+          make ci 2>&1 | tee target/ci.log
+
+      # FR68: after make bootstrap and make ci on a clean checkout git status reports no change.
+      - name: Require a clean working tree
+        id: clean
+        run: |
+          status="$(git status --porcelain)"
+          printf '%s\n' "$status" > target/git-status.log
+          if [ -n "$status" ]; then
+            printf '%s\n' "$status"
+            echo 'make bootstrap and make ci changed the working tree' >&2
+            echo 'make bootstrap and make ci changed the working tree' >> target/git-status.log
+            exit 1
+          fi
+
+      - name: Show the container logs
+        if: ${{ failure() }}
+        run: docker compose logs --no-color
+
+      - name: Upload the failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-bootstrap-ci-reports
+          path: |
+            mutants.out/
+            tests/Load/results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          BOOTSTRAP_OUTCOME: ${{ steps.bootstrap.outcome }}
+          STOP_OUTCOME: ${{ steps.stop.outcome }}
+          START_OUTCOME: ${{ steps.start.outcome }}
+          CI_OUTCOME: ${{ steps.ci.outcome }}
+          CLEAN_OUTCOME: ${{ steps.clean.outcome }}
+        run: |
+          target='the steps before make bootstrap'
+          log=''
+          if [ "$BOOTSTRAP_OUTCOME" = failure ]; then
+            target='make bootstrap'
+            log=target/bootstrap.log
+          elif [ "$STOP_OUTCOME" = failure ]; then
+            target='make stop'
+            log=target/stop.log
+          elif [ "$START_OUTCOME" = failure ]; then
+            target='make start (budget 60 s)'
+            log=target/start.log
+          elif [ "$CI_OUTCOME" = failure ]; then
+            target='make ci'
+            log=target/ci.log
+          elif [ "$CLEAN_OUTCOME" = failure ]; then
+            target='Require a clean working tree (git status --porcelain)'
+            log=target/git-status.log
+          fi
+          {
+            echo "### Failed: \`${target}\`"
+            echo "\`\`\`text"
+            if [ -n "$log" ] && [ -f "$log" ]; then tail -n 40 "$log"; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  mutation-plan:
+    name: Mutation plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache-shared-key: mutation-in-place
+          cache-save-if: false
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-mutants@27.1.0
+          fallback: none
+
+      - name: Plan the shards
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          mkdir -p target
+          scripts/ci/mutation-plan.sh 2> >(tee target/mutation-plan.log >&2) >> "$GITHUB_OUTPUT"
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        run: |
+          {
+            echo "### Failed: \`scripts/ci/mutation-plan.sh\`"
+            echo "\`\`\`text"
+            if [ -f target/mutation-plan.log ]; then tail -n 40 target/mutation-plan.log; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  mutation-shard:
+    name: Mutation shard ${{ matrix.shard }}
+    needs: mutation-plan
+    if: ${{ needs.mutation-plan.outputs.count != '0' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.mutation-plan.outputs.shards) }}
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the seeds
+        run: |
+          {
+            echo '### Seeds'
+            echo "- TEST_SEED=${TEST_SEED}"
+            echo "- PROPTEST_RNG_SEED=${PROPTEST_RNG_SEED}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache-shared-key: mutation-in-place
+          cache-save-if: ${{ github.ref == 'refs/heads/main' && matrix.index == 1 }}
+
+      - name: Install the cargo tools
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.151
+          fallback: none
+
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: sqlx-cli@0.9.0
+          fallback: cargo-binstall
+
+      - name: Run the mutation shard
+        id: mutation
+        env:
+          SHARD: ${{ matrix.shard }}
+          # cargo-mutants builds in the checkout, whose target/ the Rust cache restores and saves (NFR40).
+          MUTANTS_IN_PLACE: '1'
+        run: |
+          mkdir -p target
+          make mutation-tests MUTANTS_SHARD="$SHARD" 2>&1 | tee target/mutation-tests.log
+
+      - name: Count the third-party crates compiled
+        if: ${{ always() }}
+        run: |
+          # NFR40: compile units of third-party crates in this shard's cargo-mutants builds, 0 on a warm rerun.
+          if [ -d mutants.out/log ]; then
+            count=$(cat mutants.out/log/*.log | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^[[:space:]]+Compiling ' | grep -vc '(/' || true)
+            echo "Third-party crates compiled by cargo-mutants in this shard: ${count}"
+          fi
+
+      - name: Show the container logs
+        if: ${{ failure() }}
+        run: docker compose logs --no-color
+
+      - name: Upload the mutation output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-${{ matrix.index }}
+          path: mutants.out/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          {
+            echo "### Failed: \`make mutation-tests MUTANTS_SHARD=${SHARD}\`"
+            echo "\`\`\`text"
+            if [ -f target/mutation-tests.log ]; then tail -n 40 target/mutation-tests.log; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  mutation-tests:
+    name: Mutation tests
+    needs: [mutation-plan, mutation-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every shard
+        id: shards
+        env:
+          PLAN_RESULT: ${{ needs.mutation-plan.result }}
+          SHARD_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          if [ "$PLAN_RESULT" != success ]; then
+            echo "The mutation plan finished with: ${PLAN_RESULT}" >&2
+            exit 1
+          fi
+          case "$SHARD_RESULT" in
+            success | skipped) ;;
+            *)
+              echo "The mutation shards finished with: ${SHARD_RESULT}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          PLAN_RESULT: ${{ needs.mutation-plan.result }}
+          SHARD_RESULT: ${{ needs.mutation-shard.result }}
+        run: |
+          {
+            echo "### Failed: \`mutation-tests\` (aggregator of the mutation shards)"
+            echo "\`\`\`text"
+            echo "mutation-plan: ${PLAN_RESULT}"
+            echo "mutation-shard: ${SHARD_RESULT}"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  security-gates:
+    name: Security gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      APP_IMAGE: service-under-test:prod
+      BUILD_IMAGE: '0'
+    steps:
+      - name: Check out the full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the production image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: prod
+          load: true
+          tags: ${{ env.APP_IMAGE }}
+          cache-from: type=gha,scope=prod-image
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=prod-image,mode=max' || '' }}
+
+      - name: Scan for secrets and check the dependencies
+        id: policy
+        run: |
+          mkdir -p target
+          make secrets-scan check-security 2>&1 | tee target/security-policy.log
+
+      - name: Scan the production image
+        id: image
+        run: |
+          mkdir -p target
+          make image-scan 2>&1 | tee target/image-scan.log
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          POLICY_OUTCOME: ${{ steps.policy.outcome }}
+          IMAGE_OUTCOME: ${{ steps.image.outcome }}
+        run: |
+          target='the steps before make secrets-scan'
+          log=''
+          if [ "$POLICY_OUTCOME" = failure ]; then
+            target='make secrets-scan check-security'
+            log=target/security-policy.log
+          elif [ "$IMAGE_OUTCOME" = failure ]; then
+            target='make image-scan'
+            log=target/image-scan.log
+          fi
+          {
+            echo "### Failed: \`${target}\`"
+            echo "\`\`\`text"
+            if [ -n "$log" ] && [ -f "$log" ]; then tail -n 40 "$log"; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  code-scanning:
+    name: Code scanning (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - name: Decide whether to publish
+        id: publish
+        env:
+          SETTING: ${{ vars.CODE_SCANNING_ENABLED }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          reason=''
+          if [ "$EVENT_NAME" = pull_request ] && { [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ] || [ "$PR_AUTHOR" = 'dependabot[bot]' ]; }; then
+            reason='fork or Dependabot pull request'
+          elif [ "$SETTING" = false ]; then
+            reason='CODE_SCANNING_ENABLED is false'
+          elif [ "$SETTING" != true ]; then
+            visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+            if [ "$visibility" != public ]; then
+              reason="CODE_SCANNING_ENABLED is unset and the repository is ${visibility}"
+            fi
+          fi
+          if [ -n "$reason" ]; then
+            echo "::notice::Code scanning publication skipped: ${reason}"
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out the repository
+        if: ${{ steps.publish.outputs.publish == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialise CodeQL
+        if: ${{ steps.publish.outputs.publish == 'true' }}
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyse with CodeQL
+        if: ${{ steps.publish.outputs.publish == 'true' }}
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}
+
+      - name: Set up Rust
+        if: ${{ steps.publish.outputs.publish == 'true' && matrix.language == 'rust' }}
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache-shared-key: check
+          cache-save-if: false
+
+      - name: Install clippy-sarif
+        if: ${{ steps.publish.outputs.publish == 'true' && matrix.language == 'rust' }}
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: clippy-sarif@0.8.0
+          fallback: cargo-binstall
+
+      - name: Write the static-analysis findings as SARIF
+        id: sarif
+        if: ${{ steps.publish.outputs.publish == 'true' && matrix.language == 'rust' }}
+        run: |
+          mkdir -p target
+          make static-analysis-sarif 2>&1 | tee target/static-analysis-sarif.log
+
+      - name: Upload the static-analysis findings
+        if: ${{ steps.publish.outputs.publish == 'true' && matrix.language == 'rust' && !cancelled() }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: target/sarif/clippy.sarif
+          category: clippy
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          SARIF_OUTCOME: ${{ steps.sarif.outcome }}
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          target="the CodeQL analysis of ${LANGUAGE}"
+          log=''
+          if [ "$SARIF_OUTCOME" = failure ]; then
+            target='make static-analysis-sarif'
+            log=target/static-analysis-sarif.log
+          fi
+          {
+            echo "### Failed: \`${target}\`"
+            echo "\`\`\`text"
+            if [ -n "$log" ] && [ -f "$log" ]; then tail -n 40 "$log"; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  devcontainer-build:
+    name: Development container build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the development container
+        id: build
+        run: |
+          mkdir -p target
+          npx --yes @devcontainers/cli@0.90.0 build --workspace-folder . 2>&1 | tee target/devcontainer-build.log
+
+      # FR118: the container starts and its postCreateCommand passes, the inner container engine answers, a
+      # toolchain target works with the pinned toolchain, and compose starts the backing services through the
+      # inner engine.
+      - name: Start the development container
+        id: up
+        run: |
+          mkdir -p target
+          npx --yes @devcontainers/cli@0.90.0 up --workspace-folder . 2>&1 | tee target/devcontainer-up.log
+
+      - name: Reach the container engine inside the container
+        id: engine
+        run: |
+          mkdir -p target
+          npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . docker info 2>&1 | tee target/devcontainer-engine.log
+
+      - name: Run a toolchain target inside the container
+        id: toolchain
+        run: |
+          mkdir -p target
+          npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make format-check 2>&1 | tee target/devcontainer-toolchain.log
+
+      - name: Start the backing services through the inner engine
+        id: deps
+        run: |
+          mkdir -p target
+          npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make start-deps 2>&1 | tee target/devcontainer-deps.log
+
+      - name: Summarize the failure
+        if: ${{ failure() }}
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          UP_OUTCOME: ${{ steps.up.outcome }}
+          ENGINE_OUTCOME: ${{ steps.engine.outcome }}
+          TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          DEPS_OUTCOME: ${{ steps.deps.outcome }}
+        run: |
+          target='the steps before devcontainers build'
+          log=''
+          if [ "$BUILD_OUTCOME" = failure ]; then
+            target='devcontainers build'
+            log=target/devcontainer-build.log
+          elif [ "$UP_OUTCOME" = failure ]; then
+            target='devcontainers up (starts the container and runs its postCreateCommand)'
+            log=target/devcontainer-up.log
+          elif [ "$ENGINE_OUTCOME" = failure ]; then
+            target='devcontainers exec docker info'
+            log=target/devcontainer-engine.log
+          elif [ "$TOOLCHAIN_OUTCOME" = failure ]; then
+            target='devcontainers exec make format-check'
+            log=target/devcontainer-toolchain.log
+          elif [ "$DEPS_OUTCOME" = failure ]; then
+            target='devcontainers exec make start-deps'
+            log=target/devcontainer-deps.log
+          fi
+          {
+            echo "### Failed: \`${target}\`"
+            echo "\`\`\`text"
+            if [ -n "$log" ] && [ -f "$log" ]; then tail -n 40 "$log"; else echo 'no output captured'; fi
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

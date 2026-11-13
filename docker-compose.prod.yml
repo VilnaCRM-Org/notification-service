@@ -1,0 +1,43 @@
+# Run with an explicit env file so that the committed development .env is not read:
+#   docker compose --env-file /etc/service/prod.env -f docker-compose.yml -f docker-compose.prod.yml up --detach --wait
+services:
+  app:
+    depends_on: !override
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: prod
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
+      AWS_ENDPOINT_URL_SQS: !reset null # real SQS through the default credential chain
+      AWS_ACCESS_KEY_ID: !reset null
+      AWS_SECRET_ACCESS_KEY: !reset null
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 256M
+          pids: 256
+        reservations:
+          memory: 64M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+
+  migrate:
+    depends_on: !reset null
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+
+  database:
+    profiles: [local]
+
+  localstack:
+    profiles: [local]

@@ -1,0 +1,5 @@
+# Accepted image findings: one vulnerability identifier per line, with the comment lines directly above it.
+# Entry format:
+#   # <date of acceptance>: <reason>. Review by <review date, at most three months later>.
+#   <identifier, for example CVE-2026-00000>
+# A fix is preferred; an entry is only for a finding that has no fix yet.

@@ -1,0 +1,23 @@
+# Fixture workspace of the architecture gate: it sits outside the members of the real workspace and plants
+# one violation per rule (see ../valid.toml). It is only ever read with `cargo metadata`, never compiled.
+[workspace]
+resolver = "3"
+members = [
+  "crates/audit/domain",
+  "crates/billing/application",
+  "crates/billing/domain",
+  "crates/ledger/domain",
+  "crates/misplaced/core",
+  "crates/nolints/domain",
+  "crates/overlap/domain",
+  "crates/reports/application",
+  "crates/shared/domain",
+  "crates/shop/application",
+  "crates/shop/domain",
+  "crates/shop/infrastructure",
+  "crates/stray",
+  "crates/test-support",
+]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

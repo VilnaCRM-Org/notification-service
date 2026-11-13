@@ -1,0 +1,9 @@
+name: Planted
+on: push
+jobs:
+  planted:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "${{ github.event.no_such_context.value }}"
+        shell: no-such-shell
+      - uses:

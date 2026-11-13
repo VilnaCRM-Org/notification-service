@@ -1,0 +1,6 @@
+
+#[test]
+fn planted_failing_seeded_test() {
+    let rng = test_support::seed::TestRng::from_env();
+    panic!("planted by the Bats negative test (seed {})", rng.seed());
+}

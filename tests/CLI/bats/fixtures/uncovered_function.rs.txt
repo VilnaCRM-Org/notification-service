@@ -1,0 +1,5 @@
+
+#[expect(dead_code, reason = "planted by the Bats negative test")]
+fn planted(flag: bool) -> bool {
+    flag
+}

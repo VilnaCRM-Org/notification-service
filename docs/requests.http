@@ -1,0 +1,54 @@
+# Request collection for the service, in the plain-text .http format that
+# editors such as VS Code (REST Client) and JetBrains IDEs run.
+# Start the service first (make start), then send a request.
+
+@baseUrl = http://localhost:8081
+
+### Liveness probe: 200 with the body "pong"
+GET {{baseUrl}}/ping
+
+### Health check: 204 without a body, or a 500 problem document that lists the failing dependencies
+GET {{baseUrl}}/api/health
+
+### List the resources, newest first; page starts at 1, itemsPerPage is 1 to 100 (a bare JSON array)
+GET {{baseUrl}}/api/example_api_resources?page=1&itemsPerPage=30
+
+### Create a resource: 201 with the resource and a location header; 422 when validation fails
+POST {{baseUrl}}/api/example_api_resources
+Content-Type: application/json
+
+{
+  "name": "Example name",
+  "description": "Example description"
+}
+
+### Retrieve one resource by identifier: 200, 400 for an invalid identifier, 404 when it does not exist
+# Replace the identifier with the id returned by the create request.
+GET {{baseUrl}}/api/example_api_resources/01a1c6b5-cb86-7134-868a-7608036facfe
+
+### GraphQL query: one page of resources (page and itemsPerPage have defaults)
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+
+{
+  "query": "query ($page: Int!, $itemsPerPage: Int!) { exampleApiResources(page: $page, itemsPerPage: $itemsPerPage) { id name description } }",
+  "variables": { "page": 1, "itemsPerPage": 30 }
+}
+
+### GraphQL query: one resource by id (null when it does not exist)
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+
+{
+  "query": "query ($id: ID!) { exampleApiResource(id: $id) { id name description } }",
+  "variables": { "id": "01a1c6b5-cb86-7134-868a-7608036facfe" }
+}
+
+### GraphQL mutation: create a resource
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+
+{
+  "query": "mutation ($input: CreateExampleApiResourceInput!) { createExampleApiResource(input: $input) { id name description } }",
+  "variables": { "input": { "name": "Example name", "description": "Example description" } }
+}

@@ -1,0 +1,14 @@
+# Always used with its own project name and an explicit file list (see DD-19).
+services:
+  app:
+    environment:
+      APP_ENV: test
+    ports: !override
+      - '127.0.0.1:${LOAD_TEST_APP_PORT:-18081}:8081'
+    restart: 'no'
+  database:
+    ports: !reset []
+    restart: 'no'
+  localstack:
+    ports: !reset []
+    restart: 'no'

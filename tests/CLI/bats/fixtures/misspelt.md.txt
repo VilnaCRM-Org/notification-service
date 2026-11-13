@@ -1,0 +1,3 @@
+# Planted
+
+This sentence has a misspelt word: recieve.

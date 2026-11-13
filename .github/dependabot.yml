@@ -1,0 +1,41 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    cooldown: { default-days: 3 }
+    groups:
+      cargo: { patterns: ['*'] }
+    commit-message: { prefix: build, include: scope }
+  - package-ecosystem: rust-toolchain
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      toolchain: { patterns: ['*'] }
+    commit-message: { prefix: chore, include: scope }
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      actions: { patterns: ['*'] }
+    commit-message: { prefix: ci, include: scope }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      docker: { patterns: ['*'] }
+    commit-message: { prefix: build, include: scope }
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    groups:
+      compose: { patterns: ['*'] }
+    ignore:
+      - dependency-name: localstack/localstack # frozen at the tokenless community tag 3.4.0
+    commit-message: { prefix: build, include: scope }
+  - package-ecosystem: npm
+    directory: /tests/Load
+    schedule: { interval: monthly }
+    groups:
+      load-test-tooling: { patterns: ['*'] }
+    commit-message: { prefix: chore, include: scope }

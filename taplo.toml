@@ -1,0 +1,17 @@
+# taplo.toml
+include = ["**/*.toml"]
+exclude = [
+    "target/**",
+    "mutants.out*/**",
+    "**/node_modules/**",
+    ".sqlx/**",
+    ".tools/**",
+    "_bmad/**",
+    ".ralph/**",
+    "xtask/tests/fixtures/**",
+    "tests/CLI/bats/fixtures/**",
+]
+
+[formatting]
+column_width = 100
+indent_string = "    "

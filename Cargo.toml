@@ -1,0 +1,240 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/company-subdomain/some-module/application",
+    "crates/company-subdomain/some-module/domain",
+    "crates/company-subdomain/some-module/infrastructure",
+    "crates/internal/health-check/application",
+    "crates/internal/health-check/domain",
+    "crates/internal/health-check/infrastructure",
+    "crates/service",
+    "crates/shared/application",
+    "crates/shared/domain",
+    "crates/shared/infrastructure",
+    "tests/e2e",
+    "tests/support",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# The same full version as `rust-toolchain.toml` and the builder image tag (NFR13, G31 rule (c)).
+rust-version = "1.99.1"
+license = "CC0-1.0"
+publish = false
+# Service identity: the OpenAPI title is "<description> API" and the contact URL is `repository`.
+description = "Rust Service Template"
+repository = "https://github.com/VilnaCRM-Org/rust-service-template"
+
+[workspace.dependencies]
+# Workspace crates
+health-check-application = { path = "crates/internal/health-check/application" }
+health-check-domain = { path = "crates/internal/health-check/domain" }
+health-check-infrastructure = { path = "crates/internal/health-check/infrastructure" }
+service = { path = "crates/service" }
+shared-application = { path = "crates/shared/application" }
+shared-domain = { path = "crates/shared/domain" }
+shared-infrastructure = { path = "crates/shared/infrastructure" }
+some-module-application = { path = "crates/company-subdomain/some-module/application" }
+some-module-domain = { path = "crates/company-subdomain/some-module/domain" }
+some-module-infrastructure = { path = "crates/company-subdomain/some-module/infrastructure" }
+test-support = { path = "tests/support" }
+
+# Runtime
+async-graphql = { version = "7.2.1", default-features = false, features = ["uuid"] }
+async-trait = "0.1.92"
+aws-config = { version = "1.13.1", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
+aws-sdk-sqs = { version = "1.120.0", default-features = false, features = [
+    "rt-tokio",
+    "default-https-client",
+] }
+axum = { version = "0.8.9", features = ["macros"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dotenvy = "0.15.7"
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+humantime = "2.4.0"
+moka = { version = "0.12.16", features = ["future"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlx = { version = "0.9.0", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-aws-lc-rs",
+    "postgres",
+    "macros",
+    "migrate",
+    "uuid",
+] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "signal",
+    "time",
+    "sync",
+] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.1", features = ["trace", "request-id", "catch-panic", "set-header"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
+utoipa = { version = "6.0.0", features = ["axum_extras", "uuid", "yaml"] }
+utoipa-axum = "0.3.0"
+utoipa-swagger-ui = { version = "10.0.2", features = ["vendored"] }
+uuid = { version = "1.29.2", default-features = false, features = ["std"] }
+validator = { version = "0.21.0", features = ["derive"] }
+
+# Tests
+aws-smithy-mocks = "0.3.0"
+cucumber = "0.23.0"
+fake = { version = "5.1.0", features = ["uuid"] }
+http-body-util = "0.1.5"
+proptest = "1.12.0"
+rand = "0.10.3"
+rstest = "0.28.0"
+
+# Tooling (xtask)
+cargo_metadata = "0.23.1"
+toml = "1.2.1"
+toml_edit = "0.25.19"
+
+[profile.release]
+strip = "symbols"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+non_ascii_idents = "forbid"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+unused_import_braces = "warn"
+unused_macro_rules = "warn"
+single_use_lifetimes = "warn"
+redundant_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unnameable_types = "warn"
+let_underscore_drop = "warn"
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+explicit_outlives_requirements = "warn"
+ambiguous_negative_literals = "warn"
+closure_returning_async_block = "warn"
+impl_trait_redundant_captures = "warn"
+if_let_rescope = "warn"
+future_incompatible = { level = "warn", priority = -1 }
+keyword_idents = { level = "warn", priority = -1 }
+let_underscore = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+refining_impl_trait = { level = "warn", priority = -1 }
+rust_2018_idioms = { level = "warn", priority = -1 }
+unused = { level = "warn", priority = -1 }
+# cargo-llvm-cov sets cfg(coverage); declare it so `unexpected_cfgs` stays quiet.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)', 'cfg(coverage_nightly)'] }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "warn"
+private_intra_doc_links = "warn"
+invalid_codeblock_attributes = "warn"
+invalid_html_tags = "warn"
+invalid_rust_codeblocks = "warn"
+bare_urls = "warn"
+redundant_explicit_links = "warn"
+unescaped_backticks = "warn"
+missing_crate_level_docs = "warn"
+
+[workspace.lints.clippy]
+# Whole groups (priority -1 so individual lints below can override them).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+# Group opt-outs, each with a recorded reason.
+multiple_crate_versions = "allow" # owned by cargo-deny `bans.multiple-versions`
+redundant_pub_crate = "allow"     # contradicts rustc `unreachable_pub`, which wins
+# Restriction lints: cherry-picked, never the whole group.
+# -- no panicking paths in production code
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+indexing_slicing = "warn"
+string_slice = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+panic_in_result_fn = "warn"
+arithmetic_side_effects = "warn"
+integer_division_remainder_used = "allow"
+float_arithmetic = "allow"
+# -- no silent lossy conversions
+as_conversions = "warn"
+as_underscore = "warn"
+lossy_float_literal = "warn"
+float_cmp_const = "warn"
+# -- no debugging leftovers, no ad-hoc output or process control
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+use_debug = "warn"
+exit = "warn"
+mem_forget = "warn"
+# -- error handling discipline
+map_err_ignore = "warn"
+let_underscore_must_use = "warn"
+let_underscore_untyped = "warn"
+unused_result_ok = "warn"
+try_err = "warn"
+error_impl_error = "warn"
+# -- suppressions must be justified and self-expiring
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+# -- structure and readability
+absolute_paths = "warn"
+clone_on_ref_ptr = "warn"
+create_dir = "warn"
+empty_drop = "warn"
+empty_enum_variants_with_brackets = "warn"
+empty_structs_with_brackets = "warn"
+filetype_is_file = "warn"
+fn_to_numeric_cast_any = "warn"
+if_then_some_else_none = "warn"
+impl_trait_in_params = "warn"
+infinite_loop = "warn"
+iter_over_hash_type = "warn"
+large_include_file = "warn"
+mixed_read_write_in_expression = "warn"
+mod_module_files = "warn"
+multiple_inherent_impl = "warn"
+mutex_atomic = "warn"
+needless_raw_strings = "warn"
+partial_pub_fields = "warn"
+pathbuf_init_then_push = "warn"
+pub_without_shorthand = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+same_name_method = "warn"
+semicolon_inside_block = "warn"
+str_to_string = "warn"
+string_add = "warn"
+string_lit_chars_any = "warn"
+suspicious_xor_used_as_pow = "warn"
+undocumented_unsafe_blocks = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unneeded_field_pattern = "warn"
+unused_trait_names = "warn"
+verbose_file_reads = "warn"
+wildcard_enum_match_arm = "warn"
+# -- complexity budget (thresholds live in clippy.toml)
+cognitive_complexity = "warn"
+excessive_nesting = "warn"

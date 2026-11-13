@@ -1,0 +1,5 @@
+
+#[test]
+fn planted_failing_unit_test() {
+    assert_eq!(1 + 1, 3, "planted by the Bats negative test");
+}

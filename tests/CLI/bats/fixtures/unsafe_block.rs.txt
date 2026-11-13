@@ -1,0 +1,10 @@
+
+/// The first planted value, read through an `unsafe` block. The block is documented, so the lint for undocumented
+/// blocks is satisfied, and the expectation would lift a `deny` level, so only `forbid` rejects the block.
+#[expect(unsafe_code, reason = "planted by the Bats negative test")]
+const fn planted_unsafe_block(values: &[u8; 2]) -> u8 {
+    // SAFETY: the pointer comes from a live reference to an array of two elements, so its first element is readable.
+    unsafe { *values.as_ptr() }
+}
+
+const _: fn(&[u8; 2]) -> u8 = planted_unsafe_block;

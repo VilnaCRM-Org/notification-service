@@ -1,0 +1,10 @@
+SPACED=a b
+QUOTE=a"b
+SLASH=a\b
+DOLLAR=a$b
+DEFAULT=${MISSING:-x}
+OPEN="no end
+TRAIL="x" y
+ESCAPE="x\q"
+COMMENT= # c
+NOEQUALS

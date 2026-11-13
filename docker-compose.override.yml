@@ -1,0 +1,69 @@
+x-dev: &dev
+  image: ${DEV_IMAGE:-service:dev}
+  build:
+    target: dev
+    secrets:
+      - github_token
+  user: '${HOST_UID:-1000}:${HOST_GID:-1000}'
+  read_only: false
+  volumes:
+    - ./:/app
+    - cargo_target:/cargo-target # outside the bind mount: Docker creates nothing in the checkout
+    - cargo_home:/cargo
+
+services:
+  app: # no command: the dev image's CMD (watchexec) applies
+    <<: *dev
+    environment:
+      IN_DEV_CONTAINER: '1'
+      # The services inside the compose network, at their in-network ports: DB_PORT and LOCALSTACK_PORT of .env
+      # are the published host ports, and the URLs of .env and .env.test are built from these four values.
+      DB_HOST: database
+      DB_PORT: '5432'
+      LOCALSTACK_HOST: localstack
+      LOCALSTACK_PORT: '4566'
+      # Removed so that the binary reads .env and the test targets read .env.test.
+      APP_ENV: !reset null
+      LOG_LEVEL: !reset null
+      DATABASE_URL: !reset null
+      AWS_ENDPOINT_URL_SQS: !reset null
+    ports: !override
+      - '127.0.0.1:${APP_PORT:-8081}:8081'
+    healthcheck:
+      test: ['CMD', '/cargo-target/debug/service', 'healthcheck']
+      start_period: 60s # the first compile happens in the migrate step
+      start_interval: 5s
+
+  migrate:
+    <<: *dev
+    command: ['cargo', 'run', '--locked', '--quiet', '-p', 'service', '--', 'migrate']
+    environment:
+      # The database inside the compose network, at its in-network port (DB_PORT of .env is the host port).
+      DB_HOST: database
+      DB_PORT: '5432'
+      DATABASE_URL: !reset null
+
+  localstack:
+    environment:
+      SERVICES: sqs,ec2,s3,iam,sts # ec2, s3, iam, sts: only for `make aws-load-tests LOCAL_MODE_ENV=true`
+      DEBUG: '1'
+
+  structurizr:
+    image: structurizr/structurizr:2026.10.26@sha256:8aebde645a7cc8d3b9e1e774cd6d75a84ce45d74ae70eb783876182fe7db31a2
+    command: ['local']
+    profiles: [docs]
+    ports:
+      - '127.0.0.1:${STRUCTURIZR_PORT:-8080}:8080'
+    volumes:
+      - structurizr_data:/usr/local/structurizr
+      - ./workspace.dsl:/usr/local/structurizr/workspace.dsl:ro
+    restart: unless-stopped
+
+volumes:
+  cargo_target:
+  cargo_home:
+  structurizr_data:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

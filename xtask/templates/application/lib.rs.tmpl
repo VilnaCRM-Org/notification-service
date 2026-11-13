@@ -1,0 +1,6 @@
+//! Bounded context `{{context}}`, application layer: commands, queries and their handlers, event
+//! subscribers, application errors and the API-facing adapters (`http` and `graphql`).
+//!
+//! This crate depends on the domain layer of its own context and of the shared kernel, never on the
+//! infrastructure layer. The use-case modules (`command`, `query`, `subscriber`, `error`) do not
+//! import `axum`, `utoipa` or `async_graphql`; only `http` and `graphql` may.

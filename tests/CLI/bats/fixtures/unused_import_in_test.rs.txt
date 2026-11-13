@@ -1,0 +1,5 @@
+
+#[test]
+fn planted_test_with_unused_import() {
+    use std::collections::HashMap;
+}
