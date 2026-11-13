@@ -56,7 +56,7 @@ ENV CARGO_INCREMENTAL=1 \
 EXPOSE 8081
 CMD ["watchexec", "--restart", "--stop-signal", "SIGTERM", "--watch", "crates", "--watch", "migrations", "--watch", "Cargo.toml", "--watch", "Cargo.lock", "--", "cargo", "run", "--locked", "-p", "service", "--", "serve"]
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS prod
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS prod
 LABEL org.opencontainers.image.licenses="CC0-1.0"
 COPY --from=builder /out/service /app/service
 ENV APP_ENV=prod \
