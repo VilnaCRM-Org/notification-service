@@ -52,3 +52,6 @@ crates/service/src/graphql/schema.rs
 crates/service/src/graphql/schema/
 tests/support/
 tests/e2e/
+.github/workflows/template-sync-pat.yml
+.github/TEMPLATE_SYNC_PAT.md
+docs/extension-seams.md

@@ -24,8 +24,8 @@ rust-version = "1.99.1"
 license = "CC0-1.0"
 publish = false
 # Service identity: the OpenAPI title is "<description> API" and the contact URL is `repository`.
-description = "Rust Service Template"
-repository = "https://github.com/VilnaCRM-Org/rust-service-template"
+description = "VilnaCRM Notification Service"
+repository = "https://github.com/VilnaCRM-Org/notification-service"
 
 [workspace.dependencies]
 # Workspace crates

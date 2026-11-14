@@ -1,16 +1,16 @@
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://supportukrainenow.org/)
 
-# Rust Service Template
+# VilnaCRM Notification Service
 
-[![Quality](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/quality.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/quality.yml)
-[![Tests](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/tests.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/tests.yml)
-[![Contracts](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/contracts.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/contracts.yml)
-[![Security](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/security.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/security.yml)
-[![codecov](https://codecov.io/gh/VilnaCRM-Org/rust-service-template/graph/badge.svg)](https://codecov.io/gh/VilnaCRM-Org/rust-service-template)
-[![Latest release](https://img.shields.io/github/v/release/VilnaCRM-Org/rust-service-template)](https://github.com/VilnaCRM-Org/rust-service-template/releases/latest)
-[![License](https://img.shields.io/github/license/VilnaCRM-Org/rust-service-template)](LICENSE)
+[![Quality](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/quality.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/quality.yml)
+[![Tests](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/tests.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/tests.yml)
+[![Contracts](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/contracts.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/contracts.yml)
+[![Security](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/security.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/security.yml)
+[![codecov](https://codecov.io/gh/VilnaCRM-Org/notification-service/graph/badge.svg)](https://codecov.io/gh/VilnaCRM-Org/notification-service)
+[![Latest release](https://img.shields.io/github/v/release/VilnaCRM-Org/notification-service)](https://github.com/VilnaCRM-Org/notification-service/releases/latest)
+[![License](https://img.shields.io/github/license/VilnaCRM-Org/notification-service)](LICENSE)
 
-`rust-service-template` is the VilnaCRM baseline for backend services written in Rust. It is the Rust counterpart of `php-service-template`: a Cargo workspace with one crate per bounded-context layer, a REST and GraphQL API on axum, PostgreSQL through sqlx, contract snapshots, architecture guards, quality gates behind one command surface, and guidance for AI coding assistants. A downstream service inherits the platform concerns instead of rebuilding them.
+Real-time event delivery hub for VilnaCRM frontends over Server-Sent Events and WebSocket
 
 ## Baseline
 
