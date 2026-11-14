@@ -153,7 +153,7 @@ Spelling note: Mercure's query parameter is `lastEventID`; the design fixes `las
 
 > Assumption: the advisory-lock key is one documented constant of `event-stream-infrastructure`; no other code in the service takes advisory locks.
 
-> Assumption: the example context `company-subdomain/some-module` and its table stay untouched.
+> Assumption: the code, the API and the table of the example context `company-subdomain/some-module` stay untouched. Its migration test is narrowed to its own table, because the new migrations join the set that the test read as a whole.
 
 ## Open questions
 
