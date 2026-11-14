@@ -322,7 +322,7 @@ The service sets no limit per client in this issue: none on the connections per 
 
 | Message | Level | Fields | Written when |
 | --- | --- | --- | --- |
-| `leadership changed` | `info` | node id, role, leader, term | the role or the leader of the node changed |
+| `leadership changed` | `info` | node id, role, leader, term | an election round changed the role or the leader of the node |
 | `lease store failed` | `warn` | the error chain | a lease call failed or was cut; the node is follower from then on (FR-19) |
 | `subscriber evicted` | `warn` | transport, number of types, last sequence | a WebSocket was disconnected because a write to it missed its deadline (FR-22). This entry is best effort: the send bound of the operating system usually ends a stalled connection first, and that end writes no entry, for a WebSocket and for an SSE response alike |
 | `subscribers fell behind` | `warn` | their number | once per relay page in which at least one subscriber fell behind (FR-22) |

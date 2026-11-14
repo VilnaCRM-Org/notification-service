@@ -740,6 +740,7 @@ pub async fn ws(State(state): State<EventStreamState>, headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>) -> Result<Response, Problem>;
 ```
 
+- Extractor check: the allowed list of the extractor-check test of this crate (`handlers_use_only_the_problem_aware_extractors`, written in story 1.1) is `State<EventStreamState>` and `ValidatedQuery<`; story 4.3 adds `HeaderMap` and story 4.4 adds `Result<WebSocketUpgrade, WebSocketUpgradeRejection>`. Neither extraction can be rejected, so every rejection of the two handlers is still a problem; the cases of the test that plant a violation stay.
 - The two parameter structs derive `Validate` without a field rule: `ValidatedQuery` gives the problem-shaped 400 of a query that cannot be parsed (a missing `types` on the SSE route), and `parse_types` gives the 422.
 - One typed core, `parse_names`, serves both callers, and each caller maps `TypesError` to its own answer. The limit of 100 counts distinct names everywhere (FR-4: a repeated name counts once).
 
@@ -1002,7 +1003,7 @@ The handler reads `state.status.borrow()` and maps it; `term` is 0 while no roun
 Contract of `Elector`, which "Election Algorithm" and the loops of the composition root rely on:
 
 - `campaign` makes exactly one call of `LeaseStore::acquire_or_renew`, bounded by `call_timeout`, and publishes exactly one status. The elector keeps no state besides the watch channel, so a `campaign` that is dropped before it ends (the elect loop is cancelled at shutdown) changes nothing on the node: the status stays the last published one. Its statement may still have run on the database.
-- `resign` reads the published status. Role `Leader`: one call of `release`, bounded by `call_timeout`; a failure or a timeout is logged as `lease store failed`, and the lease then ends by its expiry. Role `Follower`: no store call, so a follower stops without touching the database. In both cases `resign` publishes follower with no leader and the last term seen.
+- `resign` reads the published status. Role `Leader`: one call of `release`, bounded by `call_timeout`; a failure or a timeout is logged as `lease store failed`, and the lease then ends by its expiry. Role `Follower`: no store call, so a follower stops without touching the database. In both cases `resign` publishes follower with no leader and the last term seen, and it writes no `leadership changed` entry: only `campaign` writes that entry.
 - A node whose `campaign` is never called keeps the initial status. That is the permanent state of a node without an event source ("Election Algorithm", who campaigns).
 
 Tests of the crate (unit, `#[tokio::test(start_paused = true)]`, `InMemoryLeaseStore` unless stated):
@@ -2077,7 +2078,7 @@ Who campaigns. Only a node that can ingest takes part in the election: the compo
 3. Error or timeout: log `lease store failed` at warn with the error chain; status `{ role: Follower, leader: None, term: the last term seen }`. The node steps down at once, which is the safe direction (FR-19).
 4. Publish with `watch::Sender::send_replace`; when the role or the leader changed, log `leadership changed` at info with node id, role, leader and term.
 
-`Elector::resign()`: when the published role is leader, `timeout(call_timeout, store.release(node))` (a failure is logged as `lease store failed`; the lease then ends by its expiry); when it is follower, no store call. Then publish follower with no leader. A `campaign` that the shutdown cancelled while the node was follower may have taken the lease on the database without the node knowing; `resign` does not release it, and the lease ends by its expiry like that of a crashed leader.
+`Elector::resign()`: when the published role is leader, `timeout(call_timeout, store.release(node))` (a failure is logged as `lease store failed`; the lease then ends by its expiry); when it is follower, no store call. Then publish follower with no leader. `resign` writes no `leadership changed` entry; only `campaign` writes it. A `campaign` that the shutdown cancelled while the node was follower may have taken the lease on the database without the node knowing; `resign` does not release it, and the lease ends by its expiry like that of a crashed leader.
 
 Timing. `T = CLUSTER_LEASE_TTL`, `R = CLUSTER_RENEW_INTERVAL`. Two facts of the composition root carry the bounds: the elect loop runs one `campaign` and then pauses `R`, and every lease call is cut after `call_timeout = R`. `d` is the time one lease call takes from its start to its answer, `0 <= d <= R`; it is a few milliseconds while the database is healthy.
 
