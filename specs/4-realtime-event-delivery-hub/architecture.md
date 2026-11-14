@@ -35,14 +35,14 @@ This document turns `prd.md` of this bundle and the design input of 2026-11-14 (
 
 ## Constraints
 
-(a) Commit convention: commit each story with the hooks active as `<type>(#4): story N.M <title>` (type one of feat, fix, refactor, build, chore, ci, docs, style, perf, test). Stay on the checked-out feature branch and never commit on `main`; never push, Ralph never pushes and the plugin command pushes; never bypass a hook.
+(a) Commit convention: commit each story with the hooks active as `<type>(#4): story N.M <title>` (type one of feat, fix, refactor, build, chore, ci, docs, style, perf, test). Stay on the checked-out feature branch and never commit on `main`; never push, Ralph never pushes and the plugin command pushes; never bypass a hook. Story 3.1 is a maintainer pull request against `main`, merged before story 3.2; Epic 5 and story 6.1 run in an approved operator session.
 
 (b) Story dispatch: a story whose `Depends on:` stories are done is independent.
 When the rust-backend-sdlc:rust-implementer agent is available, independent stories may run as parallel subagents under the DB rule; otherwise implement stories sequentially under the same DB rule.
 DB rule: parallel agents run only the DB-free targets `make.format` (make format), `make.lint_code` (make lint-code), `make.unit_tests` (make unit-tests), `make.architecture` (make architecture) and `make.complexity` (make complexity); one serialized verify step at a time runs the DB-backed targets `make.setup_test_db` (make setup-test-db), `make.integration_tests` (make integration-tests), `make.tests_with_coverage` (make tests-with-coverage), `make.e2e_tests` (make e2e-tests) and `make.sqlx_prepare` (make sqlx-prepare). A target that reads not available is skipped and reported.
 
 - After the PostgreSQL removal story, make.setup_test_db and make.sqlx_prepare read not available: capability absent; the Kafka-backed targets stay in the serialized step (one shared broker).
-- Protected: an item of `protected-config.toml` changes only in the story that names it, only after the maintainer's approval (label approved-config-change, session with ALLOW_PROTECTED_CONFIG_EDIT=1), never to make a check pass; example routes go only with approved-breaking-change.
+- Protected: the implementer never edits a protected path or the profile. Story 3.1 (maintainer pull request, approved-config-change) puts the feature's allow-list entries in `main`; the removal's edits are made by an operator session with ALLOW_PROTECTED_CONFIG_EDIT=1, never to make a check pass; example routes go only with approved-breaking-change.
 - No suppression: no `#[allow]`, `#[mutants::skip]`, `#[coverage(off)]` or coverage or mutation exclusion; `#[expect]` only with a reason.
 - Tools only through make targets; never cargo, docker or a script directly.
 - Placement: new code only in `crates/notification/event-stream/{domain,application,infrastructure}` and `crates/service`; event-stream and health-check never depend on each other.
@@ -66,7 +66,7 @@ What this change adds:
 - one supervised background loop in the composition root, the tail of the topic, and a hub that fans each event out to the local subscribers;
 - a memory window of recent events per node and a replay from Kafka below it;
 - two documented REST operations (`GET /api/event-types`, `GET /api/events/status`), two GraphQL queries (`eventTypes`, `eventStreamStatus`), two undocumented streaming routes (`GET /api/events/stream`, `GET /api/events/ws`), and a fourth readiness probe;
-- fifteen configuration variables (FR-29), one Kafka broker in the compose environments and CI, a K6 scenario with a publisher;
+- twenty-three configuration variables (FR-29), one Kafka broker in the compose environments and CI, a K6 scenario with a publisher;
 - the removal of PostgreSQL and of the example context, as the last stories, after approval.
 
 Data flow on every node:
@@ -74,7 +74,7 @@ Data flow on every node:
 ```text
 producers --> Kafka topic (1 partition) --+--> node A: TailEvents --> Window (memory) --> Hub --> queue per subscriber --> SSE / WebSocket
                                           +--> node B: TailEvents --> Window --> Hub --> ...
-                                          +--> any node: TopicReplay (4 permits) <-- Subscription below its window
+                                          +--> any node: TopicReplay (EVENT_REPLAY_PERMITS) <-- Subscription below its window
 ```
 
 Every node reads the whole topic without a consumer group, keeps its position in memory and filters events against its own subscribers. There is no leader, no election, no lease, no lock, no link between nodes and no shared state besides Kafka (FR-22). The wire id of an event is its Kafka offset plus 1 and is the same on every node, so a client resumes anywhere (FR-12).
@@ -92,7 +92,7 @@ Each fact below was read in the source or probed, as the fact files of this re-p
    - `poll` never reports a broker outage: stopped, killed or hung broker, it returns `Ok(empty)` (probes 08 to 11); it is bounded by the request time-out, not by its argument (probe 09). Only `fetch_watermarks` returns the error. After an unclean outage the internal backoff (up to 30 s, not configurable) delayed new records by about 20 s; a `seek` to the own position brought them in 0.12 s to 0.48 s (probe 11).
    - With `AutoOffsetReset::None` a position below the log start makes every `poll` return `Err(NoOffset)` (probe 04). A seek above the end is silently rewound to the end (probe 04). Under read-committed the end is the last stable offset; transaction markers and aborted records take offsets, so offsets are not dense, and `position()` moves past them (probe 06).
    - A missing topic: `fetch_metadata` returns `Ok` with no topic, `assign` and `poll` succeed, `fetch_watermarks` fails (probe 05). The client never asks the broker to create a topic (`allow_auto_create_topics` false, probe 05).
-   - A batch that cannot be decoded makes `poll` return `Err(Protocol { .. })` on every call until the application seeks past it (`fetcher/mod.rs:36-68`; not probed).
+   - A batch that cannot be decoded makes `poll` return `Err(Protocol { .. })` on every call until the application seeks past it (`fetcher/mod.rs:36-68`; not probed). The service maps it to `Unavailable` and never seeks past it (design brief, open point 1).
    - Fetch limits are soft: a 2 MiB record was delivered with a 1 KiB partition limit (probe 14). All five compression codecs decode without features (probe 13).
    - Errors are `#[non_exhaustive]` (`error.rs:54`); the adapter tests them with `matches!`, never with `match`, because of `wildcard_enum_match_arm`.
    - Security (source, read for this document in `src/auth/mod.rs`): `AuthConfig::plaintext()` (:979), `AuthConfig::ssl(TlsConfig::new())` (:987, :715), `AuthConfig::sasl_plain(user, password)` (:1031), `sasl_scram_sha256` (:1042), `sasl_scram_sha512` (:1053), and `.with_tls(TlsConfig)` turns a SASL plaintext configuration into `SASL_SSL` (:1015-1018). Not probed against a broker.
@@ -112,7 +112,7 @@ Created with `make.new_context` (`group=notification context=event-stream`): `cr
 
 ### Domain crate
 
-Manifest: `async-trait`, `shared-domain`, `thiserror`, `uuid`; dev `proptest`, `rstest`. No I/O, no tokio, no serde (the domain allow-list: `async-trait`, `thiserror`, `uuid`).
+Manifest: `async-trait`, `shared-domain`, `thiserror`, `uuid`; dev `proptest`, `rstest`. Story 1.1 adds only `thiserror` (and the dev entries); story 2.1 adds the other three with their first use and the `workspace.dsl` relationship to `shared-domain`. No I/O, no tokio, no serde (the domain allow-list: `async-trait`, `thiserror`, `uuid`).
 
 | File under `crates/notification/event-stream/domain/src/` | Content |
 | --- | --- |
@@ -217,7 +217,7 @@ impl InvalidEvent { /// `length`, `pattern`, `range`.
 pub struct InvalidCursor;
 ```
 
-`Uuid` is `shared_domain::Uuid` (re-exported `uuid::Uuid`). Arithmetic is written with `saturating_*` (lint `arithmetic_side_effects`).
+`Uuid` is `uuid::Uuid` (on the domain and application allow-lists); the newtype `shared_domain::Uuid` is not used, because its `parse` accepts four forms. Arithmetic is written with `saturating_*` (lint `arithmetic_side_effects`).
 
 > Assumption: `StoredEvent` carries the encoded event object as text, not the parsed members. The domain may not use `serde_json`, the window and the replay pages hold events for many connections, and every transport writes exactly this object; parsing once and keeping the text makes the encoding cost of NFR-2 one serialisation per event per node.
 
@@ -230,8 +230,6 @@ pub enum TopicError {
     #[error("the topic is unavailable")] Unavailable(#[source] BoxError),
     /// The requested position is below the log start; `earliest` is the log start read just now.
     #[error("the position is below the earliest retained offset")] BelowEarliest { earliest: Cursor },
-    /// The record batch at `at` cannot be decoded by the client.
-    #[error("the record batch cannot be decoded")] Undecodable { at: Cursor },
 }
 
 /// One record of the partition; key and headers are not carried (D4).
@@ -271,8 +269,7 @@ Rules every adapter of these ports keeps (the fakes of `tests/support` keep them
 2. A call never waits without bound: it returns or fails with `Unavailable` within the adapter's time limit.
 3. A position below the log start is reported as `BelowEarliest`, never skipped silently.
 4. All three traits are dyn-compatible (`&self` or `&mut self`, no generic method) and used as `Arc<dyn TopicProbe>`, `Box<dyn TopicTail>` (one owner, the tail loop) and `Arc<dyn TopicReplay>`.
-
-> Assumption: the port has a third error, `Undecodable { at }`, beyond the two of the design brief. FR-19 requires the tail to skip an undecodable batch, log it with the reason `undecodable batch` and count it once; without a variant of its own the application cannot tell it from an outage, which must not skip anything.
+5. A record batch the client cannot decode is `Unavailable`, like every other client error: nothing is skipped (design brief, open point 1).
 
 ### Application crate
 
@@ -286,7 +283,7 @@ Manifest: `async-graphql`, `async-trait`, `axum` (feature `ws` through the works
 | `query.rs`, `query/list_event_types.rs` | `EventTypeView`, `ListEventTypes`, `ListEventTypesHandler` |
 | `envelope.rs` | `Envelope`, `RejectReason`, `parse_event` |
 | `window.rs` | `Window`, `WindowRead` |
-| `tail.rs` | `EventPublisher`, `TailEvents`, `TailSettings`, `TailState`, `TailFault`, `RoundFailed`, constants |
+| `tail.rs` | `EventPublisher`, `TailEvents`, `TailPorts`, `TailSettings`, `TailState`, `TopicFault`, `RoundFailed`, `OBSERVE_EVERY` |
 | `status.rs` | `NodeStatus`, `NodeState`, `StartReason`, `StatusSource` |
 | `http.rs` | `EventStreamState`, `StreamSettings`, `router()` |
 | `http/dto.rs` | `ListEventTypesParams`, `EventTypeResponse`, `EventStreamStatusResponse`, `StreamParams`, `WsParams`, `Command`, `TypesError`, `parse_names`, `parse_types`, `parse_cursor` |
@@ -348,7 +345,6 @@ pub enum RejectReason {
     #[error("invalid id")] Id,
     #[error("invalid type")] Type,
     #[error("invalid occurredAt")] OccurredAt,
-    #[error("undecodable batch")] Undecodable,                       // used by the tail only
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -357,7 +353,7 @@ struct Envelope { id: String, r#type: String, occurred_at: String, data: serde_j
 
 /// Turns a record value into an event: size check first (`value.len() > max_bytes` -> TooLarge),
 /// then `serde_json::from_slice::<Envelope>` (unknown members ignored, duplicate members refused by the
-/// derive), then `Uuid::try_parse` (36-character hyphenated form, either case), `EventType::new`, and
+/// derive), then `id.len() == 36` and `uuid::Uuid::try_parse` (so only the hyphenated form, either case), `EventType::new`, and
 /// `occurredAt`: a trailing `+00:00` is read as `Z`, then `humantime::parse_rfc3339` must accept it and the
 /// year must be 1970 to 9999. The event object is written once with `serde_json::to_string` of a struct whose
 /// fields are `id` (lower-case hyphenated), `type`, `occurredAt` (as written), `data`, in this order.
@@ -371,17 +367,17 @@ pub fn parse_event(offset: Offset, value: Option<&[u8]>, max_bytes: usize) -> Re
 #### Window (`window.rs`)
 
 ```rust
-/// The most recent valid events of this node, in id order, bounded by bytes (FR-13).
+/// The most recent valid events of this node, in id order, bounded by a count and by bytes (FR-13).
 #[derive(Debug)]
-pub struct Window { /* std::sync::RwLock<Inner { events: VecDeque<Arc<StoredEvent>>, bytes: usize, start: Cursor }>, max_bytes: usize */ }
+pub struct Window { /* std::sync::RwLock<Inner { events: VecDeque<Arc<StoredEvent>>, bytes: usize, start: Cursor }>, max_events: usize, max_bytes: usize */ }
 #[derive(Debug)]
 pub enum WindowRead { Evicted, Page { events: Vec<Arc<StoredEvent>>, settled: Cursor } }
 impl Window {
     pub const SCAN: usize = 10_000;
-    pub fn new(max_bytes: usize) -> Self;              // empty, start Cursor::START
+    pub fn new(max_events: usize, max_bytes: usize) -> Self;   // empty, start Cursor::START
     /// Clears the window and sets its floor F (the start position of the tail, FR-20).
     pub fn restart(&self, start: Cursor);
-    /// Appends; then pops the front while more than one event is held and bytes > max_bytes;
+    /// Appends; then pops the front while more than one event is held and (len > max_events or bytes > max_bytes);
     /// each pop sets `start` to the popped event's sequence.
     pub fn push(&self, event: Arc<StoredEvent>);
     /// The floor F: every valid event with an id in (F, tail position] is held.
@@ -395,7 +391,7 @@ impl Window {
 
 `read` rules: `after < start` gives `Evicted`. An empty `types` gives an empty page with `settled = up_to`. Otherwise `partition_point` finds the first sequence above `after`; at most `SCAN` entries with a sequence at or below `up_to` are examined, and an entry is collected when its type is in `types` with a since below its sequence, until `limit.reached(..)`. `settled` is the last collected sequence when the limit cut, the last examined sequence when the scan bound cut, else `up_to`. The lock is a `std::sync::RwLock`, held for one call, never across an await; a poisoned lock is taken over with `PoisonError::into_inner`.
 
-> Assumption: the window is bounded by bytes only, as FR-13 states, with at least one event kept so that a single large event does not empty it. The cost is `StoredEvent::cost`: the json bytes, the type bytes and 128 bytes for the `Arc`, the deque slot and the struct. A count bound (the brief's `EVENT_WINDOW_MAX_EVENTS`) is not needed: 128 bytes per event already bound the count to `EVENT_WINDOW_BYTES / 128`.
+The bounds are `EVENT_WINDOW_MAX_EVENTS` and `EVENT_WINDOW_MAX_BYTES` (design brief 5.2); at least one event is kept so that a single large event does not empty the window. The cost is `StoredEvent::cost`: the json bytes, the type bytes and 128 bytes for the `Arc`, the deque slot and the struct.
 
 #### Tail (`tail.rs`)
 
@@ -410,22 +406,34 @@ pub trait EventPublisher: std::fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct TailSettings { pub max_data_bytes: usize, pub preload: u64, pub request_timeout: Duration }
+pub struct TailSettings { pub max_data_bytes: usize, pub start_events: u64 }
 
-/// Why a node is not reading yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TailFault { BrokerUnreachable, TopicNotFound, PartitionCount }
+/// The ports the tail uses; one struct so that `new` stays under five arguments.
+#[derive(Debug)]
+pub struct TailPorts { pub probe: Arc<dyn TopicProbe>, pub tail: Box<dyn TopicTail>, pub clock: Arc<dyn Clock> }
 
-/// What the tail publishes after every round (a `tokio::sync::watch` value).
+/// Why a node cannot read its topic (design brief 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TopicFault {
+    #[error("the topic is unreachable")] Unreachable,
+    #[error("the topic does not exist")] Missing,
+    #[error("the topic must have exactly one partition")] Partitions(u32),
+}
+
+/// What the tail publishes after every round (a `tokio::sync::watch` value; the tail drops the sender when it stops).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TailState {
-    pub fault: Option<TailFault>,
-    pub started: bool,                  // the node reached the end it read at start (FR-20); never reset
+    pub fault: Option<TopicFault>,
+    pub started: bool,                  // the position reached the goal once (FR-20); never reset
     pub position: Option<Cursor>,       // P; None before the first seek
     pub earliest: Option<Cursor>,       // L of the last successful watermark read
     pub end: Option<Cursor>,            // E of the last successful watermark read
     pub broker_reachable: bool,         // the last watermark read succeeded
-    pub rejected: u64,                  // invalid records and undecodable batches skipped by the tail
+    pub observations: u64,              // successful watermark reads since the process started
+    pub observed_at: Option<SystemTime>,   // the last successful watermark read (`Clock`)
+    pub caught_up_at: Option<SystemTime>,  // the last batch after which P >= goal (`Clock`)
+    pub rejected: u64,                  // invalid records skipped by the tail
+    pub retention_losses: u64,          // jumps to the log start because retention overtook the tail
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -433,24 +441,19 @@ pub struct TailState {
 pub struct RoundFailed;
 
 #[derive(Debug)]
-pub struct TailEvents { /* probe, tail, window, publisher, clock, state: watch::Sender<TailState>,
-                           settings, goal: Option<Cursor>, last_observation: Option<tokio::time::Instant>,
-                           failing: bool, undecodable: Option<Cursor>, last_fault: Option<TailFault> */ }
+pub struct TailEvents { /* probe, tail, window, publisher, state: watch::Sender<TailState>,
+                           settings, goal: Option<Cursor>, last_attempt: Option<tokio::time::Instant>,
+                           failing: bool, last_fault: Option<TopicFault> */ }
 impl TailEvents {
-    pub const WAIT: Duration = Duration::from_millis(500);           // long-poll wait of the tail
     pub const OBSERVE_EVERY: Duration = Duration::from_secs(1);      // watermark period (FR-21)
-    pub fn new(probe: Arc<dyn TopicProbe>, tail: Box<dyn TopicTail>, window: Arc<Window>,
-               publisher: Arc<dyn EventPublisher>, settings: TailSettings) -> (Self, watch::Receiver<TailState>);
+    pub fn new(ports: TailPorts, window: Arc<Window>, publisher: Arc<dyn EventPublisher>,
+               settings: TailSettings) -> (Self, watch::Receiver<TailState>);
     /// One round: the start-up steps until the first seek, then a tail round ("Algorithms").
     pub async fn round(&mut self) -> Result<(), RoundFailed>;
-    /// The longest a round may take: WAIT + 3 x request_timeout. The loop cuts a round after it.
-    pub const fn round_limit(&self) -> Duration;
 }
 ```
 
-`new` has five arguments, the limit. The loop around `round` (pause, back-off, cut, stop flag) is in `crates/service/src/background.rs`. `round` writes the log entries of the tail (NFR-15); each entry is one call of a private function, so that no loop body raises its cognitive complexity above 8.
-
-> Assumption: the long-poll wait of the tail is a constant of 500 ms, the client's default `fetch_max_wait`. FR-29 makes it a constant; a shorter wait costs more requests, a longer one delays a new event by nothing (the poll returns early with records) but lengthens the round limit.
+`new` has four arguments. The loop around `round` (pause, stop flag) is in `crates/service/src/background.rs`; the loop does not cut a round: every adapter call is bounded by its own time limit (ports rule 2), so a round ends within the fetch wait plus a few request and connect time-outs (design brief 4.9). `round` writes the log entries of the tail (NFR-15); each entry is one call of a private function, so that no loop body raises its cognitive complexity above 8. `SystemTime` values come only from `TailPorts::clock`.
 
 #### Status (`status.rs`)
 
@@ -464,10 +467,10 @@ pub struct NodeStatus {
     pub state: NodeState, pub reason: Option<StartReason>, pub broker_reachable: bool,
     pub position: Option<Cursor>, pub end_offset: Option<Cursor>, pub lag: Option<u64>,
     pub window_first: Option<Cursor>, pub window_last: Option<Sequence>,
-    pub subscribers: usize, pub rejected_records: u64,
+    pub subscribers: usize, pub rejected_records: u64, pub retention_losses: u64, pub replay_capped: u64,
 }
 /// Reads the state the node already holds; no broker call (FR-4).
-pub trait SubscriberCount: std::fmt::Debug + Send + Sync { fn closed(&self) -> bool; fn count(&self) -> usize; }
+pub trait SubscriberCount: std::fmt::Debug + Send + Sync { fn closed(&self) -> bool; fn count(&self) -> usize; fn replay_capped(&self) -> u64; }
 #[derive(Debug, Clone)]
 pub struct StatusSource { tail: watch::Receiver<TailState>, window: Arc<Window>, hub: Arc<dyn SubscriberCount> }
 impl StatusSource {
@@ -476,7 +479,9 @@ impl StatusSource {
 }
 ```
 
-`snapshot`: `state` is `ShuttingDown` when the hub is closed, else `Ready` when `started`, else `Starting`; `reason` (only while starting) is the fault mapped one to one, else `CatchingUp`; `lag` is `end.distance_from(position)` when both are known; `window_first` is `Some(window.start())` once `position` is `Some`; `window_last` is `window.last()`. `Hub` implements `SubscriberCount`, so `status.rs` needs nothing from `http`.
+`snapshot`: `state` is `ShuttingDown` when the hub is closed, else `Ready` when `started`, else `Starting`; `reason` (only while starting) is the fault mapped one to one (`Unreachable` -> `BrokerUnreachable`, `Missing` -> `TopicNotFound`, `Partitions(_)` -> `PartitionCount`), else `CatchingUp`; `lag` is `end.distance_from(position)` when both are known; `window_first` is `Some(window.start())` once `position` is `Some`; `window_last` is `window.last()`; `retention_losses` is copied from the tail state and `replay_capped` read from the hub. `Hub` implements `SubscriberCount`, so `status.rs` needs nothing from `http`.
+
+> Assumption: the counter of capped replays (`replayCapped`, design brief 6.1) lives in the hub (an `AtomicU64` that `Subscriber::note_replay_capped` raises), because every subscription already reaches the hub and `StatusSource` already reads it through `SubscriberCount`; a separate shared counter would push `Subscriptions::new` above five arguments.
 
 #### Hub (`http/hub.rs`)
 
@@ -498,14 +503,13 @@ pub struct Delivery { pub delivered: usize, pub behind: usize }
 pub struct Hub { settings: HubSettings, registry: std::sync::Mutex<Registry>, count: tokio::sync::watch::Sender<usize> }
 impl Hub {
     pub fn new(settings: HubSettings) -> Arc<Self>;
-    /// Under one lock, in this order: Closed, NotReady, AtCapacity (FR-25's precedence); registers nothing.
-    pub fn check(&self) -> Result<(), HubError>;
-    /// The same checks as `check` under one lock, then registers.
+    /// Under one lock, in this order: Closed, NotReady, AtCapacity (FR-25's precedence), then registers.
     pub fn register(self: &Arc<Self>, types: &BTreeSet<EventType>) -> Result<Subscriber, HubError>;
     /// Sets the position when the hub has none; a second call changes nothing.
     pub fn start(&self, position: Cursor);
-    /// Sets the position to the event's sequence and queues one shared frame for every subscriber of its
-    /// type with `try_send`. `None` when the type has no subscriber: nothing is encoded.
+    /// Sets the position to the event's sequence, also when the type has no subscriber; then queues one
+    /// shared frame for every subscriber of its type with `try_send`. `None` when the type has no subscriber:
+    /// nothing is encoded, and the position has still moved.
     pub fn deliver(&self, event: &StoredEvent) -> Option<Delivery>;
     /// position = max(position, given); no effect before `start`.
     pub fn advance(&self, position: Cursor);
@@ -515,14 +519,17 @@ impl Hub {
     pub fn type_count(&self) -> usize;
     /// Completes when no subscriber is registered.
     pub async fn drained(&self);
+    /// Replays whose floor the cap of `EVENT_REPLAY_MAX_EVENTS` raised (an `AtomicU64`, no lock).
+    pub fn replay_capped(&self) -> u64;
 }
 impl EventPublisher for Hub { /* started -> start; publish -> deliver(..).map_or(0, |d| d.behind); advance -> advance */ }
-impl SubscriberCount for Hub { /* is_closed, subscriber_count */ }
+impl SubscriberCount for Hub { /* is_closed, subscriber_count, replay_capped */ }
 
 pub struct Subscriber { id: u64, position: Cursor, receiver: mpsc::Receiver<Arc<Frame>>, hub: Arc<Hub> }
 impl Subscriber {
     /// The hub position at the last arming (registration or resume).
     pub const fn position(&self) -> Cursor;
+    /// `None`: the queue ended, because the subscriber fell behind or the hub closed.
     pub async fn recv(&mut self) -> Option<Arc<Frame>>;
     /// A new, empty queue after `recv` returned None; returns and stores the hub position at re-arming.
     pub fn resume(&mut self) -> Result<Cursor, HubError>;
@@ -530,6 +537,8 @@ impl Subscriber {
     #[must_use] pub fn subscribe(&self, types: &BTreeSet<EventType>) -> Cursor;
     pub fn unsubscribe(&self, types: &BTreeSet<EventType>);
     pub fn hub_closed(&self) -> bool;
+    /// Raises the hub's counter of capped replays by one.
+    pub fn note_replay_capped(&self);
 }
 impl Drop for Subscriber { /* removes the entry and its queues and publishes the new count */ }
 // private: Entry { sender: Option<mpsc::Sender<Arc<Frame>>>, types: BTreeSet<EventType> };
@@ -542,8 +551,9 @@ Rules of the registry (unchanged from the first plan; all hold after every metho
 - **The entry owns the queue.** `Entry::sender` is the subscriber's sender; `by_type` holds one clone under each of the entry's types and under no other key. `subscribe` and `unsubscribe` change both in one section. A subscriber with no type keeps an open queue (FR-8, FR-10).
 - **Falling behind.** When `try_send` fails, `Entry::sender` becomes `None` and its clones leave `by_type`; the entry and its types stay. `recv` returns the queued frames, then `None`. `resume` gives the entry a new channel of `buffer` frames and puts the clones back. While the sender is `None`, `subscribe` and `unsubscribe` change only `Entry::types`.
 - **No empty key.** A `by_type` entry whose map became empty is removed at once; `close` clears `by_type`.
+- **Close.** `close` is one lock section: `closed = true`; `by_type` is cleared; every `Entry::sender` becomes `None`. The entries stay, so the count and `drained` follow the connections. `recv` returns the queued frames and then `None`; `resume` answers `Err(HubError::Closed)`; `subscribe` and `unsubscribe` change only `Entry::types`.
 - **The count is the number of connections.** `subscribers.len()` is compared with `max_subscribers` (`>=` answers `AtCapacity`) and published with `send_replace` under the lock in `register` and `Drop`. Falling behind and `close` do not change the count; a slot is free when the `Subscriber` is dropped (FR-25).
-- **Position.** `None` until `start`, then the tail position: `deliver` sets it to the event's sequence, `advance` raises it. `register` and `resume` copy it into the subscriber, `subscribe` returns it.
+- **Position.** `None` until `start`, then the tail position: `deliver` sets it to the event's sequence at every published event, whether or not the type has a subscriber (the hand-over of "Algorithms" 6 needs it), `advance` raises it. `register` and `resume` copy it into the subscriber, `subscribe` returns it.
 - `by_type` is only read and written by key; everything iterated is a `BTreeMap` or `BTreeSet` (`iter_over_hash_type`). A poisoned mutex is taken over with `PoisonError::into_inner`. `try_send` is judged with `is_err()`; `drained` is `count.subscribe().wait_for(|n| *n == 0)`.
 - The frame is encoded under the lock after the lookup found a subscriber (NFR-2: once per event, shared; not at all without a subscriber).
 
@@ -559,9 +569,10 @@ pub struct Frame {
     pub json: axum::extract::ws::Utf8Bytes,  // {"id":"<sequence>","type":"<type>","data":<event json>}
 }
 impl Frame { pub fn encode(event: &StoredEvent) -> Self; }
-/// The WebSocket frame: `{"id":"` + sequence + `","type":` + serde_json::to_string(type) + `,"data":` + json + `}`.
+/// The WebSocket frame: `{"id":"` + sequence + `","type":"` + type + `","data":` + json + `}` (a type name holds only
+/// `a-z0-9._-`); tested byte-equal to `serde_json::to_string` as a dev-dependency.
 pub(crate) fn ws_json(event: &StoredEvent) -> String;
-/// `{"error":` + serde_json::to_string(reason) + `}`.
+/// `{"error":"` + reason + `"}` (reasons are fixed ASCII texts); tested byte-equal to `serde_json::to_string` as a dev-dependency.
 pub(crate) fn error_json(reason: &str) -> String;
 ```
 
@@ -573,12 +584,12 @@ pub(crate) fn error_json(reason: &str) -> String;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionRequest { pub types: BTreeSet<EventType>, pub cursor: Option<Cursor> }
 #[derive(Debug, Clone, Copy)]
-pub struct ReplaySettings { pub max_offsets: u64, pub max_data_bytes: usize, pub request_timeout: Duration }
+pub struct ReplaySettings { pub max_events: u64, pub max_data_bytes: usize, pub permits: usize }
 #[derive(Debug)]
 pub struct Subscriptions { hub: Arc<Hub>, window: Arc<Window>, replay: Arc<dyn TopicReplay>,
                            tail: watch::Receiver<TailState>, permits: Arc<Semaphore>, settings: ReplaySettings }
 impl Subscriptions {
-    pub const REPLAY_PERMITS: usize = 4;
+    /// Creates the semaphore of `settings.permits` (EVENT_REPLAY_PERMITS) permits.
     pub fn new(hub: Arc<Hub>, window: Arc<Window>, replay: Arc<dyn TopicReplay>,
                tail: watch::Receiver<TailState>, settings: ReplaySettings) -> Self;
     /// Registers in the hub. No broker read, nothing awaited.
@@ -599,7 +610,8 @@ pub struct Subscription {
     floor: Cursor,                        // everything at or below it is settled for this connection
     target: Option<Cursor>,               // None: a replay must start; Some(t): replay while floor < t, else live
     pending: VecDeque<Arc<StoredEvent>>,  // the rest of the last page
-    stalled_since: Option<tokio::time::Instant>,
+    stalls: u8,                           // Kafka pages in a row without a record and without progress
+    ahead_since: Option<u64>,             // TailState::observations when the wait of a cursor ahead began
 }
 impl Subscription {
     pub const MAX_TYPES: usize = 100;
@@ -616,7 +628,7 @@ impl Subscription {
 }
 ```
 
-`Subscriptions::new` has five arguments. The steps are in "Algorithms". `replaying()` is true when `pending` is empty, `target` is `Some(t)` with `floor < t`, and `floor < window.start()` (the next page reads Kafka). The start step and window pages await nothing that reads the broker, so the pump may race them against inbound frames.
+`Subscriptions::new` has five arguments. The steps are in "Algorithms". `replaying()` is true when `pending` is empty, `target` is `Some(t)` with `floor < t`, and `floor < window.start()` (the next page reads Kafka). The start step (also its wait for two watermark observations of a cursor ahead, which keeps its starting count in `ahead_since` so that a dropped and re-polled step future does not restart the wait) and window pages await nothing that reads the broker, so the pump may race them against inbound frames.
 
 #### WebSocket session, pump and handlers
 
@@ -658,7 +670,7 @@ The pump (`socket::serve`), step by step:
    - **Replay turn** (true: the step waits for a permit and reads one Kafka page): the step future is pinned and polled to its end; a tick of `ping` (a `tokio::time::Interval` of `keep_alive`, first tick after `keep_alive`, `MissedTickBehavior::Delay`) writes a ping meanwhile; no inbound frame is read in this turn.
    - **Live turn** (false): one `tokio::select!` over `connection.receive()`, `session.step()` and `ping.tick()`, in a function that only reports which arm completed. Inbound `None` or `Some(Err(_))` stops with `Gone`; `Some(Ok(message))` goes to `on_message`: `Continue`, `Reply(frame)` written, `Close` stops with `ClientClosed`.
    - A step result: `Frame(frame)` writes `Message::Text(frame.json.clone())`; `Idle` continues; `End(reason)` stops with `Ended(reason)`.
-3. After the last turn: `Gone` does nothing; `Stalled` logs `subscriber evicted` (warn; `transport` `websocket`, `types` count, `last_id` = `session.position()`); `ClientClosed` lingers; `Ended(reason)` writes `close_message(reason)` and, when written, lingers. Lingering is `tokio::time::timeout(CLOSE_TIMEOUT, ..)` around `receive()` until `None`.
+3. After the last turn: `Gone` does nothing; `Stalled` logs `subscriber evicted` (warn; `transport` `ws`, `types` count, `last_id` = `session.position()`); `ClientClosed` lingers; `Ended(reason)` writes `close_message(reason)` and, when written, lingers. Lingering is `tokio::time::timeout(CLOSE_TIMEOUT, ..)` around `receive()` until `None`.
 4. The function returns; `Drop for Subscriber` frees the slot.
 
 Why: `WebSocket::send` has no deadline and its flush stays pending while the peer reads nothing (`axum-0.8.9/src/extract/ws.rs:560-565`); a page read must not be interrupted by inbound frames, because a cancelled read re-enters the permit queue at its end and a chatty client would stop its own replay; tungstenite writes the reply to a client's close frame only on the next read, hence the lingering (first plan, "The WebSocket pump", measured there). Written as `serve`, `run`, `replay_turn`, `pick`, `live_turn`, `on_inbound`, `on_step`, `send`, `finish`, `linger` with `ControlFlow<Stop>`, each stays under the complexity limits.
@@ -683,7 +695,7 @@ pub struct EventStreamStatusResponse {
     pub state: String, pub reason: Option<String>, pub broker_reachable: bool,
     pub position: Option<String>, pub end_offset: Option<String>, pub lag: Option<String>,
     pub window_first: Option<String>, pub window_last: Option<String>,
-    pub subscribers: usize, pub rejected_records: String,
+    pub subscribers: usize, pub rejected_records: String, pub retention_losses: String, pub replay_capped: String,
 }
 impl From<NodeStatus> for EventStreamStatusResponse { /* the field mapping above */ }
 
@@ -721,14 +733,12 @@ pub async fn ws(State(state): State<EventStreamState>, headers: HeaderMap,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>) -> Result<Response, Problem>;
 ```
 
-- Order inside `stream` and `ws` (FR-16): the 403 is answered by the origin middleware before the handler; `ValidatedQuery` rejects before a handler body runs, so the 503 answers come from the middleware `availability` of `http.rs` (`pub(crate) async fn availability(State(hub): State<Arc<Hub>>, request: Request, next: Next) -> Response`), layered on the two streaming routes only. It calls `Hub::check()`, which answers `Closed`, `NotReady`, `AtCapacity` in this order under the registry lock without registering. `register` repeats the same checks under the lock, so a request that passed the middleware in the instant before the cap filled gets the capacity 503 after validation; that race is the only exception to the order.
+- Order inside `stream` and `ws` (FR-16, the first plan's order): the 403 is answered by the origin middleware before the handler; `ValidatedQuery` rejects before a handler body runs, and the handler parses types and cursor (400 or 422); then `subscriptions.open(..)` answers the 503s (`register` checks `Closed`, `NotReady`, `AtCapacity` in this order under the registry lock); then, on the WebSocket route, the upgrade result.
 - `stream`: parse types and cursor, `subscriptions.open(..)` (503 at capacity), then `Sse::new(unfold(subscription, ..)).keep_alive(KeepAlive::new().interval(keep_alive))` with the extra header `x-accel-buffering: no` (axum sets `content-type` and `cache-control`).
 - `ws`: parse (422 or 400), `open` (503), then the upgrade result: a rejection becomes `Problem::new(rejection.status()).with_detail(rejection.body_text())`; a success becomes `upgrade.max_message_size(MAX_MESSAGE_BYTES).max_frame_size(MAX_MESSAGE_BYTES).read_buffer_size(READ_BUFFER_BYTES).on_upgrade(move |socket| socket::serve(socket, Session::new(subscription), keep_alive))`, with `MAX_MESSAGE_BYTES = 32_768`, `READ_BUFFER_BYTES = 4_096`.
-- `event_stream_status`: `Json(state.status.snapshot().into())`; never 503, answers in every state (FR-4); the availability middleware is not on this route.
+- `event_stream_status`: `Json(state.status.snapshot().into())`; never 503, answers in every state (FR-4).
 - `TypesError` mapping: `Empty` -> violation code `required` / frame `types must hold 1 to 100 event type names`; `Blank` -> `required` / `invalid event type name`; `Name(r)` -> `r.code()` / `invalid event type name`; `TooMany` -> `max_items` / `types must hold 1 to 100 event type names`. Other error frames: `invalid command` (not JSON, unknown action or member, `types` missing), `a connection subscribes to at most 100 event types`, `binary frames are not supported`, `the command is too large` (FR-11).
 - The extractor-check test of this crate allows `State<EventStreamState>`, `ValidatedQuery<`, `HeaderMap` and `Result<WebSocketUpgrade, WebSocketUpgradeRejection>`; none can be rejected outside a problem.
-
-> Assumption: the three 503 answers are checked twice: by the `availability` middleware before validation (FR-16's order) and again by `register` under the lock, which alone decides the cap race-free. A request that passes the first check while the last slot is being taken gets the capacity 503 after its parameters were validated; nothing else changes order.
 
 `http.rs`:
 
@@ -740,12 +750,15 @@ pub struct EventStreamState { pub query_bus: Arc<dyn QueryBus>, pub subscription
                               pub status: Arc<StatusSource>, pub hub: Arc<Hub>, pub settings: StreamSettings }
 pub fn router<S>() -> OpenApiRouter<S> where S: Clone + Send + Sync + 'static, EventStreamState: FromRef<S> {
     // routes!(handler::list_event_types), routes!(handler::event_stream_status),
-    // .route("/events/stream", get(handler::stream)), .route("/events/ws", get(handler::ws)),
-    // the two undocumented routes wrapped in `availability`
+    // .route("/events/stream", get(handler::stream)), .route("/events/ws", get(handler::ws))
 }
 ```
 
-GraphQL (`graphql.rs`): `#[graphql(name = "EventType")] struct EventTypeObject { name: String }`; `#[graphql(name = "EventStreamStatus")] struct EventStreamStatusObject` with `state: String`, `reason: Option<String>`, `broker_reachable: bool`, `position`, `end_offset`, `lag`, `window_first`, `window_last: Option<String>`, `subscribers: i32` (`i32::try_from(n).unwrap_or(i32::MAX)`), `rejected_records: String`; `EventStreamQuery::event_types(ctx, #[graphql(default = 1)] page: i32, #[graphql(default = 30)] items_per_page: i32) -> async_graphql::Result<Vec<EventTypeObject>>` through `handler::list_types` and `problem_to_error`; `EventStreamQuery::event_stream_status(ctx) -> EventStreamStatusObject` from `StatusSource::snapshot`. SDL: `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!` and `eventStreamStatus: EventStreamStatus!`. Descriptions avoid the words `node`, `Connection`, `update`, `delete` (existing SDL test).
+The router adds no layer that needs a state value: the 503s come from `subscriptions.open(..)` inside the handlers, which extract `State<EventStreamState>` through `FromRef<S>`. So `router<S>()` needs no hub value, `openapi::api_router()` stays state-free (it also feeds the export commands), and `crates/service/src/http/router.rs` does not change for the streaming routes.
+
+> Assumption: the implementability review (I6) proposed a separate `streams<S>(hub)` router for an `availability` middleware with `State<Arc<Hub>>`. The semantics review (S12) deleted that middleware, so the two streaming routes stay in `router<S>()`.
+
+GraphQL (`graphql.rs`): `#[graphql(name = "EventType")] struct EventTypeObject { name: String }`; `#[graphql(name = "EventStreamStatus")] struct EventStreamStatusObject` with `state: String`, `reason: Option<String>`, `broker_reachable: bool`, `position`, `end_offset`, `lag`, `window_first`, `window_last: Option<String>`, `subscribers: i32` (`i32::try_from(n).unwrap_or(i32::MAX)`), `rejected_records`, `retention_losses`, `replay_capped: String`; `EventStreamQuery::event_types(ctx, #[graphql(default = 1)] page: i32, #[graphql(default = 30)] items_per_page: i32) -> async_graphql::Result<Vec<EventTypeObject>>` through `handler::list_types` and `problem_to_error`; `EventStreamQuery::event_stream_status(ctx) -> EventStreamStatusObject` from `StatusSource::snapshot`. SDL: `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!` and `eventStreamStatus: EventStreamStatus!`. Descriptions avoid the words `node`, `Connection`, `update`, `delete` (existing SDL test).
 
 ### Infrastructure crate
 
@@ -754,14 +767,13 @@ Manifest: `async-trait`, `event-stream-domain`, `krafka`, `shared-domain`, `this
 | File under `crates/notification/event-stream/infrastructure/src/` | Content |
 | --- | --- |
 | `lib.rs` | modules, re-exports |
-| `kafka.rs` | `KafkaSettings`, `KafkaSecurity`, `SaslMechanism`, `SaslCredentials`, `KafkaTopic`, `CLIENT_ID`, private `connect_consumer`, `map_error` |
+| `kafka.rs` | `KafkaSettings`, `KafkaSecurity`, `SaslMechanism`, `SaslCredentials`, `KafkaTopic`, private `connect_consumer`, `map_error` |
 | `kafka/probe.rs` | `KafkaProbe` (implements `TopicProbe`) |
 | `kafka/tail.rs` | `KafkaTail` (implements `TopicTail`) |
 | `kafka/replay.rs` | `KafkaReplay` (implements `TopicReplay`) |
 | `tests/integration/{main.rs,support.rs,real_broker.rs,fake_broker.rs}` | adapter tests |
 
 ```rust
-pub const CLIENT_ID: &str = "notification-service";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SaslMechanism { Plain, ScramSha256, ScramSha512 }
 #[derive(Clone, PartialEq, Eq)]
@@ -770,7 +782,11 @@ pub struct SaslCredentials { pub mechanism: SaslMechanism, pub username: String,
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KafkaSecurity { Plaintext, Ssl, SaslPlaintext(SaslCredentials), SaslSsl(SaslCredentials) }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KafkaSettings { pub bootstrap_servers: String, pub topic: String, pub security: KafkaSecurity, pub request_timeout: Duration }
+pub struct KafkaSettings {
+    pub bootstrap_servers: String, pub topic: String, pub client_id: String, pub security: KafkaSecurity,
+    pub request_timeout: Duration, pub connect_timeout: Duration,
+    pub fetch_wait: Duration,      // KAFKA_FETCH_MAX_WAIT: the long-poll wait of the tail
+}
 
 /// Factory; builds no connection.
 #[derive(Debug, Clone)]
@@ -787,24 +803,23 @@ Which client call implements which port method (every consumer of the adapter is
 
 | Port method | krafka calls | Time limit |
 | --- | --- | --- |
-| (lazy connect, before the first call of each adapter and after a failed call) | `Kafka::builder(bootstrap).client_id(CLIENT_ID).security(auth).request_timeout(t).connect_timeout(t).connect()`, then `consumer_without_group()` with the settings below, `build()`, `assign(topic, vec![0])` | `t` around `connect` |
+| (lazy connect, before the first call of each adapter and after a failed call) | `Kafka::builder(bootstrap).client_id(client_id).security(auth).request_timeout(t).connect_timeout(c).connect()`, then `consumer_without_group()` with the settings below, `build()`, `assign(topic, vec![0])` | `c` around `connect` |
 | `TopicProbe::partition_count` | `consumer.fetch_metadata(Some(topic))`: no topic -> `None`, else `partition_count()` as `u32` | `t` |
 | `TopicProbe::watermarks` | `consumer.fetch_watermarks(topic, 0)` -> `(low, high)` -> `Watermarks { earliest: low, end: high }` | `t` |
 | `TopicTail::seek` | `consumer.seek(topic, 0, position)` (local) | `t` |
-| `TopicTail::fetch` | `consumer.poll(TailEvents::WAIT)`, then `consumer.position(topic, 0)` | `t + WAIT` |
+| `TopicTail::fetch` | `consumer.poll(settings.fetch_wait)`, then `consumer.position(topic, 0)` | `t + fetch_wait` |
 | `TopicReplay::page` | take a free reader, `seek(topic, 0, from)`, `poll(REPLAY_WAIT)`, `position`; give the reader back | `t + REPLAY_WAIT` |
 
-Consumer settings, each with its reason: `isolation_level(IsolationLevel::ReadCommitted)` (D9; the default delivers aborted records); `auto_offset_reset(AutoOffsetReset::None)` (the default `Latest` skips to the end without an error); `metrics_push(false)` (no KIP-714 telemetry to the broker); `fetch_min_bytes(1)`; `fetch_max_wait(TailEvents::WAIT)`; `max_poll_records(500)`, `max_buffered_records(500)`, `max_partition_fetch_bytes(1_048_576)`, `fetch_max_bytes(1_048_576)` (one replay page, soft bound); `allow_auto_create_topics` left false. Handle settings: `client_id("notification-service")` (default `krafka`); `request_timeout` and `connect_timeout` both `KAFKA_REQUEST_TIMEOUT` (defaults 30 s and 10 s would make one poll block 30 s). Security: `Plaintext` -> `AuthConfig::plaintext()`; `Ssl` -> `AuthConfig::ssl(TlsConfig::new())`; `SaslPlaintext(c)` -> `sasl_plain`, `sasl_scram_sha256` or `sasl_scram_sha512` by mechanism; `SaslSsl(c)` -> the same `.with_tls(TlsConfig::new())`.
+Consumer settings, each with its reason: `isolation_level(IsolationLevel::ReadCommitted)` (D9; the default delivers aborted records); `auto_offset_reset(AutoOffsetReset::None)` (the default `Latest` skips to the end without an error); `metrics_push(false)` (no KIP-714 telemetry to the broker); `fetch_min_bytes(1)`; `fetch_max_wait(settings.fetch_wait)`; `max_poll_records(500)`, `max_buffered_records(500)`, `max_partition_fetch_bytes(1_048_576)`, `fetch_max_bytes(1_048_576)` (one replay page, soft bound); `allow_auto_create_topics` left false. Handle settings: `client_id` from `KAFKA_CLIENT_ID` (default `notification-service`; the client's own default is `krafka`); `request_timeout` from `KAFKA_REQUEST_TIMEOUT` (`t`) and `connect_timeout` from `KAFKA_CONNECT_TIMEOUT` (`c`, at most `t`, which the client enforces); the client's defaults of 30 s and 10 s would make one poll block 30 s. Security: `Plaintext` -> `AuthConfig::plaintext()`; `Ssl` -> `AuthConfig::ssl(TlsConfig::new())`; `SaslPlaintext(c)` -> `sasl_plain`, `sasl_scram_sha256` or `sasl_scram_sha512` by mechanism; `SaslSsl(c)` -> the same `.with_tls(TlsConfig::new())`.
 
 Conversions and errors (`map_error`):
 
 - `i64` offsets go through `u64::try_from`; a negative value is `Unavailable`. A record's value `Option<Bytes>` becomes `Option<Vec<u8>>`; key and headers are dropped.
 - `matches!(error, KrafkaError::NoOffset { .. })`: the adapter reads `fetch_watermarks` on the same consumer and returns `BelowEarliest { earliest: low }` (a failing read: `Unavailable`).
-- `matches!(error, KrafkaError::Protocol { .. })` on `poll`: `Undecodable { at: position or the requested position }`.
-- Everything else, and an elapsed `tokio::time::timeout`: `Unavailable(Box::new(error))`. After `Unavailable` the adapter drops its consumer and handle; the next call connects again (one attempt; retries belong to the application).
+- Everything else, a `KrafkaError::Protocol` of a batch the client cannot decode included (design brief, open point 1), and an elapsed `tokio::time::timeout`: `Unavailable(Box::new(error))`. After `Unavailable` the adapter drops its consumer and handle; the next call connects again (one attempt; retries belong to the application).
 - `Batch`: records with an offset below the requested position are dropped; `next = max(requested, position(), last offset + 1)` (rule 1 of the ports).
 
-`KafkaTail` keeps `position: Cursor` (set by `seek`, moved to `batch.next` after a fetch) so that a reconnect re-seeks to it. `KafkaReplay` keeps `std::sync::Mutex<Vec<Reader>>`; a call pops a reader or creates an unconnected one, and pushes it back after a successful call; a failed reader is dropped. The application's semaphore of 4 permits bounds the readers to 4 (FR-14). `REPLAY_WAIT` is 100 ms. Logic sits in inherent methods; the `#[async_trait]` bodies only delegate.
+`KafkaTail` keeps `position: Cursor` (set by `seek`, moved to `batch.next` after a fetch) so that a reconnect re-seeks to it. `KafkaReplay` keeps `std::sync::Mutex<Vec<Reader>>`; a call pops a reader or creates an unconnected one, and pushes it back after a successful call; a failed reader is dropped. The application's semaphore of `EVENT_REPLAY_PERMITS` permits bounds the readers to that number (FR-14). A reader taken from the pool always seeks to the requested position before it polls, and port rule 1 drops records below it, so a reader that last read at a higher position starts at the lower one. `REPLAY_WAIT` is 100 ms. Logic sits in inherent methods; the `#[async_trait]` bodies only delegate.
 
 > Assumption: `tokio` joins the infrastructure allow-list as a normal dependency (protected change), because the adapter must wrap every client call in its own time-out: `poll` is bounded by the request time-out and not by its argument (probe 09). The first plan kept tokio out of infrastructure; that rule cannot hold for this client.
 >
@@ -826,20 +841,27 @@ Each variable is an `Option<String>` clap argument of `ServeArgs` (and of `check
 | `KAFKA_SASL_MECHANISM` | `SaslMechanism` | unset | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`; cross-field rule below |
 | `KAFKA_SASL_USERNAME` | `SaslCredentials::username` | unset | not empty; cross-field rule below |
 | `KAFKA_SASL_PASSWORD` | `SaslCredentials::password` | unset | not empty; cross-field rule below; never logged |
-| `KAFKA_REQUEST_TIMEOUT` | `KafkaSettings::request_timeout` | `5s` | `1s` to `1m` (`must be a duration from 1s to 1m`) |
+| `KAFKA_CLIENT_ID` | `KafkaSettings::client_id` | `notification-service` | 1 to 128 characters (`must be 1 to 128 characters`) |
+| `KAFKA_REQUEST_TIMEOUT` | `KafkaSettings::request_timeout` | `3s` | `1s` to `30s` (`must be a duration from 1s to 30s`) |
+| `KAFKA_CONNECT_TIMEOUT` | `KafkaSettings::connect_timeout` | `2s` | `100ms` to `30s` (`must be a duration from 100ms to 30s`); cross-field rule below |
+| `KAFKA_FETCH_MAX_WAIT` | `KafkaSettings::fetch_wait` | `500ms` | `50ms` to `5s` (`must be a duration from 50ms to 5s`) |
+| `KAFKA_RETRY_DELAY` | `StreamConfig::retry_delay` | `1s` | `100ms` to `1m` (`must be a duration from 100ms to 1m`) |
 | `EVENT_TYPES` | `EventCatalog` | unset (empty) | 1 to 1 000 distinct valid names, no empty value or entry (`must be a comma-separated list of 1 to 1000 event type names`) |
 | `EVENT_MAX_DATA_BYTES` | `usize` | `65536` | 1 to 1 048 576 |
-| `EVENT_WINDOW_BYTES` | `usize` | `33554432` | 1 048 576 to 1 073 741 824 |
-| `EVENT_WINDOW_PRELOAD` | `u64` | `10000` | 0 to 1 000 000 |
-| `EVENT_REPLAY_MAX_OFFSETS` | `u64` | `1000000` | 0 to 100 000 000 |
+| `EVENT_WINDOW_MAX_EVENTS` | `usize` | `100000` | 1 to 10 000 000 |
+| `EVENT_WINDOW_MAX_BYTES` | `usize` | `67108864` | 2 097 152 to 17 179 869 184 |
+| `EVENT_WINDOW_START_EVENTS` | `u64` | `100000` | 0 to 10 000 000 |
+| `EVENT_REPLAY_MAX_EVENTS` | `u64` | `1000000` | 1 to 100 000 000 |
+| `EVENT_REPLAY_PERMITS` | `usize` | `4` | 1 to 64 |
+| `EVENT_TAIL_STALE_AFTER` | `Duration` | `10s` | `1s` to `5m` (`must be a duration from 1s to 5m`) |
 | `SUBSCRIBER_BUFFER` | `usize` | `256` | 1 to 65 536 |
 | `MAX_SUBSCRIBERS` | `usize` | `100000` | 1 to 1 000 000 |
 | `STREAM_KEEP_ALIVE` | `Duration` | `15s` | `1s` to `5m` |
 | `CORS_ALLOWED_ORIGINS` | `AllowedOrigins` | unset (`NoOrigin`) | exactly `*`, or origins as a browser sends them (scheme `http` or `https`, host, optional port, lower case, nothing else) (`must be * or a comma-separated list of origins such as https://app.example.com`) |
 
-Integers use the existing reason `must be an integer from <a> to <b>`. Cross-field rule: with `KAFKA_SECURITY_PROTOCOL` `sasl_plaintext` or `sasl_ssl` the three SASL variables are each `is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`; otherwise each that is set is `must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`. The rule runs in its own function, `sasl_rule`, because `cross_field_rules` already has five parameters.
+Integers use the existing reason `must be an integer from <a> to <b>`. Cross-field rules: `KAFKA_CONNECT_TIMEOUT` longer than `KAFKA_REQUEST_TIMEOUT` is `KAFKA_CONNECT_TIMEOUT: must not be longer than KAFKA_REQUEST_TIMEOUT` (it runs in `kafka_settings`, after both are parsed); with `KAFKA_SECURITY_PROTOCOL` `sasl_plaintext` or `sasl_ssl` the three SASL variables are each `is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`; otherwise each that is set is `must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`. The rule runs in its own function, `sasl_rule`, because `cross_field_rules` already has five parameters.
 
-`Config` gains `kafka: KafkaSettings`, `streams: StreamConfig { catalog: EventCatalog, max_data_bytes, window_bytes, preload, replay_max_offsets, buffer, max_subscribers, keep_alive }` and `allowed_origins: AllowedOrigins`. The removal stories delete `PostgresSettings`, `MigrateSettings`, the `DATABASE_*` parsing and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT` ("Removal of PostgreSQL").
+`Config` gains `kafka: KafkaSettings`, `streams: StreamConfig { catalog: EventCatalog, max_data_bytes, window_max_events, window_max_bytes, start_events, replay_max_events, replay_permits, retry_delay, stale_after, buffer, max_subscribers, keep_alive }` and `allowed_origins: AllowedOrigins`. The removal stories delete `PostgresSettings`, `MigrateSettings`, the `DATABASE_*` parsing and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT` ("Removal of PostgreSQL").
 
 `.env` gets one line per variable with a default, written with that default, except `KAFKA_BOOTSTRAP_SERVERS=localhost:9095` (the host listener of the local broker, "Local Stack and Load Test"); `EVENT_TYPES`, the three `KAFKA_SASL_*` and `CORS_ALLOWED_ORIGINS` get none. `docs/environment.md` gets a row per variable (docs-check rule 5). The tests that pin the variable set change with the variables: `config/tests.rs` `FIELDS`, `cli/tests.rs`, `tests/integration/check_config.rs` `FULL_ENVIRONMENT`, `tests/integration/support.rs` `VALID_ENVIRONMENT`.
 
@@ -849,8 +871,11 @@ Integers use the existing reason `must be an integer from <a> to <b>`. Cross-fie
 
 ```rust
 // bootstrap.rs
-pub struct Adapters { /* existing fields */, pub topic: KafkaTopic }
-// Adapters::connect(&Config) builds `KafkaTopic::new(config.kafka.clone())`: no network access (pinned test).
+pub struct Adapters { /* existing fields */, pub topic_probe: Arc<dyn TopicProbe>,
+                       pub topic_tail: Box<dyn TopicTail>, pub topic_replay: Arc<dyn TopicReplay> }
+// Adapters::connect(&Config) fills the three fields from `KafkaTopic::new(config.kafka.clone())`
+// (`probe()`, `tail()`, `replay()`): no network access (pinned test). Tests fill them with `StaticTopic`
+// handles or scripted fakes, as they do for the existing trait-object fields.
 
 pub struct Application { pub router: Router, pub background: Background }
 pub fn application(adapters: Adapters, config: &Config) -> Result<Application, BootstrapError>;
@@ -859,17 +884,17 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
 
 `application` does, besides today's wiring (in two private functions so that it stays under 50 lines):
 
-1. `let window = Arc::new(Window::new(streams.window_bytes));`
+1. `let window = Arc::new(Window::new(streams.window_max_events, streams.window_max_bytes));`
 2. `let hub = Hub::new(HubSettings { max_subscribers, buffer });`
-3. `let (tail, tail_state) = TailEvents::new(Arc::new(topic.probe()), Box::new(topic.tail()), Arc::clone(&window), hub.clone() as Arc<dyn EventPublisher>, TailSettings { max_data_bytes, preload, request_timeout });`
-4. `let subscriptions = Arc::new(Subscriptions::new(hub.clone(), window.clone(), Arc::new(topic.replay()), tail_state.clone(), ReplaySettings { max_offsets, max_data_bytes, request_timeout }));`
+3. `let (tail, tail_state) = TailEvents::new(TailPorts { probe: adapters.topic_probe, tail: adapters.topic_tail, clock: clock.clone() }, Arc::clone(&window), hub.clone() as Arc<dyn EventPublisher>, TailSettings { max_data_bytes, start_events });`
+4. `let subscriptions = Arc::new(Subscriptions::new(hub.clone(), window.clone(), adapters.topic_replay, tail_state.clone(), ReplaySettings { max_events: replay_max_events, max_data_bytes, permits: replay_permits }));`
 5. `let status = Arc::new(StatusSource::new(tail_state.clone(), window, hub.clone()));`
 6. `register_queries` also registers `ListEventTypesHandler::new(Arc::new(streams.catalog.clone()))`;
 7. `AppState` gains `event_stream: EventStreamState { query_bus, subscriptions, status, hub: hub.clone(), settings: StreamSettings { keep_alive } }` (derive `FromRef`); the GraphQL schema gets `.data(event_stream.clone())`;
-8. the health probes get `EventStreamProbe::new(tail_state.clone())` after the existing ones;
-9. `Background { tail, hub }`.
+8. the health probes get `EventStreamProbe::new(tail_state.clone(), clock.clone(), streams.stale_after)` after the existing ones (`clock` is `Adapters::clock`);
+9. `Background { tail, hub, retry_delay: streams.retry_delay }`.
 
-`bootstrap::router` drops the `Background`; the hub of such a router is never started, so the streaming routes answer the 503 `the node is starting` while the catalog, the status and every existing route work. Tests that subscribe build an `Application` and drive the tail with fakes.
+`bootstrap::router` drops the `Background`; the hub of such a router is never started, so the streaming routes answer the 503 `the node is starting` and the probe `event_stream` fails, while the catalog, the status and every other route work. Tests that subscribe build an `Application` and drive the tail with fakes. Every test that expects 204 from `GET /api/health` waits for readiness: `send` of `tests/e2e/world.rs` (and the service integration tests that expect 204) builds `bootstrap::application`, spawns `application.background`, polls `GET /api/events/status` through the router until `state` is `ready` (bounded, 10 s), sends the request and then awaits `Running::shutdown()`; the world reads `KAFKA_BOOTSTRAP_SERVERS` through a helper with `#[expect(clippy::disallowed_methods, reason = "..")]` and uses the stack's topic `notifications`. So `features/health_check.feature` stays byte-identical (story 3.8).
 
 Routes: `openapi::api_router()` adds `.nest("/api", event_stream_application::http::router())`; `ApiDoc` gains the tag `EventStream` ("Event catalog and event stream status endpoints."). GraphQL: `pub struct Query(ExampleApiResourceQuery, EventStreamQuery);` until the removal, then `pub struct Query(EventStreamQuery);` with `EmptyMutation`. The pinning tests `src/openapi/tests.rs` and `src/graphql/schema/tests.rs` and the three `Adapters { .. }` literals (`src/bootstrap/tests.rs`, `src/http/router/tests.rs`, `tests/integration/panic.rs`) change with them.
 
@@ -880,15 +905,17 @@ The health-check domain gains `Dependency::EventStream` (identifier `event_strea
 ```rust
 // crates/service/src/event_stream_probe.rs
 #[derive(Debug)]
-pub struct EventStreamProbe { tail: watch::Receiver<TailState> }
-impl EventStreamProbe { pub const fn new(tail: watch::Receiver<TailState>) -> Self; }
+pub struct EventStreamProbe { tail: watch::Receiver<TailState>, clock: Arc<dyn Clock>, stale_after: Duration }
+impl EventStreamProbe { pub fn new(tail: watch::Receiver<TailState>, clock: Arc<dyn Clock>, stale_after: Duration) -> Self; }
 #[async_trait] impl HealthProbe for EventStreamProbe {
     fn dependency(&self) -> Dependency { Dependency::EventStream }
-    async fn check(&self) -> Result<(), BoxError>;   // Ok when `started`, else Err("the event stream is starting")
+    async fn check(&self) -> Result<(), BoxError>;   // the rule below; the error is the reason
 }
 ```
 
-It reads no broker. It fails while the node is starting and passes for the rest of the process (FR-20): a broker outage after the start does not fail it (NFR-6). The cache and message-broker probes stay; the database probe leaves with the removal.
+It reads no broker (design brief 3.7). `check` is `Ok` when `started` is true and `observed_at` and `caught_up_at` are each `Some` and at most `stale_after` old by `clock.now()`. Otherwise it is `Err` with the first reason that holds, in this order: the text of `fault` (`the topic is unreachable`, `the topic does not exist`, `the topic must have exactly one partition`); `the node is starting` (not started); `the topic is unreachable` (`observed_at` missing or stale); `the event tail is behind` (`caught_up_at` missing or stale). The health answer keeps the fixed message `Event stream is not ready`; the reason is the logged cause. Subscription requests are still accepted by a started node whose probe fails (FR-20). The cache and message-broker probes stay; the database probe leaves with the removal.
+
+> Assumption: an `observed_at` or `caught_up_at` later than `clock.now()` (a wall clock stepped back) counts as fresh: `SystemTime::duration_since` fails for it and the probe treats the failure as age 0. Design brief 3.7 does not cover a clock that steps back, and failing readiness on every node at once for it would take the service away without a fault.
 
 ### Browser origins
 
@@ -927,11 +954,9 @@ pub(crate) async fn websocket_origin(State(origins): State<Arc<AllowedOrigins>>,
 ```rust
 /// How long the shutdown waits for the streams to end after the hub was closed (FR-27).
 pub const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
-pub const RETRY_FIRST: Duration = Duration::from_secs(1);
-pub const RETRY_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
-pub struct Background { pub tail: TailEvents, pub hub: Arc<Hub> }
+pub struct Background { pub tail: TailEvents, pub hub: Arc<Hub>, pub retry_delay: Duration }   // KAFKA_RETRY_DELAY
 impl Background { #[must_use] pub fn spawn(self) -> Running; }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -955,16 +980,13 @@ type Stop = watch::Receiver<bool>;
 type Ended = (&'static str, Result<(), JoinError>);
 async fn until_stopped<F: Future + Send>(stop: &mut Stop, work: F) -> Option<F::Output>;   // biased select, stop first
 fn start<F: Future<Output = ()> + Send + 'static>(tasks: &mut JoinSet<Ended>, name: &'static str, work: F);
-/// Next pause: 1 s after a success, doubled after each failure, at most 30 s.
-const fn next_pause(previous: Option<Duration>) -> Duration;
+/// `None` after a successful round, `Some(retry_delay)` after a failed one.
+const fn after_round(outcome: Result<(), RoundFailed>, retry_delay: Duration) -> Option<Duration>;
 
-async fn tail(mut tail: TailEvents, mut stop: Stop) {
-    let mut pause = None;
+async fn tail(mut tail: TailEvents, retry_delay: Duration, mut stop: Stop) {
     loop {
-        let limit = tail.round_limit();
-        let Some(outcome) = until_stopped(&mut stop, tokio::time::timeout(limit, tail.round())).await else { return; };
-        pause = after_round(outcome, pause);       // Ok(Ok(())) -> None; a failure or an elapsed limit -> Some(next_pause(pause))
-        if let Some(wait) = pause {
+        let Some(outcome) = until_stopped(&mut stop, tail.round()).await else { return; };
+        if let Some(wait) = after_round(outcome, retry_delay) {
             if until_stopped(&mut stop, tokio::time::sleep(wait)).await.is_none() { return; }
         }
     }
@@ -975,8 +997,8 @@ Rules (the first plan's, reduced to one loop):
 
 - **The stop flag is read in one place**, `until_stopped`, the first arm of a biased `select!`. No `while running(..)` and no pause helper returning `bool` (a mutant would leave a loop without an await and the test would time out). A dropped `Running` ends the loop because the sender is gone.
 - **Every round has an await no mutant can remove**: the round and the pause are awaited in the loop body; `after_round` only decides.
-- **A round cannot hang**: `tokio::time::timeout(round_limit, ..)` cuts it; a cut round is a failed round (`event tail failed` when it is the first failure after a success). Cutting is safe: `TailEvents` stores its position after every batch, and the next round continues from `P` (FR-26).
-- **A failed round is not a failed loop**: the loop never returns an error; the pause grows 1 s, 2 s, 4 s ... 30 s and returns to 1 s after a success (FR-26). The pause after a success is zero; the long poll is the wait.
+- **A round cannot hang**: every adapter call inside it is bounded by its own time limit (ports rule 2: `KAFKA_CONNECT_TIMEOUT` around a connect, `KAFKA_REQUEST_TIMEOUT` around a call, plus `KAFKA_FETCH_MAX_WAIT` for a fetch), so the loop needs no cut of its own (design brief 4.9). A failed round loses nothing: `TailEvents` stores its position after every batch, and the next round continues from `P` (FR-26).
+- **A failed round is not a failed loop**: the loop never returns an error; after a failed round it pauses `KAFKA_RETRY_DELAY`, a fixed pause (FR-26). The pause after a success is zero; the long poll is the wait.
 - **Supervision**: `Running::failed` is `while let Some(joined) = self.tasks.join_next().await { if let Ok((name, Err(_panic))) = joined { return name; } }` then `std::future::pending().await`. The loop task is spawned inside an outer task that reports its name. A panic of the tail task gives `Cause::TaskFailed("tail")`, the entry `background task failed` (error, `task`), the same shutdown sequence as a signal, and exit status 1 (FR-26).
 
 `serve` (`command/serve.rs`) stays one straight path:
@@ -1016,7 +1038,7 @@ Order and why:
 2. `running.stopped(..)` returns at the signal or at a dead loop.
 3. `stop.send_replace(true)` at once: the listener closes and new connections are refused. Responses being written, SSE streams included, go on; an upgraded WebSocket is a detached task the flag does not reach.
 4. `running.shutdown()`, inside `SHUTDOWN_GRACE_PERIOD` (FR-27):
-   1. set the stop flag and join the loop: the round in flight is cancelled at once, also a broker call to a broker that does not answer (`poll` is cancel safe; the adapter future is dropped). Replay reads end with their streams in step 2;
+   1. set the stop flag and join the loop: the round in flight is cancelled at once, also a broker call to a broker that does not answer (`poll` is cancel safe; the adapter future is dropped). Replay reads end with their streams in step 2, a read in flight at the latest after its adapter limit (`KAFKA_REQUEST_TIMEOUT` plus 100 ms);
    2. `hub.close()`: every SSE response ends after its queued frames, every WebSocket pump writes its queued frames and close code 1001; a replay that waits for a permit or a page ends at its next step with `End(HubClosed)`; from now on a subscription request gets the 503 `the node is shutting down`;
    3. `tokio::time::timeout(STREAM_DRAIN_TIMEOUT, hub.drained())`, either outcome returns;
 5. `server.await`: the HTTP drain as today, then `stopped`, or `grace period elapsed, forcing shutdown` and exit status 1.
@@ -1032,25 +1054,27 @@ Step 4.3 exists because the drain of `axum::serve` does not wait for upgraded We
 | Message | Level | Fields | Written by |
 | --- | --- | --- | --- |
 | `event tail ready` | info | `position` | `TailEvents`, once, when `position >= goal` the first time |
-| `event topic invalid` | error | `reason` (`topic-not-found`, `partition-count`) | `TailEvents`, once per change of the fault, during start-up |
-| `event tail failed` | warn | `error` (chain) | `TailEvents` or the loop (a cut round), at the first failed round after a successful one |
+| `event topic invalid` | error | `reason` (`topic-not-found`, `partition-count`) | `TailEvents`, once per change of the fault to `Missing` or `Partitions(_)`, during start-up |
+| `event topic unreachable` | warn | `error` (chain) | `TailEvents`, when the fault changes to `Unreachable` during start-up (design brief 3.1) |
+| `event tail failed` | warn | `error` (chain) | `TailEvents`, at the first failed round after a successful one |
 | `event tail recovered` | info | `position` | `TailEvents`, at the first successful round after a logged failure |
-| `event tail behind retention` | warn | `from`, `to` | `TailEvents`, when the tail position fell below the log start and jumped to it |
-| `event record rejected` | warn | `offset`, `reason` | `TailEvents`, for an invalid record or an undecodable batch |
-| `replay failed` | warn | `transport`, `error` (chain) | the SSE body or the WebSocket pump, when a stream ends with `TopicFailed` |
+| `events lost to retention` | error | `from`, `to`, `distance` | `TailEvents`, when the tail position fell below the log start and jumped to it; `retention_losses += 1` |
+| `event record rejected` | warn | `offset`, `reason` | `TailEvents`, for an invalid record |
+| `replay capped` | info | `from`, `to` | `Subscription`, when the cap of `EVENT_REPLAY_MAX_EVENTS` raised the floor (design brief 6.1) |
+| `replay failed` | warn | `transport` (`sse`, `ws`), `error` (chain) | the SSE body or the WebSocket pump, when a stream ends with `TopicFailed` |
 | `subscribers fell behind` | warn | `count` | `TailEvents`, once per batch in which at least one subscriber fell behind |
-| `subscriber evicted` | warn | `transport`, `types`, `last_id` | `socket::serve`, when a write misses its deadline (best effort) |
+| `subscriber evicted` | warn | `transport` (`ws`), `types`, `last_id` | `socket::serve`, when a write misses its deadline (best effort) |
 | `subscription rejected` | warn | `detail` | `From<HubError> for Problem` |
 | `background task failed` | error | `task` (`tail`) | `Running::stopped` |
 | `shutdown signal received` | info | `signal` | `Running::stopped` (the existing entry, moved) |
 
-Failures before the first successful round are not logged: a node that cannot reach its broker at start writes nothing but `listening` and shows `broker-unreachable` on its status route and a failing readiness probe; `event topic invalid` is written as soon as the broker answers with a bad topic. This keeps the log of an idle node without a broker exactly `listening`, `shutdown signal received`, `stopped`, which the spawned-binary tests compare (`tests/integration/serve.rs:128-148`).
+During start-up a fault is logged when it changes: `event topic unreachable` (warn) for `Unreachable`, `event topic invalid` (error) for the other two. A node that cannot reach its broker at start therefore writes `listening`, then `event topic unreachable` once, and shows `broker-unreachable` on its status route and a failing readiness probe. The log of an idle node without a broker is exactly `listening`, `event topic unreachable`, `shutdown signal received`, `stopped`, which the spawned-binary tests compare (`tests/integration/serve.rs:128-148`, changed by story 3.8). `event tail failed` and `event tail recovered` belong to rounds after the first seek.
 
-> Assumption: the entry `event tail behind retention` is added to the table of NFR-15. Retention that overtakes the tail loses events for every client of the node, and the PRD's entries do not cover it; NFR-15 lists what must be written, not everything that may be.
+> Assumption: the start-up fault `Unreachable` is logged as `event topic unreachable` (warn, the error chain), next to the existing `event topic invalid`, because design brief 3.1 asks for the entry without naming it and the `event topic` prefix keeps the start-up entries together; the round entry of brief 4.5 is the existing `event tail failed`, which is also written on the transition only.
 >
-> Assumption: `TailState::started` is not affected by a broker outage, and nothing is logged for failures before the first success. NFR-15 defines `event tail failed` as "the first failed or cut round after a success".
+> Assumption: `TailState::started` is not affected by a broker outage (a started node keeps accepting subscriptions, FR-20); its readiness probe fails instead by the staleness rule. NFR-15 defines `event tail failed` as "the first failed round after a success".
 
-Files of the template sync that this change touches and that are not yet in `.templatesyncignore`: `crates/service/src/lib.rs`, `src/command/serve.rs`, `src/http/router.rs`, `src/telemetry.rs`, `tests/integration/main.rs`, `tests/integration/support.rs`, `tests/integration/check_config.rs`, `docker-compose.yml`, `docker-compose.override.yml`, `docker-compose.load_test.override.yml`, `docker-compose.prod.yml`, `docs/architecture.md`, `docs/operations.md`, `docs/load-testing.md`, `docs/README.md`, `SECURITY.md`, `crates/internal/health-check/domain/src/value_object/dependency.rs` (already ignored per `.templatesyncignore:33-35`, so no entry). Each goes into `.templatesyncignore` by full path in the story that first changes it; the removal stories add their own (section "Removal of PostgreSQL").
+Files of the template sync that this change touches and that are not yet in `.templatesyncignore`: `crates/service/src/lib.rs`, `src/command/serve.rs`, `src/http/router.rs`, `src/telemetry.rs`, `tests/integration/main.rs`, `tests/integration/support.rs`, `tests/integration/check_config.rs`, `docker-compose.yml`, `docker-compose.override.yml`, `docker-compose.load_test.override.yml`, `docker-compose.prod.yml`, `docs/architecture.md`, `docs/operations.md`, `docs/load-testing.md`, `docs/README.md`, `SECURITY.md`, `docs/make-targets.md`, `crates/internal/health-check/application/src/http.rs`, `crates/internal/health-check/application/src/http/tests.rs`, every new Rust test file that holds `Adapters {` (protected test of `make_repository.bats`), `crates/internal/health-check/domain/src/value_object/dependency.rs` (already ignored per `.templatesyncignore:33-35`, so no entry). Each goes into `.templatesyncignore` by full path in the story that first changes it; files under `crates/shared/`, `xtask/`, `tests/CLI/` and `.github/workflows/` and the health-check manifests are listed only by full file path, never by directory (protected test of `make_repository.bats`); the removal stories add their own (section "Removal of PostgreSQL").
 
 ## Wire Protocols
 
@@ -1059,17 +1083,17 @@ The normative text for clients is `docs/streaming-protocol.md` (new, FR-38); thi
 ### Subscription request (both streaming routes)
 
 - `types`: comma-separated event type names; required on `/api/events/stream`, optional on `/api/events/ws`; 1 to 100 distinct names (a repeated name counts once; 0 on the WebSocket route when the parameter is absent).
-- Cursor: header `Last-Event-ID` or query parameter `lastEventId`; the header wins; a decimal `u64`. It means "every id up to this one was seen". `0` asks for every retained event. A cursor ahead of the node's tail, also ahead of the topic end, is accepted and waits (FR-15).
+- Cursor: header `Last-Event-ID` or query parameter `lastEventId`; the header wins; a decimal `u64`. It means "every id up to this one was seen". `0` asks for every retained event. A cursor ahead of the node's tail is accepted and waits for two watermark reads of the node; a cursor then above the topic end is clamped to the end, never refused (FR-15).
 - Answers before a stream opens, in this order of checks (FR-16):
 
   | Status | When |
   | --- | --- |
   | 403, detail `the origin is not allowed` | WebSocket route only: a handshake whose `Origin` is not allowed by `CORS_ALLOWED_ORIGINS`; no subscriber is registered |
-  | 503, detail `the node is shutting down` | after the hub was closed |
-  | 503, detail `the node is starting` | the node has not yet reached the end of the topic it read at start, or cannot reach its broker or topic at start |
-  | 503, detail `the node is at its subscriber capacity` | `MAX_SUBSCRIBERS` connections are open |
   | 400 | `types` missing on the SSE route; a cursor that is not a decimal `u64` (the detail names the carrier) |
   | 422 | a violation on `types` (codes `required`, `length`, `pattern`, `max_items`) |
+  | 503, detail `the node is shutting down` | after the hub was closed |
+  | 503, detail `the node is starting` | the node's position has not yet reached the end of the topic, or it cannot reach its broker or topic at start |
+  | 503, detail `the node is at its subscriber capacity` | `MAX_SUBSCRIBERS` connections are open |
   | 4xx of the upgrade, as a problem | WebSocket route: a request that is not a valid upgrade |
 
 - No answer depends on a broker read. A subscription with a cursor below the window is accepted while Kafka cannot be read; its stream then ends (SSE: the response ends; WebSocket: close code 1011).
@@ -1121,44 +1145,40 @@ Checks run in this order: size, JSON and shape (`Json::<Command>::from_bytes`), 
 
 ### Event object and duplicates
 
-The `data` of an SSE frame and of a WebSocket frame is the same object: `{"id":"<uuid, lower case>","type":"<type>","occurredAt":"<as written>","data":<producer data>}` (FR-18). The service removes no duplicates: an event a producer wrote twice arrives twice, with the same envelope `id` and two cursor ids; the client deduplicates by the envelope `id` (D8, FR-23). Cursors become invalid when the topic is deleted and recreated; a client then receives nothing until the new topic passes its cursor (FR-15), which the protocol document tells operators and clients.
+The `data` of an SSE frame and of a WebSocket frame is the same object: `{"id":"<uuid, lower case>","type":"<type>","occurredAt":"<as written>","data":<producer data>}` (FR-18). The service removes no duplicates: an event a producer wrote twice arrives twice, with the same envelope `id` and two cursor ids; the client deduplicates by the envelope `id` (D8, FR-23). Cursors become invalid when the topic is deleted and recreated; a cursor above the new end is clamped to it (FR-15), so the client receives every later event of the new topic, which the protocol document tells operators and clients.
 
 ### Falling behind, reconnecting and browser access
 
 - **Falling behind**: a connection more than `SUBSCRIBER_BUFFER` events behind is not closed; it gets its queued frames, then what it missed from the window or Kafka, then live events; no loss within the replay reach, no duplicate, the same order.
 - **Reconnecting**: after an ended stream, close code 1001 or 1011, or a lost connection, the client reconnects to any node with the last id it received, after a delay that grows and has a random part. 400, 403 and 422 are not retried; 503 is.
-- **Replay reach**: a resume reaches back to the earliest retained offset of the topic and at most `EVENT_REPLAY_MAX_OFFSETS` offsets below the serving node's tail; older events are skipped without a signal (FR-14, FR-23).
+- **Replay reach**: a resume reaches back to the earliest retained offset of the topic and at most `EVENT_REPLAY_MAX_EVENTS` offsets below the serving node's tail; older events are skipped without a signal (FR-14, FR-23).
 - **Browser access** (FR-28): a page of another origin can read the catalog, the status, GraphQL and an SSE stream only when its origin is in `CORS_ALLOWED_ORIGINS` or the value is `*`; a WebSocket handshake carrying `Origin` is accepted only for an allowed origin, and with the variable unset never; a request without `Origin` is never restricted. The list is a rule for browsers, not an authorization.
 
 ## Algorithms
 
-Notation: `P` the tail position (next offset to read; equal to the id of the last offset passed), `E` the end and `L` the earliest retained offset of the last successful watermark read, `F` the window floor, `p` the hub position at the arming of a subscriber, `c` the cursor of a request. `MAX` is `EVENT_REPLAY_MAX_OFFSETS`, `PRELOAD` is `EVENT_WINDOW_PRELOAD`.
+Notation: `P` the tail position (next offset to read; equal to the id of the last offset passed), `E` the end and `L` the earliest retained offset of the last successful watermark read, `F` the window floor, `p` the hub position at the arming of a subscriber, `c` the cursor of a request. `MAX` is `EVENT_REPLAY_MAX_EVENTS`, `START` is `EVENT_WINDOW_START_EVENTS`, `now` is `clock.now()` of `TailPorts`.
 
 ### 1. Start position and readiness (`TailEvents::round` before the first seek)
 
-1. `probe.partition_count()`. `Err`: fault `BrokerUnreachable`, `broker_reachable = false`, the round failed. `Ok(None)`: fault `TopicNotFound`. `Ok(Some(n))` with `n != 1`: fault `PartitionCount`. Each of the last two writes `event topic invalid` when the fault differs from the last one and fails the round. `Ok(Some(1))`: continue.
-2. `probe.watermarks()`. `Err`: as the first case of step 1. `Ok(w)`: `broker_reachable = true`, `earliest = w.earliest`, `end = w.end`.
-3. `start = max(w.earliest, w.end.rewound_by(PRELOAD))`; `tail.seek(start)` (`Err`: as step 1); `window.restart(start)`; `P = start`; `goal = w.end` (fixed for the life of the process); fault cleared; the observation clock starts.
-4. When `P >= goal` (also at once for an empty topic or `PRELOAD = 0` on a topic whose end is its start): **ready**: `publisher.started(P)`, `started = true`, log `event tail ready`.
-5. Publish `TailState`. Until ready, the tail fills the window only: records are pushed to the window and not published, and `Hub::check` answers `NotReady`, so no subscription can miss an event written around the start (FR-20).
+1. `probe.partition_count()`. `Err`: fault `Unreachable`, `broker_reachable = false`. `Ok(None)`: fault `Missing`. `Ok(Some(n))` with `n != 1`: fault `Partitions(n)`. On a fault: publish it, log it when it differs from the last one (`event topic unreachable` at warn for `Unreachable`, `event topic invalid` at error for the other two) and fail the round; the loop pauses `KAFKA_RETRY_DELAY`. `Ok(Some(1))`: continue.
+2. `probe.watermarks()`. `Err`: as the first case of step 1. `Ok(w)`: `broker_reachable = true`, `earliest = w.earliest`, `end = w.end`, `observations += 1`, `observed_at = now`.
+3. `start = max(w.earliest, w.end.rewound_by(START))`; `goal = w.end`; `window.restart(start)`; `tail.seek(start)` (`Err`: as step 1); `P = start`; fault cleared.
+4. When `P >= goal` (also at once for an empty topic or `START = 0`): `caught_up_at = now`; the first time: **started**: `publisher.started(P)`, `started = true`, log `event tail ready`.
+5. Publish `TailState`. Until started, the tail fills the window only: records are pushed to the window and not published, and `Hub::register` answers `NotReady`, so no subscription can miss an event written around the start (FR-20).
 
 The metadata check runs in every round until it passes, and never after: a partition count that changes later is not noticed (FR-17, follow-up).
 
 ### 2. The tail round (after the first seek)
 
 1. `tail.fetch()`.
-2. `Ok(batch)`: for each record in order, `parse_event(offset, value, EVENT_MAX_DATA_BYTES)`. `Err(reason)`: `rejected += 1`, log `event record rejected` (offset, reason), continue. `Ok(event)`: `window.push(Arc::new(event))` first, then, when ready, `behind += publisher.publish(&event)`. After the batch: `P = batch.next`; `publisher.advance(P)`; when `behind > 0` log `subscribers fell behind` once; when not ready and `P >= goal`, become ready (step 1.4). Clear the undecodable mark.
-3. `Err(BelowEarliest { earliest })`: log `event tail behind retention` (from `P` to `earliest`); `P = earliest`; `tail.seek(P)`; `publisher.advance(P)`. Events between the old `P` and `earliest` are gone from the topic.
-4. `Err(Undecodable { at })`: when the undecodable mark already holds `at` (the second consecutive round at that position): `rejected += 1`, log `event record rejected` with offset `at` and reason `undecodable batch`, `P = at + 1`, `tail.seek(P)`, `publisher.advance(P)`, clear the mark. Otherwise set the mark to `at` and fail the round. A batch of several records is passed one offset per two rounds and counted once, because the mark moves with `P` and only a new position after a success counts again.
-5. `Err(Unavailable)`: the round failed.
-6. **Observation** when the fetch returned no record, or failed, or the last watermark read is `OBSERVE_EVERY` (1 s) old: `probe.watermarks()`. `Ok(w)`: `broker_reachable = true`, `earliest`, `end` updated. `Err`: `broker_reachable = false`; the round failed.
-7. **Re-seek** `tail.seek(P)` when the fetch failed (`Unavailable`), when a failed watermark read is followed by a successful one, or when the fetch returned no record and the observation shows `end > P` (FR-21: the client's fetch backoff must not delay delivery after an outage).
+2. `Ok(batch)`: for each record in order, `parse_event(offset, value, EVENT_MAX_DATA_BYTES)`. `Err(reason)`: `rejected += 1`, log `event record rejected` (offset, reason), continue. `Ok(event)`: `window.push(Arc::new(event))` first, then, when started, `behind += publisher.publish(&event)`. After the batch: `P = batch.next`; `publisher.advance(P)`; when `behind > 0` log `subscribers fell behind` once; when `P >= goal`: `caught_up_at = now` and, the first time, become started (step 1.4).
+3. `Err(BelowEarliest { earliest })`: log `events lost to retention` (error; from `P`, to `earliest`, distance `earliest - P`), `retention_losses += 1`; `P = earliest`; `tail.seek(P)`; `publisher.advance(P)`. Events between the old `P` and `earliest` are gone from the topic.
+4. (No other kind of fetch error exists: a batch the client cannot decode is `Unavailable`, step 5, and nothing is skipped. While it lasts every round fails and `caught_up_at` grows old, so the readiness probe fails with `the event tail is behind`; design brief, open point 1.)
+5. `Err(Unavailable)`, from the fetch or from a seek of step 3 or 7: the round failed.
+6. **Observation** when the fetch returned no record, or failed, or the last watermark attempt (successful or not) is `OBSERVE_EVERY` (1 s) old: `probe.watermarks()`. `Ok(w)`: `broker_reachable = true`, `earliest`, `end` updated, `goal = w.end`, `observations += 1`, `observed_at = now`. `Err`: `broker_reachable = false`; the round failed.
+7. **Re-seek** `tail.seek(P)`, in the same round after the observation, when the fetch failed (`Unavailable`), when a failed watermark read is followed by a successful one, or when the fetch returned no record and the observation shows `end > P` (FR-21: the client's fetch backoff must not delay delivery after an outage).
 8. Publish `TailState` (`lag = end - P`, saturating, computed by the status).
-9. Result: `Err(RoundFailed)` when a step failed, else `Ok(())`. The first failure after a success logs `event tail failed`; the first success after a logged failure logs `event tail recovered`; a node that never succeeded logs neither. The loop pauses 1 s doubling to 30 s after failures (FR-26) and cuts a round after `round_limit` (`WAIT + 3 x KAFKA_REQUEST_TIMEOUT`).
-
-> Assumption: the tail skips an undecodable batch only when the second consecutive round fails at the same position. A single `Protocol` error may be transient (it was not probed), and skipping on it would lose events; FR-19 asks for the skip, the brief's open point preferred no skip, and two rounds is the smallest rule that keeps both.
->
-> Assumption: the variables, constants and readiness rules of the PRD replace those of the design brief where they differ (`EVENT_WINDOW_BYTES`, `EVENT_WINDOW_PRELOAD`, `EVENT_REPLAY_MAX_OFFSETS`, a single `KAFKA_REQUEST_TIMEOUT` for request and connect, the retry pause of 1 s to 30 s, 4 permits as a constant, no `EVENT_TAIL_STALE_AFTER`, a fixed start goal, no replay stall count but a stall time of `KAFKA_REQUEST_TIMEOUT`). The task binds this document to the PRD's names, and the PRD was written after the brief with these choices recorded.
+9. Result: `Err(RoundFailed)` when a step failed, else `Ok(())`. The first failure after a success logs `event tail failed`; the first success after a logged failure logs `event tail recovered`; a node that never succeeded logs neither. The loop pauses `KAFKA_RETRY_DELAY` after a failed round and none after a successful one (FR-26); it does not cut a round (the adapter limits bound it).
 
 ### 3. Subscription (`Subscriptions::open` and `Subscription::step`)
 
@@ -1172,42 +1192,35 @@ The metadata check runs in every round until it passes, and never after: a parti
 
 1. **Pending** (`pending` not empty): take events from the front until one is wanted (its type is in `types` and its sequence is above the type's since); encode it with `Frame::encode` and return `Frame`. When `pending` runs empty without a wanted event, put `VecDeque::new()` in its place and return `Idle`. Awaits nothing.
 2. **Start** (`target` is `None`): when the hub is closed, `End(HubClosed)`. Let `p` be the subscriber's position.
-   - no type: `floor = max(floor, p)`;
-   - `floor >= p` (cursor at or ahead of the tail, FR-15): nothing to read; queued frames at or below `floor` will be dropped;
-   - `floor < F` (below the window): `floor = max(floor, L, min(F, p.rewound_by(MAX)))`, with `L` from `TailState::earliest` (or `Cursor::START` when unknown);
-   - otherwise (inside the window) the floor stays.
+   - `floor > p` (cursor ahead of the tail, FR-15): `n = *ahead_since.get_or_insert(state.observations)`; await the `TailState` channel until `observations >= n + 2` (keep-alives continue; a closed channel: `End(HubClosed)`); `floor = min(floor, state.end)` with the `end` of that state; `ahead_since = None`. Queued frames at or below `floor` will be dropped. The stored `n` keeps the wait from restarting when the WebSocket live turn drops the step future on an inbound frame.
+   - `floor <= p` with no type: `floor = p`.
+   - `floor <= p` otherwise: `capped = p.rewound_by(MAX)`; when `floor < capped`: `floor = capped`, `subscriber.note_replay_capped()`, log info `replay capped` (from the old floor, to `capped`). No `L` here: a floor below the log start is found by the first Kafka page (`BelowEarliest`).
    Then `target = Some(p)`; return `Idle`.
 3. **Page** (`floor < target`): when the hub is closed, `End(HubClosed)`. `window.read(floor, target, &types, REPLAY_PAGE)`:
    - `Page { events, settled }`: append to `pending`, `floor = settled`; when no event came back, `tokio::task::yield_now().await`; `Idle`.
-   - `Evicted` (the floor is below `F`): acquire a permit (`Semaphore` of 4, first in first out, held to the end of the step); when the hub is closed, `End(HubClosed)`; `replay.page(floor)`:
-     - `Ok(batch)`: keep the records with sequence at or below `target` that parse (`parse_event`; invalid ones are skipped without a log entry or count) and are wanted; `new = min(batch.next, target)`. When `new == floor` and nothing was kept: `stalled_since` is set if unset, and when it is `KAFKA_REQUEST_TIMEOUT` old, `End(TopicFailed)`; else `stalled_since = None`, `floor = new`, kept events to `pending`. `Idle`.
+   - `Evicted` (the floor is below `F`): acquire a permit (`Semaphore` of `EVENT_REPLAY_PERMITS`, first in first out, held to the end of the step); when the hub is closed, `End(HubClosed)`; `replay.page(floor)`:
+     - `Ok(batch)`: keep the records with sequence at or below `target` that parse (`parse_event`; invalid ones are skipped without a log entry or count) and are wanted; `new = min(batch.next, target)`. When `new == floor` and nothing was kept: `stalls += 1`, at 3 `End(TopicFailed)`. Otherwise `stalls = 0`, `floor = new`, kept events to `pending`. `Idle`.
      - `Err(BelowEarliest { earliest })`: `floor = max(floor, min(earliest, window.start()))`; `Idle`.
-     - `Err(Undecodable { at })`: `floor = max(floor, at.advanced_by(1))`; `Idle`.
      - `Err(Unavailable)`: `End(TopicFailed)`.
 4. **Live** (`floor >= target`): `subscriber.recv().await`. A frame with sequence at or below `floor`: `Idle`. Another frame: `floor` = its sequence; `Frame` when wanted, else `Idle`. `None`: `subscriber.resume()`; `Err`: `End(HubClosed)`; `Ok(p')`: `target = None`; `Idle` (falling behind, section 5).
 
-`next()` calls `step` until `Frame` or `End`. Every path that returns `Idle` without awaiting is followed by a path that awaits (the window path yields, the Kafka path awaits the permit and the read, the live path the queue), so `next` cannot spin.
+`next()` calls `step` until `Frame` or `End`. Every path that returns `Idle` without awaiting is followed by a path that awaits (the window path yields, the Kafka path awaits the permit and the read, the live path the queue, the ahead wait the tail state), so `next` cannot spin.
 
 `subscribe(types)`: when the set plus the new names exceeds 100, `TooManyTypes`, nothing changes; else `since = subscriber.subscribe(&types)` and each new name enters with `since` (an existing name keeps its since). `unsubscribe(types)`: the names leave the hub entry and the map.
 
-> Assumption: the replay cap never raises the floor above the window floor `F`: the rule is `max(c, L, min(F, p - MAX))`, which equals FR-14's `max(c, L, P - MAX)` whenever `p - MAX <= F`, and gives FR-14's stated behaviour for `MAX = 0` (a cursor below `F` starts at `F`). The cap bounds Kafka reads; events still in memory are always served.
->
-> Assumption: a cursor ahead of the tail waits without a broker read and without the brief's two-observation wait: the floor is the cursor, the subscription is live at once and drops queued frames at or below it. This is FR-15's rule (neither clamped nor refused), which the PRD chose over the brief's clamp.
->
-> Assumption: a replay that meets an undecodable batch skips one offset per page read without a log entry or count, as FR-19 says for invalid records met by a replay; the tail has logged and counted it when it passed.
+> Assumption: the count of observations at which the wait of a cursor ahead began is kept in `Subscription::ahead_since`, beyond design brief 6.1, which takes `n` inside the step. The WebSocket live turn drops the step future when an inbound frame arrives first; without the stored count every command would restart the wait, and a chatty client could wait for ever.
 
 ### 4. Resume cases
 
 | Cursor `c` | What the subscription does |
 | --- | --- |
 | none | `floor = target = p`: live; ids above `p` |
-| `F <= c <= p` | window pages, no broker read, no permit, then live |
-| `L <= c < F` and `c >= p - MAX` | Kafka pages from `c` under the permits until the floor reaches `F`, then window pages, then live |
-| `c < F` and `c < p - MAX` | floor raised to `max(L, min(F, p - MAX))`; the client gets the events above it; no error, no marker |
-| `c < L` | floor raised to `L`; when retention moved further meanwhile, the first page answers `BelowEarliest` and the floor moves to `min(earliest, F)` |
-| `c == p` | live, no read |
-| `p < c <= E`, or `c > E` | no read; live with `floor = c`; frames at or below `c` dropped; ids above `c` delivered as the tail passes them |
-| any `c`, `MAX = 0` | below `F`: starts at `F`; never reads Kafka |
+| `F <= c <= p` (the end included), `c >= p - MAX` | window pages, no Kafka, no permit; then live |
+| retained, below the window, `c >= p - MAX` | Kafka pages under the permits until `floor >= F`, then window pages, then live |
+| more than `MAX` below `p` | floor raised to `p - MAX` (`replay capped` counted and logged); the events above it; no error, no marker |
+| below the earliest retained offset | the first page answers `BelowEarliest`; replay from the earliest retained event, or from the window floor `F` when that is lower |
+| `p < c <=` topic end | no read; waits for the second observation after the step began (no other bound; keep-alives continue); then live with `floor = c`, queued frames at or below `c` dropped |
+| above the topic end | clamped, never refused: `floor = end` of that observation; every later event |
 
 ### 5. Falling behind and catching up
 
@@ -1215,7 +1228,7 @@ When `try_send` fails, the hub drops the subscriber's sender (registry rule). `r
 
 ### 6. Why there is no gap and no duplicate
 
-Arming (registration or `resume`) happens under the registry lock and yields `p`. The tail pushes every valid event to the window before it publishes it, and publishes in offset order. So at arming every event with id at or below `p` is in the window or, when evicted, in Kafka at or above `L` (or gone by retention), and every event above `p` is queued to the subscriber after the arming (or the queue ends and section 5 covers it). The replay covers `(floor, p]`; the queue covers everything above `p`; a queued frame at or below the floor is dropped; each written frame becomes the floor. Ids on a connection therefore strictly increase, no offset is written twice on a connection, and no id at or below the cursor is written (D8). A run-time subscribe gets the hub position as the type's since, so no later replay writes an older event of that type.
+Arming (registration or `resume`) happens under the registry lock and yields `p`. The tail pushes every valid event to the window before it publishes it, and publishes in offset order; `deliver` moves the hub position to every published event's sequence, also when its type has no subscriber, so a subscriber armed between two records of a batch gets a `p` that covers the first. So at arming every event with id at or below `p` is in the window or, when evicted, in Kafka at or above `L` (or gone by retention), and every event above `p` is queued to the subscriber after the arming (or the queue ends and section 5 covers it). The replay covers `(floor, p]`; the queue covers everything above `p`; a queued frame at or below the floor is dropped; each written frame becomes the floor. Ids on a connection therefore strictly increase, no offset is written twice on a connection, and no id at or below the cursor is written (D8). A run-time subscribe gets the hub position as the type's since, so no later replay writes an older event of that type.
 
 ### 7. An invalid record
 
@@ -1223,31 +1236,31 @@ The tail skips it, logs `event record rejected` (offset, reason, never the value
 
 ### 8. Topic missing or with more than one partition
 
-At start, step 1.1 keeps the node `starting` with reason `topic-not-found` or `partition-count`, its readiness probe failing, its streaming routes answering 503 `the node is starting`, and `event topic invalid` logged once per change. The node never creates the topic. It retries with the back-off of the loop and becomes ready as soon as the topic exists with one partition. A topic deleted after the start makes the watermark reads fail (`brokerReachable: false`); the node stays ready (NFR-6).
+At start, step 1.1 keeps the node `starting` with reason `topic-not-found` or `partition-count`, its readiness probe failing, its streaming routes answering 503 `the node is starting`, and `event topic invalid` logged once per change. The node never creates the topic. It retries after `KAFKA_RETRY_DELAY` and becomes ready as soon as the topic exists with one partition. A topic deleted after the start makes the watermark reads fail (`brokerReachable: false`); the node keeps accepting subscriptions and its readiness probe fails with `the topic is unreachable` after `EVENT_TAIL_STALE_AFTER` (NFR-6).
 
 ### 9. Broker away and back
 
-While the partition cannot be read: `poll` returns empty or the round is cut; the observation fails, so `brokerReachable` turns false and the round fails; the loop pauses 1 s, 2 s, ... 30 s; open connections stay open with keep-alives; a ready node stays ready and accepts subscriptions; a resume inside the window is served; a replay below the window ends its stream after `KAFKA_REQUEST_TIMEOUT` without progress or at the first failed page (1011 on WebSocket); a starting node stays starting. When the broker is back: the first successful observation after a failed one triggers a re-seek to `P`, which clears the client's fetch backoff; the tail continues from `P`, so every event still retained is delivered, in order, with no repeat on a connection. Each adapter reconnects with one attempt per call; the retries are the rounds of the loop.
+While the partition cannot be read: `poll` returns empty or fails within the adapter limit; the observation fails, so `brokerReachable` turns false and the round fails; the loop pauses `KAFKA_RETRY_DELAY` between rounds; open connections stay open with keep-alives; a started node keeps accepting subscriptions and its readiness probe fails with `the topic is unreachable` once `observed_at` is `EVENT_TAIL_STALE_AFTER` old; a resume inside the window is served; a replay below the window ends its stream after three page reads in a row without a record and without progress, or at the first failed page (1011 on WebSocket); a starting node stays starting. When the broker is back: the first successful observation after a failed one triggers a re-seek to `P`, which clears the client's fetch backoff; the tail continues from `P`, so every event still retained is delivered, in order, with no repeat on a connection. Each adapter reconnects with one attempt per call; the retries are the rounds of the loop.
 
 ## Failure Modes
 
 | Failure | What the node does | What subscribers see |
 | --- | --- | --- |
-| Broker unreachable at start | stays `starting` (`broker-unreachable`), retries with back-off, logs nothing until it answers | 503 `the node is starting` on this node; the status route shows the reason |
+| Broker unreachable at start | stays `starting` (`broker-unreachable`), retries after `KAFKA_RETRY_DELAY`, logs `event topic unreachable` once per change of the fault | 503 `the node is starting` on this node; the status route shows the reason |
 | Topic missing or not one partition at start | stays `starting` (`topic-not-found`, `partition-count`), logs `event topic invalid` once per change | 503 `the node is starting` |
-| Broker or partition leader away after start | rounds fail, `brokerReachable: false`, `event tail failed` once, back-off up to 30 s, re-seek when back | open streams stay with keep-alives; no new events until the broker is back, then every retained event in order; new subscriptions accepted; window resumes served |
-| Broker hangs (connection open, no answer) | every call cut by the adapter's time-out, the round by `round_limit` | as above |
-| Replay read fails or makes no progress for `KAFKA_REQUEST_TIMEOUT` | the stream ends; `replay failed` logged | SSE stream ends (EventSource reconnects with `Last-Event-ID`); WebSocket close 1011; the client resumes on any node |
+| Broker or partition leader away after start | rounds fail, `brokerReachable: false`, `event tail failed` once, pauses `KAFKA_RETRY_DELAY` between rounds, re-seek when back; readiness fails with `the topic is unreachable` after `EVENT_TAIL_STALE_AFTER` | open streams stay with keep-alives; no new events until the broker is back, then every retained event in order; new subscriptions accepted by a started node; window resumes served |
+| Broker hangs (connection open, no answer) | every call ends at the adapter's time-out, so the round fails | as above |
+| Replay read fails, or three page reads in a row without a record and without progress | the stream ends; `replay failed` logged | SSE stream ends (EventSource reconnects with `Last-Event-ID`); WebSocket close 1011; the client resumes on any node |
 | Invalid record | skipped, logged, counted | nothing; a gap in the ids |
-| Undecodable batch at the tail | the first round fails; the second skips one offset, logs and counts once | nothing; a gap |
-| Retention overtakes the tail | jump to `L`, `event tail behind retention` | events below `L` are lost for every client of this node |
-| Cursor below `L` or below `P - MAX` | floor raised | the oldest events are skipped without a signal (FR-23) |
+| Batch the client cannot decode | every round fails, nothing is skipped, `event tail failed` once, readiness fails with `the event tail is behind` | no new events from this node until the batch can be read |
+| Retention overtakes the tail | jump to `L`, `events lost to retention` (error), `retentionLosses` counted | events below `L` are lost for every client of this node |
+| Cursor below `L` or below `P - MAX` | floor raised (`replay capped` for the cap) | the oldest events are skipped without a signal (FR-23) |
 | Slow client (queue full) | sender dropped, replay from window or Kafka on the connection | a delay, no loss within the replay reach, no duplicate |
 | Client takes no data for `STREAM_KEEP_ALIVE` | the kernel (transport bound) or the write deadline ends the connection | connection lost without end or close frame; resume with the last id |
 | Reader loop panics | `background task failed`, shutdown sequence, exit status 1 | SSE end of stream, WebSocket 1001; reconnect to another node |
 | SIGTERM | listener closed, loop stopped, hub closed, 2 s drain wait, HTTP drain | SSE end of stream, WebSocket 1001 after queued frames; reconnect elsewhere |
 | Node at its cap | 503 `the node is at its subscriber capacity` | retry on another node |
-| Topic deleted and recreated | offsets restart lower; the tail position is above the new end and waits; cursors above the new end wait too | nothing new until the node restarts (operators restart nodes after recreating the topic; `docs/operations.md`) |
+| Topic deleted and recreated | offsets restart lower; the tail position is above the new end and waits; a cursor above the new end is clamped to it after two observations (FR-15) | nothing new until the node restarts (operators restart nodes after recreating the topic; `docs/operations.md`) |
 | An event written twice by a producer | delivered twice with two cursors | the client deduplicates by the envelope `id` |
 
 ## Performance Design
@@ -1258,25 +1271,25 @@ Per-event work of a node on the live path:
 
 1. one share of a fetch (the tail long-polls once per node for all clients, NFR-3);
 2. one size check and one `serde_json` parse and serialisation of the record value, whatever the number of subscribers;
-3. one window push: a write lock, one deque append, pops while over the byte bound;
+3. one window push: a write lock, one deque append, pops while over the count or byte bound;
 4. one hub lock: one `HashMap` lookup by type; when the type has subscribers, one encoding of `Frame` (SSE event and WebSocket text) and one `try_send` of an `Arc<Frame>` per subscriber of that type (NFR-2); nothing per connection without the type;
 5. per subscriber task: one socket write of the shared bytes.
 
-What bounds a node: the subscriber cap, `SUBSCRIBER_BUFFER` shared frame references per subscriber, at most one replay page (500 events, 1 MiB plus one batch) per replaying connection, 4 replay permits and 4 Kafka readers per node, the window's `EVENT_WINDOW_BYTES`, the WebSocket buffers (4 096-byte read buffer, 32 768-byte frame and message). The sizing rule of `docs/operations.md` (NFR-9): `MAX_SUBSCRIBERS` times the cost of an idle connection, plus `EVENT_WINDOW_BYTES`, plus 4 replay pages, below half the memory limit; the per-connection costs of the first plan (about 6 KiB idle WebSocket, 20 KiB idle SSE) are estimates. The event rate of the system is bounded by one partition and by what one node can read and validate; adding nodes adds subscriber room, not event rate (NFR-12).
+What bounds a node: the subscriber cap, `SUBSCRIBER_BUFFER` shared frame references per subscriber, at most one replay page (500 events, 1 MiB plus one batch) per replaying connection, `EVENT_REPLAY_PERMITS` replay permits and as many Kafka readers per node, the window's `EVENT_WINDOW_MAX_EVENTS` and `EVENT_WINDOW_MAX_BYTES`, the WebSocket buffers (4 096-byte read buffer, 32 768-byte frame and message). The sizing rule of `docs/operations.md` (NFR-9): `MAX_SUBSCRIBERS` times the cost of an idle connection, plus `EVENT_WINDOW_MAX_BYTES`, plus `EVENT_REPLAY_PERMITS` replay pages, below half the memory limit; the per-connection costs of the first plan (about 6 KiB idle WebSocket, 20 KiB idle SSE) are estimates. The event rate of the system is bounded by one partition and by what one node can read and validate; adding nodes adds subscriber room, not event rate (NFR-12).
 
 The hub test that hands one event to 10 000 subscriber queues of one type is a structural test of NFR-2 and NFR-10 (each queue holds the frame, the publish returns without awaiting); it asserts no time.
 
 ## Removal of PostgreSQL and of the Example Context
 
-Source: `postgres-removal.md` (inventory with file and line). The removal runs after the notification feature, as its last stories, after the maintainer's approval, and lands in two pull requests because the configuration guard reads `required_directories` from the base branch.
+Source: `postgres-removal.md` (inventory with file and line). The removal runs after the notification feature, as its last stories, after the maintainer's approval, in an approved operator session (not the plugin's implementer loop). Its protected changes land in two pull requests because the configuration guard reads `required_directories` from the base branch: the shortened list goes into the preparatory pull request of story 3.1, the rest into pull request #5.
 
 Order:
 
 1. **Before any removal** (feature stories, no protected file): `notification/event-stream` is scaffolded (13 crates stay after the 3 example crates go: 10 + 3); `eventTypes` and `eventStreamStatus` are wired next to the example roots (the schema is never empty, and `EventStreamStatus`, which sorts before `EventType`, has several single-line fields for the protected G20 test); the Kafka broker joins the stack through `make/service.mk` without touching `DEPS`.
-2. **Preparatory pull request** (label `approved-config-change`): `protected-config.toml` loses `.sqlx` and `migrations` from `required_directories` (lines 158, 164) and nothing else. It is merged into `main` before pull request #5 deletes the directories.
-3. **Removal story A, code** (one commit; hooks need clippy, `cargo deny` unused and shear green together): delete `crates/company-subdomain/` and its members and workspace entries; delete `sqlx` and (when unused) `fake` from `[workspace.dependencies]`; delete `crates/shared/infrastructure/src/persistence.rs`, its tests and `build.rs`; delete the PostgreSQL probe and its tests; remove `Dependency::Database`; delete `service migrate` (`cli.rs` `Migrate`, `MigrateAction`, `DatabaseArgs`, `MigrateArgs`; `command/migrate.rs`; `tests/integration/migrate.rs`); delete `PostgresSettings`, the `DATABASE_*` parsing and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`; `bootstrap.rs` without pool, repository, `PostgresProbe` and example handlers (probes: cache, message broker, event stream); `graphql/schema.rs` with `Query(EventStreamQuery)` and `EmptyMutation`; `http.rs` and `openapi.rs` without the example state, tag and router; rewrite the unit and integration tests of `crates/service` on the remaining routes (body limit, timeout, panic and request id through `/api/graphql`, `/api/events/status` and `/api/health`); `tests/support` without `fixture.rs` and `repository.rs`; `tests/e2e` without database code and `steps/example_api_resource.rs`; delete `features/example_api_resource.feature`, rewrite `features/graphql.feature`, `features/http_errors.feature`, `features/api_docs.feature`, and remove the "database is unavailable" scenario of `features/health_check.feature`; regenerate both snapshots; `workspace.dsl` without the database container and the example group; reword `xtask/templates/infrastructure/lib.rs.tmpl:5`; refresh the lock without raising other versions. Protected files: `scripts/check-docs.sh`, `tests/CLI/bats/check_docs.bats`, the hash pin in `tests/CLI/bats/make_general.bats`, `tests/CLI/bats/make_quality_gates.bats`. Labels: `approved-config-change` and `approved-breaking-change`.
-4. **Removal story B, stack and gates** (with story A green in `make ci` only together, so the same pull request, one or two commits): Makefile targets `migrate`, `migrate-rollback`, `create-migration`, `setup-test-db`, `setup-load-test-db`, `sqlx-prepare`, `validate-sqlx-metadata`, `ensure-database` deleted and no target depends on them; `EXEC_ENV` without `DATABASE_STATEMENT_TIMEOUT`; `TEST_ENV` without `env -u DATABASE_URL`; `DEPS ?= localstack`; `CI_TESTS_TARGETS = tests-with-coverage doc-tests e2e-tests`; help and `.PHONY` lines; `docs-check` without `migrate --help`; `make/gates.mk` without `SQLX_CHECK_CMD`; scripts `setup-test-db.sh`, `check-sqlx-metadata.sh`, `setup-load-test-db.sh` deleted; `scripts/with-load-test-stack.sh` without the call; `scripts/install-tools.sh` and `scripts/doctor.sh` without sqlx-cli; compose files, `Dockerfile`, `.env`, `.env.test`, `.devcontainer/devcontainer.json` without database parts; `.github/workflows/quality.yml` without the job `query-metadata`; `tests.yml` and `scheduled.yml` without sqlx-cli; `AGENTS.md` gate list equal to `make ci-list`; `.claude/rust-sdlc.yml` regenerated (`persistence.engine: null`, `migrations_dir: null`, `offline_metadata: false`, `make.setup_test_db`, `make.create_migration`, `make.migrate`, `make.migrate_rollback`, `make.sqlx_prepare`, `make.validate_sqlx_metadata` set to `null`, required check `Persistence query metadata` removed); `.templatesyncignore` gets every synchronised path the removal changes or deletes; `migrations/` and `.sqlx/` deleted. Protected files: the rest of "Protected Changes", part B.
-5. **Documentation and skills**: the files of `postgres-removal.md` section 1(k); a new ADR supersedes `docs/adr/0005`. Gate: `make lint-repo docs-check`.
+2. **Preparatory pull request, story 3.1** (label `approved-config-change`, made by the maintainer or a session with `ALLOW_PROTECTED_CONFIG_EDIT=1`): `protected-config.toml` loses `.sqlx` and `migrations` from `required_directories` (lines 158, 164), together with the four allow-list entries of the feature ("Protected Changes"). It is merged into `main` before story 3.2 and long before pull request #5 deletes the directories; the feature branch merges `main`.
+3. **Removal story 5.1, part A, code** (one commit, operator session; hooks need clippy, `cargo deny` unused and shear green together): delete `crates/company-subdomain/` and its members and workspace entries; delete `sqlx` and (when unused) `fake` from `[workspace.dependencies]`; delete `crates/shared/infrastructure/src/persistence.rs`, its tests and `build.rs`; delete the PostgreSQL probe and its tests; remove `Dependency::Database`; delete `service migrate` (`cli.rs` `Migrate`, `MigrateAction`, `DatabaseArgs`, `MigrateArgs`; `command/migrate.rs`; `tests/integration/migrate.rs`); delete `PostgresSettings`, the `DATABASE_*` parsing and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`; `bootstrap.rs` without pool, repository, `PostgresProbe` and example handlers (probes: cache, message broker, event stream); `graphql/schema.rs` with `Query(EventStreamQuery)` and `EmptyMutation`; `http.rs` and `openapi.rs` without the example state, tag and router; rewrite the unit and integration tests of `crates/service` on the remaining routes (body limit, timeout, panic and request id through `/api/graphql`, `/api/events/status` and `/api/health`); `tests/support` without `repository.rs` and without the example fixtures of `fixture.rs` (the `event_type` fixture stays and the module comment is reworded; `fake` leaves the manifest and `[workspace.dependencies]` only when `event_type` does not use it); `tests/e2e` without database code and `steps/example_api_resource.rs`; delete `features/example_api_resource.feature`, rewrite `features/graphql.feature`, `features/http_errors.feature`, `features/api_docs.feature`, and remove the "database is unavailable" scenario of `features/health_check.feature`; regenerate both snapshots; `workspace.dsl` without the database container and the example group; reword `xtask/templates/infrastructure/lib.rs.tmpl:5`; refresh the lock without raising other versions. Protected files: `scripts/check-docs.sh`, `tests/CLI/bats/check_docs.bats`, the hash pin in `tests/CLI/bats/make_general.bats`, `tests/CLI/bats/make_quality_gates.bats`. Labels: `approved-config-change` and `approved-breaking-change`.
+4. **Removal story 5.1, part B, stack and gates** (parts A, B and the documentation of story 5.2 are green in `make ci` only together, so the same pull request #5; `docs-check` fails until story 5.2 rewrites the documents that cite the deleted targets, command, paths and variables): Makefile targets `migrate`, `migrate-rollback`, `create-migration`, `setup-test-db`, `setup-load-test-db`, `sqlx-prepare`, `validate-sqlx-metadata`, `ensure-database` deleted and no target depends on them; `EXEC_ENV` without `DATABASE_STATEMENT_TIMEOUT`; `TEST_ENV` without `env -u DATABASE_URL`; `DEPS ?= localstack`; `CI_TESTS_TARGETS = tests-with-coverage doc-tests e2e-tests`; help and `.PHONY` lines; `docs-check` without `migrate --help`; `make/gates.mk` without `SQLX_CHECK_CMD`; scripts `setup-test-db.sh`, `check-sqlx-metadata.sh`, `setup-load-test-db.sh` deleted; `scripts/with-load-test-stack.sh` without the call; `scripts/install-tools.sh` and `scripts/doctor.sh` without sqlx-cli; compose files, `Dockerfile`, `.env`, `.env.test`, `.devcontainer/devcontainer.json` without database parts (`docker-compose.prod.yml`: `app.depends_on` becomes `!reset null`, the block is not deleted, so the base dependencies on `localstack` and `kafka` of the inactive profile `local` do not return); `.github/workflows/quality.yml` without the job `query-metadata`; `tests.yml` and `scheduled.yml` without sqlx-cli; `AGENTS.md` gate list equal to `make ci-list`; `.claude/rust-sdlc.yml` regenerated by the operator session as its own commit (`persistence.engine: null`, `migrations_dir: null`, `offline_metadata: false`, `make.setup_test_db`, `make.create_migration`, `make.migrate`, `make.migrate_rollback`, `make.sqlx_prepare`, `make.validate_sqlx_metadata` set to `null`, required check `Persistence query metadata` removed); `.templatesyncignore` gets every synchronised path the removal changes or deletes, files under `crates/shared/`, `xtask/`, `tests/CLI/` and `.github/workflows/` and the health-check manifests by full file path, never by directory; `migrations/` and `.sqlx/` deleted. Protected files: the rest of "Protected Changes", part B.
+5. **Documentation and skills, story 5.2** (operator session): the files of `postgres-removal.md` section 1(k); a new ADR supersedes `docs/adr/0005`. Gates: `make lint-repo docs-check`, then `make ci` with `CONFIG_CHANGE_APPROVED=true BREAKING_CHANGE_APPROVED=true` over parts A, B and the documentation.
 
 The maintainer also removes the required status check "Persistence query metadata" from the branch rules of `main`, or the pull request waits for a check that never reports. The template's SQS parts stay (D11): `AWS_REGION` stays required and the SQS probe stays in the readiness report.
 
@@ -1284,21 +1297,23 @@ The maintainer also removes the required status check "Persistence query metadat
 
 ## Protected Changes
 
-Every change below waits for the maintainer's approval: the label `approved-config-change` on the pull request and a session restarted with `ALLOW_PROTECTED_CONFIG_EDIT=1` (`AGENTS.md:16`). Each is made only in the story that names it, placed first among the stories that need it; every story that does not need them can be implemented before the approval.
+The rust-implementer agent of the plugin never edits a protected path or the profile, and the plugin's self-check and publish step refuse a commit that changes one against the merge base. So the protected changes are made in two places, never by that agent:
 
-**Feature story (Kafka allow-list), before the Kafka adapter and the envelope parser:**
+- **Story 3.1, the preparatory pull request against `main`** (label `approved-config-change`; edited by the maintainer or a session with `ALLOW_PROTECTED_CONFIG_EDIT=1`; merged by the maintainer, requested in wave 1). It holds every protected change the feature needs and the one the removal needs in the base branch. The feature branch then merges `main`, so its merge base holds them and the plugin stays silent for stories 3.2 to 4.4.
+- **Stories 5.1 and 5.2 in pull request #5**, made in an approved operator session (labels `approved-config-change` and `approved-breaking-change`, `ALLOW_PROTECTED_CONFIG_EDIT=1`), as commits of story 5.1; from story 5.1 on, the plugin stages end ESCALATED by design and the operator continues by hand.
+
+**Preparatory pull request (story 3.1), exact diff:**
 
 | File | Exact change | Why |
 | --- | --- | --- |
-| `architecture.toml` | infrastructure layer `external`: add `"krafka"` and `"tokio"` | the adapter uses the client and `tokio::time::timeout` (D9, FR-21) |
-| `architecture.toml` | application layer `external`: add `"serde_json"` | the envelope is parsed and the event object written in the application (FR-18) |
-| `architecture.toml` | application layer `dev_external`: add `"tokio-tungstenite"` | the real-socket WebSocket test of the application crate |
+| `architecture.toml` | infrastructure layer `external` (`:52-61`): add `"krafka",` after `"aws-sdk-sqs",` and `"tokio",` after `"thiserror",` | the adapter uses the client and `tokio::time::timeout` (D9, FR-21) |
+| `architecture.toml` | application layer `external` (`:28-42`): add `"serde_json",` after `"serde",` | the envelope is parsed and the event object written in the application (FR-18) |
+| `architecture.toml` | application layer `dev_external` (`:43`): `["http-body-util", "proptest", "rstest", "serde_json", "tokio", "tower"]` becomes `["http-body-util", "proptest", "rstest", "serde_json", "tokio", "tokio-tungstenite", "tower"]` | the real-socket WebSocket test of the application crate |
+| `protected-config.toml` | `required_directories`: delete `".sqlx",` (`:158`) and `"migrations",` (`:164`) | the guard reads the list from the base branch, so pull request #5 can delete both directories |
 
-No other protected file changes for the feature: the test fakes stay `std`-only in `tests/support`; Kafka test helpers live in the infrastructure tests, `crates/service` and `tests/e2e` (external `*`); the publisher of the load test is a shell loop in the load-test compose override; `DEPS` and the Bats files are untouched because the broker's host listener is in a file that `make start` does not read.
+Unused allow-list entries are not reported (`xtask/src/arch/rules.rs:226-229`), and a directory that leaves the list may still exist, so the preparatory pull request is green on its own. No other protected file changes for the feature: the test fakes stay `std`-only in `tests/support`; Kafka test helpers live in the infrastructure tests, `crates/service` and `tests/e2e` (external `*`); the publisher of the load test is a shell loop in the load-test compose override; `DEPS` and the Bats files are untouched because the broker's host listener is in a file that `make start` does not read.
 
-**Preparatory pull request:** `protected-config.toml`: remove `.sqlx` (line 158) and `migrations` (line 164) from `required_directories`.
-
-**Removal story A (code), with `approved-breaking-change` as well:**
+**Story 5.1, part A (code), with `approved-breaking-change` as well:**
 
 | File | Exact change |
 | --- | --- |
@@ -1307,7 +1322,7 @@ No other protected file changes for the feature: the test fakes stay `std`-only 
 | `tests/CLI/bats/make_general.bats` | `:81-94` the new sha256 of `features/health_check.feature` without the database scenario |
 | `tests/CLI/bats/make_quality_gates.bats` | `:168-172` G6 with another invalid variable than `DATABASE_URL` (for example `KAFKA_TOPIC=..`) |
 
-**Removal story B (stack and gates):**
+**Story 5.1, part B (stack and gates):**
 
 | File | Exact change |
 | --- | --- |
@@ -1329,13 +1344,13 @@ No other protected file changes for the feature: the test fakes stay `std`-only 
 
 The line numbers are those of head `ecc5d17`; the stories re-read them. Protected files that mention the database and need no change: `scripts/check-invariants.sh`, `tests/CLI/bats/check_invariants.bats`, `tests/CLI/bats/make_contracts.bats`, `tests/CLI/bats/test_helper.bash`, `xtask/tests/**`, `xtask/src/arch/**`, `taplo.toml`, `_typos.toml`, `deny.toml`, `.cargo/mutants.toml`, `.githooks/*`, `scripts/with-env.sh`, `scripts/mutation-diff.sh`, the K6 thresholds.
 
-> Assumption: the plugin skill `bounded-context-scaffolding` names "no protected file changed" as a success criterion of a scaffold; story 1.1 meets it (the scaffold changes no protected file), and the allow-list entries come in their own approved story, as D16 requires.
+> Assumption: the plugin skill `bounded-context-scaffolding` names "no protected file changed" as a success criterion of a scaffold; story 1.1 meets it (the scaffold changes no protected file), and the allow-list entries come in the preparatory pull request of story 3.1, as D16 requires.
 
 ## Contract Impact
 
 - **OpenAPI** (`.github/openapi-spec/spec.yaml`): adds `GET /api/event-types` (`api_event_types_get`, 200 array of `EventType`, 400, 422, default problem) and `GET /api/events/status` (`api_events_status_get`, 200 `EventStreamStatus`, default problem), the schemas `EventType` and `EventStreamStatus`, the tag `EventStream`; the health operation's description names the event stream. `make.openapi_diff` reports additions only during the feature. The removal deletes the example paths and schemas (breaking; `approved-breaking-change`). The pinning test `crates/service/src/openapi/tests.rs` (operation count, schemas, tags) changes in the same commits. Spectral: each new operation has summary, description, tag, a 2xx and a 4xx or `default`, and described parameters.
 - **Streaming routes** stay out of OpenAPI (`OpenApiRouter::route`): OpenAPI cannot describe WebSocket, and a never-ending response would hang the Schemathesis gate (FR-38's assumption). They are specified in `docs/streaming-protocol.md`.
-- **GraphQL** (`.github/graphql-spec/spec`): adds `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!`, `eventStreamStatus: EventStreamStatus!`, `type EventType { name: String! }` and `type EventStreamStatus` with the ten fields of FR-4. The removal deletes the example query and mutation fields and the mutation root (breaking). `make.graphql_diff` reports additions only during the feature. The SDL test (no `node`, `Connection`, `update`, `delete`, `type Subscription`) holds.
+- **GraphQL** (`.github/graphql-spec/spec`): adds `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!`, `eventStreamStatus: EventStreamStatus!`, `type EventType { name: String! }` and `type EventStreamStatus` with the twelve fields of FR-4. The removal deletes the example query and mutation fields and the mutation root (breaking). `make.graphql_diff` reports additions only during the feature. The SDL test (no `node`, `Connection`, `update`, `delete`, `type Subscription`) holds.
 - Both snapshots are regenerated with `make generate-openapi-spec` and `make generate-graphql-spec` and committed in the story that changes the routes (`make validate-contract-snapshots`).
 
 ## Architecture Model Impact
@@ -1344,12 +1359,12 @@ The line numbers are those of head `ecc5d17`; the stories re-read them. Protecte
 
 ## Local Stack and Load Test
 
-**Broker.** `docker-compose.yml` gets a service `kafka`: image `apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40` (tag and digest, rule (b) of `check-invariants.sh`; the digest was read from the local image, the story confirms it against the registry), KRaft single node:
+**Broker.** `docker-compose.yml` gets a service `kafka`: image `apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40` (tag and digest, rule (b) of `check-invariants.sh`; the digest was read from the local image; the operator confirms it against the registry, the implementer uses the recorded one), KRaft single node:
 
 - `KAFKA_NODE_ID=1`, `KAFKA_PROCESS_ROLES=broker,controller`, `KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093`, `KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER`, `KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL`;
 - `KAFKA_LISTENERS=PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093,EXTERNAL://:9095`, `KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,INTERNAL://localhost:9094,EXTERNAL://localhost:9095`, `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT`;
 - `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`, `KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0`, `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`, `KAFKA_LOG_DIRS=/var/lib/kafka/data` on the volume `kafka_data` (the image writes to `/tmp` otherwise);
-- health check: `kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists --topic notifications --partitions 1 --replication-factor 1` followed by `--describe --topic notifications`, interval 10 s, start period 60 s; the broker is healthy only when the topic exists with one partition;
+- health check: `/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists --topic notifications --partitions 1 --replication-factor 1` followed by `--describe --topic notifications`, interval 10 s, start period 60 s; the broker is healthy only when the topic exists with one partition;
 - `app` gets `depends_on: kafka: condition: service_healthy` and `KAFKA_BOOTSTRAP_SERVERS: kafka:9092`.
 
 `docker-compose.prod.yml`: `kafka` under profile `local`; `app` gets `KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}` and `MAX_SUBSCRIBERS: ${MAX_SUBSCRIBERS:-5000}` (NFR-9), and no `:?` variable for Kafka (a protected test renders the reference with only `DATABASE_URL` and `AWS_REGION`, later only `AWS_REGION`). `docker-compose.load_test.override.yml`: `kafka` without a host port and `restart: 'no'`. `docker-compose.override.yml`: no Kafka port. Data and the topic survive a restart of the stack's service (volume).
@@ -1365,9 +1380,9 @@ Both names get a row in a new `docs/make-targets-service.md` (docs-check rule 6)
 >
 > Assumption: the stack creates the topic in the broker's health check (`--if-not-exists`, not probed), so no one-shot service is needed and every `up --wait` waits until the topic exists.
 
-**Publisher of the load test.** A service `load-test-publisher` in `docker-compose.load_test.override.yml` uses the Kafka image: `bash -c` waits until `kafka-topics.sh --describe --topic notifications` succeeds, then pipes a loop into one `kafka-console-producer.sh --bootstrap-server kafka:9092 --topic notifications --producer-property linger.ms=0 --producer-property acks=all`. The loop writes one envelope every 100 ms: `{"id":"<from /proc/sys/kernel/random/uuid>","type":"load.test","occurredAt":"<date -u +%Y-%m-%dT%H:%M:%SZ>","data":{"sentAtMs":<date +%s%3N>}}`. Embedded `$` are written `$$` (compose). No production route publishes, no Rust code and no new image are involved, and no protected file changes.
+**Publisher of the load test.** A service `load-test-publisher` in `docker-compose.load_test.override.yml` uses the Kafka image: `bash -c` waits until `/opt/kafka/bin/kafka-topics.sh --describe --topic notifications` succeeds, then pipes a loop into one `/opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic notifications --producer-property linger.ms=0 --producer-property acks=all`. The loop writes one envelope every 100 ms: `{"id":"<from /proc/sys/kernel/random/uuid>","type":"load.test","occurredAt":"<date -u +%Y-%m-%dT%H:%M:%SZ>","data":{"sentAtMs":<date +%s%3N>}}`. Embedded `$` are written `$$` (compose). No production route publishes, no Rust code and no new image are involved, and no protected file changes.
 
-**Scenario** `tests/Load/scripts/subscriptions.js` (sorts after `health`): `setup` polls `GET /api/events/status` until `state` is `ready`; the smoke profile holds 50 SSE subscribers (`http.asyncRequest` with a timeout, without the profile's `test_type` tag) and 50 WebSocket subscribers (`k6/websockets`, `types=load.test`); each iteration checks a catalog request (200), that the WebSocket opened (101), and that the held SSE response received at least one event; the WebSocket handler records `Date.now() - data.data.sentAtMs` in the trend `event_delivery_latency`. `tests/Load/config.json.dist` gets `endpoints.subscriptions` with all four profiles, the catalog p99 budget (500 ms in smoke) and `deliveryThreshold` (2 000 ms in smoke); both are budgets, not measurements. The first seconds of the publisher (JVM start) are excluded by the `setup` wait and the scenario's ramp.
+**Scenario** `tests/Load/scripts/subscriptions.js` (sorts after `health`): `setup` polls `GET /api/events/status` until `state` is `ready`; the smoke profile holds 50 SSE subscribers (`http.asyncRequest` with a timeout, without the profile's `test_type` tag) and 50 WebSocket subscribers (`k6/websockets`, `types=load.test`); each iteration checks a catalog request (200), that the WebSocket opened (101), and that the held SSE response received at least one event (the story first probes one `http.asyncRequest` with `timeout` against the SSE route; when the pinned K6 returns no body for a request ended by its own timeout, the SSE check becomes: while the SSE requests are held, `GET /api/events/status` reports `subscribers` at or above the held connections, and delivery is measured on the WebSocket only; `docs/load-testing.md` records which form is used); the WebSocket handler records `Date.now() - data.data.sentAtMs` in the trend `event_delivery_latency`. `tests/Load/config.json.dist` gets `endpoints.subscriptions` with all four profiles, the catalog p99 budget (500 ms in smoke) and `deliveryThreshold` (2 000 ms in smoke); both are budgets, not measurements. The first seconds of the publisher (JVM start) are excluded by the `setup` wait and the scenario's ramp.
 
 > Assumption: the publisher writes at a fixed 10 events per second set in the stack, not driven by the K6 profile. It is the smallest honest publisher the pinned K6 image allows (no Kafka module); a profile-driven rate is a follow-up.
 
@@ -1375,7 +1390,7 @@ Both names get a row in a new `docs/make-targets-service.md` (docs-check rule 6)
 
 General rules: unit tests in sibling `tests.rs`; paused tokio time wherever a timer is involved; every awaited call of a test inside `tokio::time::timeout`; a scripted fake that a loop waits on pends (`std::future::pending`) after its script instead of answering for ever, so a mutant fails an assertion and never hangs a test; one Kafka topic per test (nextest runs tests in parallel processes against one broker).
 
-**Fakes (`tests/support`, `std` and `async-trait` only, depends on `event-stream-domain`):** `ScriptedTopicProbe`, `ScriptedTopicTail` and `ScriptedTopicReplay`, each a `Mutex<VecDeque<Result<..>>>` of scripted answers that records its calls (seek positions, page positions); `StaticTopic`, an in-memory partition (records, log start, end) that serves all three ports with the port rules, for subscription and two-node tests without a broker.
+**Fakes (`tests/support`, `std` and `async-trait` only, depends on `event-stream-domain`):** `ScriptedTopicProbe`, `ScriptedTopicTail` and `ScriptedTopicReplay`, each a `Mutex<VecDeque<Result<..>>>` of scripted answers that records its calls (seek positions, page positions); `StaticTopic`, an in-memory partition (records, log start, end) that serves all three ports with the port rules, for subscription and two-node tests without a broker. `StaticTopic::fetch` with no record at or above the position returns `Pending` once and wakes itself before it answers the empty batch (a hand-written future, std only), so a loop on it yields; `page` answers at once; at the end of the log both answer an empty batch whose `next` equals the requested position. Test support has no timer, so a test that runs the supervised loop on it wraps the tail in a pacing adapter of its own crate (`crates/service` tests), which awaits `tokio::time::sleep(KAFKA_FETCH_MAX_WAIT)` after an empty batch.
 
 **Domain:** `EventType` (length 128 and 129, the pattern), `Cursor::parse` (digits, sign, blank, empty, overflow), the saturating arithmetic of `Cursor` and `Offset::sequence`, `Sequence::new(0)`, `PageLimit::reached`, `StoredEvent::cost`.
 
@@ -1383,21 +1398,21 @@ General rules: unit tests in sibling `tests.rs`; paused tokio time wherever a ti
 
 - `parse_event`: every `RejectReason`; size at `max_bytes` and one byte above; a duplicate member; unknown members dropped; `data` of every JSON type; an upper-case UUID written lower case; `+00:00` and `Z`; years 1969, 1970, 9999; the output equals the byte string of `serde_json::to_string` of a test struct with `id`, `type`, `occurredAt`, `data` in this order (never a `serde_json::Value` comparison: `preserve_order` differs between a workspace run and a single-crate mutation run).
 - `ws_json` and `error_json`: byte equality with the same oracle, including strings with quotes, backslashes, control characters and characters outside the Basic Multilingual Plane.
-- `Window`: push and eviction by bytes (floor moves to the popped id, one event always kept); `restart`; every branch of `read` (evicted, no types, limit by rows, by bytes, scan bound, `settled` in each case).
-- `TailEvents` with scripted fakes and `LogRecorder`: each start-up case of "Algorithms" 1 (with the log entry once per change of fault); `PRELOAD` 0 and an empty topic ready at once; the window filled but nothing published before ready; every case of the tail round (valid, invalid, null value, `BelowEarliest`, `Undecodable` once and twice, `Unavailable`); the observation period and the three re-seek triggers (the fake records seeks); the failed/recovered entries only at transitions and none before the first success; `subscribers fell behind` once per batch.
-- `Hub`: the registry rules of the first plan (`check` and `register` order, cap, falling behind and resume, no empty key, count published under the lock, `advance`, `drained`); one event handed to 10 000 subscriber queues of its type (NFR-1 structural).
-- `Subscription` with a real `Hub`, real `Window` and scripted replay: every row of "Resume cases"; the floor rule with `MAX` 0, small and large; permits (with four replays parked in gated page reads, a fifth makes no call until one of them returns); the stall rule under paused time; `BelowEarliest`, `Undecodable`, `Unavailable`; closed hub before a read; run-time subscribe and unsubscribe during a replay; falling behind with a burst larger than the queue (no `End`, count unchanged); `pending` capacity 0 after drain; the 100-type limit.
-- `Session`, the pump through a scripted `Connection` (write deadline, ping during a replay turn, lingering), handlers through `oneshot` (every problem of FR-16 in its order, the 503s from `availability`, the SSE head, the upgrade rejection as a problem), `StatusSource::snapshot` (every state and reason, `lag`, nulls), GraphQL (`eventTypes` limits, `eventStreamStatus`).
+- `Window`: push and eviction by count and by bytes (floor moves to the popped id, one event always kept); `restart`; every branch of `read` (evicted, no types, limit by rows, by bytes, scan bound, `settled` in each case).
+- `TailEvents` with scripted fakes, a `FixedClock` and `LogRecorder`: each start-up case of "Algorithms" 1 (with the log entry once per change of fault, `event topic unreachable` included); `START` 0 and an empty topic ready at once; the window filled but nothing published before started; every case of the tail round (valid, invalid, null value, `BelowEarliest` with `events lost to retention` and `retention_losses`, `Unavailable` in every round with `P` unmoved and nothing skipped); the observation period by the last attempt, `goal`, `observations`, `observed_at` and `caught_up_at`; the three re-seek triggers in the same round and a failing seek failing the round (the fake records the call order); the failed/recovered entries only at transitions and none before the first success; `subscribers fell behind` once per batch.
+- `Hub`: the registry rules (`register` order, cap, falling behind and resume, no empty key, `close` drops every sender while the count stays, count published under the lock, `deliver` moving the position without a subscriber, `advance`, `drained`, `replay_capped`); one event handed to 10 000 subscriber queues of its type (NFR-1 structural).
+- `Subscription` with a real `Hub`, real `Window`, a `TailState` channel and scripted replay: every row of "Resume cases"; the cap with `MAX` 1, small and large (`replay capped` and the counter); the wait of a cursor ahead (no frame before the second observation, clamp above the end, a dropped tail sender, a step future dropped and polled again); permits (with `EVENT_REPLAY_PERMITS` replays parked in gated page reads, one more makes no call until one of them returns); the stall count (three pages without progress, a page with progress resets it); `BelowEarliest`, `Unavailable`; an event delivered while nobody subscribes to its type, then a subscription with a cursor below it; closed hub before a read; run-time subscribe and unsubscribe during a replay; falling behind with a burst larger than the queue (no `End`, count unchanged); `pending` capacity 0 after drain; the 100-type limit.
+- `Session`, the pump through a scripted `Connection` (write deadline, ping during a replay turn, lingering), handlers through `oneshot` (every problem of FR-16 in its order: 403, 400 and 422, then the 503s from `open`, then the upgrade rejection as a problem; the SSE head), `StatusSource::snapshot` (every state and reason, `lag`, nulls), GraphQL (`eventTypes` limits, `eventStreamStatus`).
 - `tests/integration/ws.rs`: the real-socket cases of the first plan (upgrade, no types then subscribe, ping and pong, 32 768-byte frame answered, a header declaring 32 769 bytes ends the connection, a burst larger than the queue disconnects nobody).
 
 **Infrastructure** (`tests/integration`):
 
 - `real_broker.rs` (the broker of the stack, `KAFKA_BOOTSTRAP_SERVERS` from the environment through a helper with `#[expect(clippy::disallowed_methods, reason = "..")]`): topics created with `admin().create_topics`, records produced with the krafka `Producer` (`acks All`, `linger 0`, partition 0); partition count 1 and 3; a missing topic gives `None`; watermarks of an empty and a filled topic; fetch and page return records at or above the position with `next` past them; read-committed: an aborted transaction's records are never returned and the position passes the markers; a position below the log start (records deleted through the admin client, or a topic with small `retention.ms` and `segment.ms` when deletion is not available in the client) gives `BelowEarliest` with the new start; the largest page is recorded (open point 2 of the brief).
-- `fake_broker.rs` (`FakeBroker::start_in_memory` with paused time): a silent broker (`Control::Silence`) gives `Unavailable` within the time limit; `Disconnect` gives `Unavailable` and the next call reconnects; `CorruptRecords` gives `Undecodable`; `crash` and `restart`; `require_sasl_plain` with `KafkaSecurity::SaslPlaintext`.
+- `fake_broker.rs` (`FakeBroker::start_in_memory` with paused time): a silent broker (`Control::Silence`) gives `Unavailable` within the time limit; `Disconnect` gives `Unavailable` and the next call reconnects; `CorruptRecords` gives `Unavailable`; `crash` and `restart`; `require_sasl_plain` with `KafkaSecurity::SaslPlaintext`.
 
-**Service:** `background.rs` under paused time with a `TailEvents` on scripted fakes (back-off 1, 2, 4 ... 30 s and reset; a cut round; the stop flag ends the loop and the pause; a panicking round gives `TaskFailed("tail")`); `EventStreamProbe`; config (every variable as the only problem, the SASL rule, `FIELDS` updated); `check-config`; `bound_stalled_peer`; origins; spawned-binary tests updated (the idle log stays three entries with no broker); an `Application` with `StaticTopic` adapters serving SSE and WebSocket over real sockets; the two-node test: two tails and hubs on one real topic, one subscriber on each, every event on both (FR-22).
+**Service:** `background.rs` under paused time with a `TailEvents` on scripted fakes (one pause of `KAFKA_RETRY_DELAY` after every failed round, none after a success; the stop flag ends the loop and the pause; a panicking round gives `TaskFailed("tail")`); `EventStreamProbe` (every reason in its order, the staleness bound on both sides, a future instant); config (every variable as the only problem, the SASL rule, the connect time-out rule, `FIELDS` updated); `check-config`; `bound_stalled_peer`; origins; spawned-binary tests updated (the idle log with no broker is `listening`, `event topic unreachable`, `shutdown signal received`, `stopped`); an `Application` with `StaticTopic` adapters (its tail behind the pacing adapter) serving SSE and WebSocket over real sockets; `tests/e2e/world.rs` and the service tests that expect 204 from `/api/health` wait for readiness first; the two-node test: two tails and hubs on one real topic, one subscriber on each, every event on both (FR-22).
 
-**End to end** (`features/`, `tests/e2e`, the broker of the stack, a topic per scenario, events produced by the world with the krafka producer): catalog, status, SSE delivery of a subscribed type only, WebSocket delivery with run-time subscribe, resume from the window, resume from Kafka (a small `EVENT_WINDOW_BYTES`), an invalid record skipped and counted, the 503 of a starting node (a topic that does not exist yet).
+**End to end** (`features/`, `tests/e2e`, the broker of the stack, a topic per scenario, events produced by the world with the krafka producer): catalog, status, SSE delivery of a subscribed type only, WebSocket delivery with run-time subscribe, resume from the window, resume from Kafka (a small `EVENT_WINDOW_MAX_EVENTS`), an invalid record skipped and counted, the 503 of a starting node (a topic that does not exist yet).
 
 **Coverage and mutation:** one coverage run over `--lib --bins --test integration`, 100 % lines and functions; the Gherkin suite is not instrumented, so every branch is reached by unit or integration tests. Mutation: each mutant is judged by its own crate's tests; the fakes pend after their script; no test waits on a real timer for more than about one second; the non-Linux form of `bound_stalled_peer` has an empty body (no mutant). The real-broker tests are in the serialized verify step (one broker).
 
@@ -1412,19 +1427,18 @@ New records under `docs/adr/`, numbered after the last one:
 5. **At least once, client-side deduplication.** The service delivers every retained event above the cursor in offset order and removes no duplicates; the client deduplicates by the envelope `id`, which the event object carries for that reason.
 6. **PostgreSQL is removed.** The service stores nothing; Kafka holds all shared state. Supersedes `docs/adr/0005`. The example context goes with it.
 7. **SQS stays.** The template's SQS parts and LocalStack stay as shipped; the notification code does not use them. Their removal is a follow-up the owner may ask for.
-8. **Readiness means "caught up once".** A node is ready when it reached the end it read at start; a later broker outage does not make it unready, because every node is equally affected.
+8. **Readiness follows the freshness of the tail.** A node accepts subscriptions from the first time its position reached the end (`started`). Its readiness probe passes only while its last successful watermark read and the last time it reached the end are each at most `EVENT_TAIL_STALE_AFTER` old, so a node cut off from Kafka, or whose tail is stuck, stops receiving new clients from a load balancer that follows the probe while the other nodes deliver (design brief 3.7).
 
 ## Differences from the First Plan
 
 - The PostgreSQL event log, its three tables and migrations, the relay, the listener, pruning, the seed and the catalog table are gone; the catalog comes from `EVENT_TYPES`.
 - The context `internal/cluster`, the leader lease, the election, `NODE_ID`, `CLUSTER_*` and `GET /api/cluster` are gone; the status is `GET /api/events/status` and the GraphQL query `eventStreamStatus`.
 - The SQS event source, `EVENT_QUEUE_URL`, `EVENT_RETENTION`, `EVENT_RELAY_POLL_INTERVAL` and the LocalStack queue of the load test are gone; producers write to Kafka.
-- New: the `TailEvents` loop reads Kafka on every node; the memory `Window`; replay from Kafka below the window under 4 permits and pages of 500; the ports `TopicProbe`, `TopicTail`, `TopicReplay`; the Kafka adapter; the readiness probe of the event stream.
+- New: the `TailEvents` loop reads Kafka on every node; the memory `Window`; replay from Kafka below the window under `EVENT_REPLAY_PERMITS` permits and pages of 500; the ports `TopicProbe`, `TopicTail`, `TopicReplay`; the Kafka adapter; the readiness probe of the event stream.
 - The cursor is the Kafka offset plus 1 instead of the log sequence; ids have gaps.
-- The event on the wire is the whole envelope object (`id`, `type`, `occurredAt`, `data`) instead of opaque data text; `write_json_string` is replaced by `serde_json`.
-- A cursor ahead of the topic end waits instead of being clamped to the latest sequence.
-- The replay is capped by `EVENT_REPLAY_MAX_OFFSETS` below the tail and by retention instead of by `EVENT_RETENTION`.
+- The event on the wire is the whole envelope object (`id`, `type`, `occurredAt`, `data`) instead of opaque data text; `write_json_string` is replaced by `serde_json` for the event object; the frame wrapper is written by hand.
+- A cursor ahead of the topic end is still clamped, now to the end of the topic after two watermark reads of the node.
+- The replay is capped by `EVENT_REPLAY_MAX_EVENTS` below the tail and by retention instead of by `EVENT_RETENTION`.
 - Six background loops become one; the supervision, the stop flag, the shutdown order (without the lease release), the 2 s drain wait, the transport bound, the close codes and the exit statuses are kept.
-- The 503 answers of a starting or shutting-down node move into a middleware so that they precede validation (FR-16).
 - Kept in substance: the hub and its registry rules, the subscription state machine (start, pages, pending, live), the SSE and WebSocket protocols, limits, commands, error frames and the pump, the browser origin rules, the configuration style.
-- Protected changes: the first plan had none; this plan has three allow-list entries for the feature and the removal set of PostgreSQL.
+- Protected changes: the first plan had none; this plan has four allow-list entries for the feature and the shortened `required_directories` in one maintainer pull request (story 3.1), and the removal set of PostgreSQL in operator commits.

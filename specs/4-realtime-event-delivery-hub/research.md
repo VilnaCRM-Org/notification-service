@@ -53,7 +53,7 @@ Tags used below:
 - `make new-context group=<g> context=<c>` writes three manifests and three `lib.rs` files with no dependency and refreshes the lock offline [V `xtask/src/scaffold.rs:71-110`]. It generates no sqlx code. Only one template sentence says "SQL lives here" (`xtask/templates/infrastructure/lib.rs.tmpl:5`, not protected).
 - The plugin's scaffolding checklist has twelve items, C1 to C12 [V plugin `skills/bounded-context-scaffolding/SKILL.md:102-115`]:
   - C8 (migration, `.sqlx`) does not apply: the context stores nothing.
-  - The skill's success criterion "no protected file changed" (`:45`) holds for the scaffold itself. The allow-list entries come in their own approved story.
+  - The skill's success criterion "no protected file changed" (`:45`) holds for the scaffold itself. The allow-list entries come in the preparatory pull request of story 3.1.
 
 ### 2.2 House rules that shape the code [V]
 
@@ -161,12 +161,12 @@ Tags used below:
 | `poll` never reports an outage; it returns `Ok(empty)` when the broker is stopped, killed or paused | [V probes 08-11] | detect outages from `fetch_watermarks`, which returns the error |
 | After an unclean outage the client's per-partition backoff (up to 30 s, not configurable) delayed new records by 20.45 s on a plain tail; a re-seek to the own position brought them in 0.12 to 0.48 s | [V probe 11a-c] | re-seek after a failed round, and when the watermarks show the end above the position |
 | `poll(timeout)` is bounded by `request_timeout` (default 30 s), not by its argument, against a hung broker | [V probe 09] | set both client time-outs and wrap each call in the service's own time-out |
-| `request_timeout >= connect_timeout` is enforced | [V probe 07] | one variable for both |
+| `request_timeout >= connect_timeout` is enforced | [V probe 07] | `KAFKA_CONNECT_TIMEOUT` may not exceed `KAFKA_REQUEST_TIMEOUT` (cross-field rule) |
 | `connect()` makes one attempt; a refused port fails in under 5 ms | [V probe 07] | the service retries; an address that never answers was not probed [U] |
 | One connection per handle: a parked long poll delayed a ListOffsets on the same handle by 4.70 s; on two handles it took 2.5 ms | [V probe 12] | separate handles for the tail, the watermark reader and each replay permit |
 | Fetch size limits are soft; a 2 MiB record came through with a 1 KiB fetch limit | [V probe 14] | `EVENT_MAX_DATA_BYTES` is checked by the service; one batch may exceed a page budget |
 | All five compression codecs decode with the default features | [V probe 13] | no feature for decoding |
-| An undecodable batch makes `poll` return `Err(Protocol)` until the application seeks past it | [V source, not probed] | the tail skips it by a seek |
+| An undecodable batch makes `poll` return `Err(Protocol)` until the application seeks past it | [V source, not probed] | the service does not skip it: `Unavailable`, the round fails, readiness fails by staleness (design brief, open point 1) |
 | A consumer dropped without `close()` logs a warning | [V source] | the `krafka=error` log filter of the architecture |
 
 ### 3.3 Security, licence and versions
@@ -237,10 +237,9 @@ The rule (`AGENTS.md:16`): never change an item of `protected-config.toml` to ob
 
 | Group | Files | Approval |
 | --- | --- | --- |
-| Feature allow-list (story 3.1) | `architecture.toml`: infrastructure `external` += `krafka`, `tokio`; application `external` += `serde_json`; application `dev_external` += `tokio-tungstenite` | `approved-config-change` |
-| Preparatory pull request (story 5.1) | `protected-config.toml`: drop `.sqlx` and `migrations` from `required_directories` | `approved-config-change`, merged into `main` first |
-| Removal A (story 5.2) | `scripts/check-docs.sh`, `tests/CLI/bats/check_docs.bats`, the hash in `make_general.bats:81-94`, `make_quality_gates.bats:168-172` | `approved-config-change` and `approved-breaking-change` |
-| Removal B (story 5.2) | `protected-config.toml:32-33`; delete `scripts/setup-test-db.sh` and `scripts/check-sqlx-metadata.sh`; `make/gates.mk:14`; `scripts/with-load-test-stack.sh`; delete `make_database.bats`; `make_tests.bats`, `make_general.bats`, `make_execution_mode.bats`, `make_lifecycle.bats`, `make_load_tests.bats`, `make_security.bats`; `make/tool-versions.mk:16`; `.cargo/config.toml:5-6`; `architecture.toml:57`; `.claude/settings.json` | `approved-config-change` |
+| Preparatory pull request (story 3.1, maintainer) | `architecture.toml`: infrastructure `external` += `krafka`, `tokio`; application `external` += `serde_json`; application `dev_external` += `tokio-tungstenite`; `protected-config.toml`: drop `.sqlx` and `migrations` from `required_directories` | `approved-config-change`, its own pull request merged into `main` before story 3.2 |
+| Removal A (story 5.1, operator session) | `scripts/check-docs.sh`, `tests/CLI/bats/check_docs.bats`, the hash in `make_general.bats:81-94`, `make_quality_gates.bats:168-172` | `approved-config-change` and `approved-breaking-change` |
+| Removal B (story 5.1, operator session) | `protected-config.toml:32-33`; delete `scripts/setup-test-db.sh` and `scripts/check-sqlx-metadata.sh`; `make/gates.mk:14`; `scripts/with-load-test-stack.sh`; delete `make_database.bats`; `make_tests.bats`, `make_general.bats`, `make_execution_mode.bats`, `make_lifecycle.bats`, `make_load_tests.bats`, `make_security.bats`; `make/tool-versions.mk:16`; `.cargo/config.toml:5-6`; `architecture.toml:57`; `.claude/settings.json` | `approved-config-change` |
 
 Avoided protected changes, with the design choice that avoids them:
 
@@ -273,14 +272,14 @@ What does not exist:
 | Risk | Severity | Mitigation in the plan |
 | --- | --- | --- |
 | `krafka` is young (one author, pre-1.0, breaking minor releases) | high | exact pin `=0.32.0`, a domain port, read-only use, `rdkafka` named as the alternative (D9) |
-| `cargo deny` never run on `krafka` and its tree (`ring` or `aws-lc-rs`, licences, duplicates) | medium | story 3.4 runs `make.check_security`; a refusal is escalated, `deny.toml` is not edited |
+| `cargo deny` never run on `krafka` and its tree (`ring` or `aws-lc-rs`, licences, duplicates) | medium | story 3.5 runs `make.check_security`; a refusal is escalated, `deny.toml` is not edited |
 | The fake broker differs from a real broker (seek above the end, log start, no TLS) | medium | fault cases only; behaviour cases run against the real broker; never run so far |
 | `poll` hides outages; backoff delays recovery by up to 30 s | high, handled | watermark reads on a separate handle every 1 s, re-seek rule (FR-21) |
 | Silent jump to the end with the default offset reset | high, handled | `AutoOffsetReset::None`, cursor comparison in the service |
 | `wildcard_enum_match_arm` on `#[non_exhaustive]` client enums | low | adapter maps errors in one place; checked when the adapter is written |
-| The allow-list approval blocks most of the feature (the envelope parser needs `serde_json` in the application layer) | medium | stories that do not need it come first (epics waves 1 to 5) |
-| The removal is approval-gated as a whole and needs two merges and two labels | medium | removal is the last epic; story 5.1 is a separate pull request |
-| A required status check "Persistence query metadata" may wait for ever | medium | hand-off to the maintainer in story 5.2 |
+| The allow-list approval blocks most of the feature (the envelope parser needs `serde_json` in the application layer) | medium | stories that do not need it come first (epics waves 1 to 5); the entries go into the preparatory pull request of story 3.1, requested in wave 1 |
+| The removal is approval-gated as a whole and needs two merges and two labels | medium | removal is the last epic, done in an approved operator session; the preparatory pull request of story 3.1 is separate |
+| A required status check "Persistence query metadata" may wait for ever | medium | hand-off to the maintainer in story 5.1 |
 | Template sync restores removed files | medium | `.templatesyncignore` entries in the same story |
 | Coverage of shared and service code that only the example routes exercised | medium | rewritten tests on `/api/graphql`, `/api/health` and the event routes [U: not run] |
 | No measurement of capacity or latency | accepted | stated as a design target; a follow-up issue |
@@ -289,7 +288,7 @@ What does not exist:
 
 ## 8. Open questions resolved
 
-> Assumption: the facts tagged [V] in the three fact files are taken as given and not re-verified here, because the budget of this run was nearly spent; the [U] items are carried as risks or as checks inside the stories (story 3.4 runs `cargo deny` through `make.check_security`, story 1.3 confirms the image digest against the registry).
+> Assumption: the facts tagged [V] in the three fact files are taken as given and not re-verified here, because the budget of this run was nearly spent; the [U] items are carried as risks or as checks inside the stories (story 3.5 runs `cargo deny` through `make.check_security`; the operator confirms the image digest of story 1.3 against the registry).
 
 > Assumption: the election and lock measurements are cited only as the reason those mechanisms were dropped; the unaudited lock results are never quoted as figures.
 

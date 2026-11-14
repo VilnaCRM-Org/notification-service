@@ -45,7 +45,7 @@ VilnaCRM services publish events to Kafka, which a browser cannot read, so web c
 | S4 | A client reconnecting to another node with its last id gets every retained later event of its types, in order, before live events | 4 |
 | S5 | An event written twice by a producer arrives twice with the same envelope `id` | 5 |
 | S6 | With two nodes on one topic, an event reaches subscribers of both; no consumer group or coordination exists | 6 |
-| S7 | 503 while starting (until the node reaches the end read at start), shutting down or full; the status route reports state, position, subscribers | 7 |
+| S7 | 503 while starting (until the node's position first reaches the end of the topic), shutting down or full; the status route reports state, position, subscribers | 7 |
 | S8 | No `sqlx`, `DATABASE_URL`, migrations, database container or example context remains; `make ci` passes | 8 |
 | S9 | No domain or application crate names a Kafka client | 9 |
 | S10 | An invalid record is skipped, logged and counted in `rejectedRecords`; later records are delivered | 10 |
@@ -65,10 +65,10 @@ Subscriber authorization; subscriptions narrower than a type; several partitions
 
 ## Needs the maintainer's approval
 
-- `architecture.toml`: `krafka` and `tokio` in the infrastructure allow-list, `serde_json` in the application allow-list, `tokio-tungstenite` in the application dev allow-list (exact list in the architecture). Label `approved-config-change` on pull request #5.
-- The PostgreSQL removal changes `protected-config.toml`, `make/gates.mk`, protected scripts and Bats tests (exact list in the architecture). It needs `approved-config-change`, a session with `ALLOW_PROTECTED_CONFIG_EDIT=1`, a preparatory pull request that drops `.sqlx` and `migrations` from the required directories, `approved-breaking-change` for the removed example routes, and the removal of the required check "Persistence query metadata".
+- One preparatory pull request against `main`, made and merged by the maintainer under the label `approved-config-change` (the plugin's implementer agent never edits a protected file): `architecture.toml` gets `krafka` and `tokio` in the infrastructure allow-list, `serde_json` in the application allow-list and `tokio-tungstenite` in the application dev allow-list, and `protected-config.toml` drops `.sqlx` and `migrations` from the required directories (exact diff in the architecture). It is requested at the start; the feature branch takes it in by merging `main`.
+- The PostgreSQL removal changes `protected-config.toml`, `make/gates.mk`, protected scripts and Bats tests (exact list in the architecture). It is done in an approved operator session (`approved-config-change`, `ALLOW_PROTECTED_CONFIG_EDIT=1`), not by the plugin's implementer, and needs `approved-breaking-change` on pull request #5 for the removed example routes and the removal of the required check "Persistence query metadata".
 
-The feature does not wait for the removal approvals. Its own allow-list approval is needed before the envelope parser and every story that uses it (the tail, the subscriptions, both streaming routes, the wiring); the scaffold, the catalog, the configuration, the broker in the stack, the domain, the window, the hub and the status route come before it.
+The feature does not wait for the removal approvals. The envelope parser and every story that uses it (the tail, the subscriptions, both streaming routes, the wiring) wait for the preparatory pull request; the scaffold, the catalog, the configuration, the broker in the stack, the domain, the window, the hub and the status route come before it.
 
 ## Assumptions
 
