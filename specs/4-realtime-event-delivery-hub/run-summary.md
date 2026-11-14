@@ -1,288 +1,178 @@
-# Run summary: planning bundle of issue #4
+# Run summary: real-time event delivery hub (issue #4)
 
-This file records the planning run for issue #4. It is the seventh file of the bundle (the FR-16 file of the rust-backend-sdlc plugin) and was written after the readiness check, by an agent that wrote none of the other six files.
+This file replaces the run summary of the first plan.
 
-- Bundle directory: `specs/4-realtime-event-delivery-hub/`
-- Issue: #4 "Real-time event delivery hub: catalog, SSE and WebSocket subscriptions, clustered fan-out", https://github.com/VilnaCRM-Org/notification-service/issues/4
-- Branch: `claude/vilnacrm-notification-service-br7s47`, pull request #5
-- Readiness: `Verdict: ready` (round 1; 0 blocker, 0 major, 3 minor findings, see "Warnings")
-- Assumptions recorded: 172 (research 18, brief 11, PRD 34, architecture 46, epics 63)
-- Next step: `/rs-sdlc-implement`
+## Bundle
+
+- Directory: `specs/4-realtime-event-delivery-hub/`, revised in place.
+- Issue: #4 (VilnaCRM-Org/notification-service), "Real-time event delivery hub: catalog, SSE and WebSocket subscriptions, Kafka fan-out on every node", as updated on 2026-11-14, with 17 acceptance criteria.
+- Branch: `claude/vilnacrm-notification-service-br7s47`. Pull request #5.
+- Design: Kafka plus stateless Rust nodes. Every node reads the one-partition notifications topic without a consumer group and filters events for its own subscribers. Clients deduplicate by the envelope `id`. PostgreSQL and the example context are removed. The owner decided this on 2026-11-14 (decisions D1 to D18 of the design input).
 
 ## Artifacts
 
 | File | Content |
 | --- | --- |
-| `research.md` | State of the template-derived service, the surface of the change, a comparison with Mercure, technical findings, risks and 18 resolved questions |
-| `product-brief.md` | Problem, the three internal user groups, goals, scope, 12 success criteria traced to the issue, key risks |
-| `prd.md` | FR-1 to FR-29, NFR-1 to NFR-21, the traceability table of the issue criteria, scope with follow-ups, delivery guarantees |
-| `architecture.md` | Tech Stack, Constraints (3 838 bytes), both bounded contexts by layer, the composition root, the data model with Q1 to Q13, wire protocols, the four algorithms, failure modes, test strategy, "Revisions after validation" |
-| `epics.md` | 6 epics, 22 stories, 318 criteria, the rules for running stories in waves, the eleven waves, the requirement coverage table |
-| `implementation-readiness.md` | Independent cross-check of the five files against the issue and the repository: 3 minor findings, 11 residual risks, `Verdict: ready` |
-| `run-summary.md` | This record |
+| `research.md` | the repository today, reading Kafka with `krafka =0.32.0`, what the PostgreSQL removal touches, protected files, evidence and its limits, risks |
+| `product-brief.md` | problem, users, goals, scope, success criteria S1 to S17 traced to the issue |
+| `prd.md` | 38 FR, 21 NFR, traceability of the 17 criteria, product scope |
+| `architecture.md` | Tech Stack, Constraints, the `notification/event-stream` context (domain, application, infrastructure), composition root, wire protocols, algorithms, failure modes, removal plan, protected changes, test strategy, decision records |
+| `epics.md` | 6 epics, 22 stories, wave plan, requirement-to-story table |
+| `implementation-readiness.md` | cross-check, four fixes, ten open findings (none blocking), `Verdict: ready` |
+| `run-summary.md` | this file |
 
-## How the bundle was produced
+## How the bundle was written
 
-1. **Stages.** Five agents wrote the files in the order research, brief, PRD, architecture, epics. Each took the role of its stage from the agent and command files of the plugin and settled every open question as an `> Assumption:` line instead of a question to the user.
-2. **Validation.** Seven lenses reviewed the first version: domain and application (D), infrastructure and SQL (S), composition root (V), quality bar (Q) and security and resilience (R) on `architecture.md`; epics quality (E) on `epics.md`; traceability (T) across the five files. Two skeptics then checked every major finding: one the fact, with a probe where reading did not settle it, and one the remedy, whose result is the agreed fix. Minor findings were not checked adversarially; the owner who resolved one verified it.
-3. **Revision.** Three section owners revised `architecture.md` (A: event-stream domain and application, protocols, subscription and relay; B: infrastructure, the cluster context, data model, election and ingestion; C: composition root, environments, tests and decision records). An editor revised `prd.md` (FR-28, FR-29 and NFR-21 are new) and corrected `research.md` and `product-brief.md` in place. A consistency reader ran last and ran the SQL of the data model again on PostgreSQL 16.
-4. **Reconcile.** Each lens was reconciled against the revised bundle: every verified and every minor finding was classified as resolved as agreed, resolved differently, open or rejected, and an open point was fixed with the agreed fix. The orchestrator then decided the three points that the owners had left open (see the notes under the table below).
-5. **Second epics pass.** `epics.md` was rewritten for the revised design, the findings of lenses E and T and the wave schedule. Five stories changed their id (old to new: 3.5 to 3.4, 5.1 to 3.5, 3.4 to 3.6, 5.2 to 5.1, 5.3 to 5.2).
-6. **Readiness.** An independent reader cross-checked the five files against each other, the issue and the repository. Round 1: ready, 0 blocker/major, 3 minor. The loop allows three rounds; one was used.
-7. **Run summary.** This file.
-
-The session restarted once during the run (2026-11-14). The revision and reconcile agents that had been cut off were started again and checked the partial edits before they changed anything.
-
-## Findings of the validation
-
-The counts are those of the verdict files. The outcome is the verdict in "Revisions after validation" of `architecture.md`; for lens E it is the resolution in `epics.md`. "As amended" is the fix as the remedy check changed it. "Differently" means that another change removes the defect and an assumption gives the reason.
-
-| Lens | Major, verified | Major, refuted | Minor | Outcome |
-| --- | --- | --- | --- | --- |
-| D, domain and application | 8 | 0 | 4 | 8 applied; 3 applied with one part differently (D4, D6, D7); 1 differently (D1) |
-| S, infrastructure and SQL | 3 | 0 | 7 | 7 applied; 3 differently (S1, S5, S10) |
-| V, composition root | 5 | 0 | 6 | 9 applied; 2 as amended (V1, V5) |
-| Q, quality bar | 5 | 1 | 3 | 5 applied; 2 as amended (Q1, Q2); 1 differently (Q7); Q4 refuted |
-| R, security and resilience | 7 | 1 | 4 | 6 applied; 3 as amended (R1, R2, R7); 2 differently (R5, and the budget value of R6); R8 refuted |
-| E, epics quality | 4 | 0 | 5 | 6 applied; 1 applied in part (the cluster variables stay in story 1.2); 2 differently (the wave of story 3.6, the wave schedule) |
-| T, traceability | 6 | 0 | 5 | 9 applied; 2 differently (T1, T5) |
-| Total | 38 | 2 | 34 | 74 findings; the section UNVERIFIED is empty in every verdict file |
-
-- The two refuted findings changed nothing: Q4 (three mutants that tests can see after all) and R8 (the single delete of the prune had already been replaced by batches).
-- Three resolutions depart from the agreed fix by a recorded decision: the 503 problem `the node is starting` in place of a stream that waits (D1, R4), replay windows with a start floor in place of the anchored statement (R5), and a replay page of 1 MiB in place of 64 KiB (R6). The orchestrator accepted the last two and decided for the transport bound `TCP_USER_TIMEOUT` (D4, D6, R2, T2).
-- T5 and the first finding of lens E asked for a wave of its own for the story with the log queries (3.6). The wave list keeps story 4.1 beside it; readiness finding 1 names the two gaps that this leaves in the text.
+- The design decisions (D1 to D18), the design brief of the reader and the three fact files (`repo-facts.md`, `kafka-facts.md`, `postgres-removal.md`) were produced on Fable, by the orchestrator and its fact-finding agents. The fact files tag each statement as verified or not; their open points are carried into `research.md`.
+- The drafting of the seven files was done on Opus 5.5, one agent per part, under a usage limit that was nearly spent:
+  - product brief and PRD;
+  - architecture;
+  - stories;
+  - research, readiness check and this summary.
+- No multi-lens validation round was run on this bundle. The only cross-check is the single reading in `implementation-readiness.md`, plus the scripted contract checks.
+- No build, test or git command that changes anything was run. Nothing outside the bundle was changed.
+- No latency, throughput or capacity figure exists for this design. The capacity figure of the first plan is a design target (D18, NFR-1).
 
 ## Self-check rounds
 
-The plan stage allows five rounds of the commands of "Verification" in the planning skill of the plugin, together with the staging dry run. The counter is never reset.
+- Readiness cross-check: one round. It made four fixes:
+  - `prd.md` FR-14: the replay floor formula;
+  - `prd.md` NFR-19: the full allow-list;
+  - `product-brief.md`: the allow-list entries;
+  - `product-brief.md`: which stories wait for the approval.
+- Contract checks: one round of 3 allowed. The commands of the `## Verification` section of the planning skill printed nothing. The staging dry run exited 0: six WOULD lines and its own info line, which says nothing would be written. The directory holds exactly the seven files.
 
-| Round | Run by | Result |
-| --- | --- | --- |
-| 1/5 | the readiness stage, before this file existed | one line, `MISSING: run-summary.md`; every other check printed nothing; the dry run of `stage-planning-artifacts.sh` ended with status 0 and six `WOULD: stage` lines |
-| 2/5 | the stage that wrote this file, with all seven files in place | passed: the commands printed nothing (`## Constraints` 3 838 bytes; 22 stories, 22 `Depends on:` lines, 22 criteria blocks); the dry run ended with status 0 and the same six `WOULD: stage` lines and wrote nothing; the directory holds the seven files only; this file passes the wording rule of the readiness file |
+## Protected changes that wait for the maintainer
 
-> Assumption: round 1 is counted although its only line named the file of the stage after it, because the plan stage counts every run of the commands. A repeat before the closing commit is round 3/5.
+Every change waits for the label `approved-config-change` on the pull request and a session restarted with `ALLOW_PROTECTED_CONFIG_EDIT=1`. The exact lines are in the "Protected Changes" section of `architecture.md`.
 
-## Deviations from the plugin procedure
-
-The orchestrator took these decisions. Each is listed with its reason.
-
-- **Branch.** The plugin plans and implements on `feat/4-<slug>`, cut from the default branch. The work stays on the session branch `claude/vilnacrm-notification-service-br7s47`, the only branch the session may push. It is not the default branch, so the branch check of the plan stage holds.
-- **Base of the branch guards.** The setup commit of the plugin (`a7995a2`, the profile `.claude/rust-sdlc.yml` and the governance block) is on this branch and not on `main`. The guards that compare the branch with a base (`protected_changes`) take that commit as their base; against `origin/main` they would report the profile itself as changed.
-- **GitHub access.** The `gh` CLI has no valid credentials in the session. The issue was read, and its body was updated, through the GitHub connector. Plugin scripts that call `gh` cannot run in the session.
-- **Stage agents.** Plugin agent types and commands load only after a restart of the session. Until then the stages were run by general agents that read the agent and command files of the plugin and followed them.
-- **Implementation by waves.** `/rs-sdlc-implement` of the plugin runs the sequential Ralph loop. Here, after `bmalph implement` has staged the bundle, the stories are implemented by parallel implementer waves in the form of the plugin's own workflow `rs-sdlc-feature`: one implementer per story, a review, one serialized verify step per wave and one commit per story. The loop is not started, so every report carries the note "bmalph run: not used (workflow path)".
-- **Single-writer rule.** The first version of `epics.md` gave every shared file one writer per round. The wave schedule relaxes this for added lines: two stories of a wave may each add their own lines to the same manifest, `lib.rs`, `http.rs`, test harness file, `.templatesyncignore`, `.env` or `docs/environment.md`, and never rewrite the same item; only the tree at the end of a wave has to build and pass the gates (rules (i) to (v) of `epics.md`). The reason is parallel width: eleven waves for 22 stories, with up to four stories in a wave.
-- **Draft commits.** The plugin commits the bundle once, after a passing self-check round. The five files were committed as drafts while they were written and revised (six `docs(#4)` commits, `e1fdee6` to `563160e`); the closing commit adds the readiness file and this file under the subject of the plugin, `docs(#4): add planning bundle 4-realtime-event-delivery-hub`. This deviation was read in the git history by the stage that wrote this file.
-
-## Warnings
-
-- **Container image.** The image cannot be built from the repository Dockerfile inside the session, because a build container does not trust the proxy certificate of the session. The gates that need the image (`build-prod-image`, `make.image_scan`, `make.schemathesis_validate`, `make.smoke_load_tests`, and `make.ci_delivery` of checklist item C12) run locally against a stand-in image with `BUILD_IMAGE=0` and `APP_IMAGE` set, and against the real image in CI. The close-out of story 6.6 names the image of each result.
-- **Subscribers are not authorized.** This issue has no subscriber authorization: any client that reaches the service can read the catalog and subscribe to any type (NFR-13). The service must carry only events that are safe for every client; the allow-list of origins (FR-28) binds browsers only. Authorization and limits per client are follow-up issues.
-- **Three minor readiness findings are open.** (1) Wave 5: `make.sqlx_prepare` of story 3.6 also fails on a compile error in a file of story 4.1, and part (b) of "Constraints" lets parallel agents run only the DB-free targets; to fix in `epics.md` before wave 5. (2) The text does not say whether `Elector::resign` writes the entry `leadership changed`; to fix in `architecture.md`, story 1.2 and NFR-15 before wave 2. (3) The extractor-check test of C5 does not allow the `HeaderMap` and the WebSocket upgrade parameters of the handlers `stream` and `ws`; to fix before wave 7, best before wave 1.
-- **Criterion numbers of the issue.** The issue body was updated to the validated criteria on 2026-11-14 and now lists thirteen criteria. `prd.md` ("Traceability") and the readiness file number the eleven criteria of the first text. The two added criteria, numbers 10 and 11, are FR-28 (browser origins) and FR-29 (a dead loop ends the node), which the table of the PRD lists as "no criterion of the issue"; the K6 and the gate criteria are now numbers 12 and 13; and the three departures from the wording that the PRD lists (`types`, the takeover bound, the lagging client) are now the wording of the issue. Every criterion of the current issue has an FR id; only the numbers and these two passages of the PRD are stale.
-- **Residual risks.** `implementation-readiness.md` lists eleven. The three with the widest effect: NFR-1 (10 000 subscribers, p99 below 100 ms) is a design target that the change does not measure, and story 6.6 records it as not verified; that a client which reads nothing loses its connection after `STREAM_KEEP_ALIVE` is a QA observation of story 5.2 and not a test; stories 1.2 and 5.2 have 21 criteria each and may need more than one implementation round.
+1. **Story 3.1 (feature)**, `architecture.toml`:
+   - infrastructure `external` += `krafka`, `tokio`;
+   - application `external` += `serde_json`;
+   - application `dev_external` += `tokio-tungstenite`.
+2. **Story 5.1 (preparatory pull request**, its own branch from `main`, merged first): `protected-config.toml`, remove `.sqlx` and `migrations` from `required_directories`.
+3. **Story 5.2, part A (code)**, which also needs `approved-breaking-change`:
+   - `scripts/check-docs.sh`;
+   - `tests/CLI/bats/check_docs.bats:558`;
+   - the hash pin in `tests/CLI/bats/make_general.bats:81-94`;
+   - `tests/CLI/bats/make_quality_gates.bats:168-172`.
+4. **Story 5.2, part B (stack and gates)**:
+   - `protected-config.toml:32-33`;
+   - delete `scripts/setup-test-db.sh` and `scripts/check-sqlx-metadata.sh`;
+   - `make/gates.mk:14`;
+   - `scripts/with-load-test-stack.sh:52`, `:6-7`;
+   - delete `tests/CLI/bats/make_database.bats`;
+   - `make_tests.bats`, `make_general.bats` (`:61-66`, `:143`, `:583`), `make_execution_mode.bats`, `make_lifecycle.bats`, `make_load_tests.bats:108-140`, `make_security.bats`;
+   - `make/tool-versions.mk:16`;
+   - `.cargo/config.toml:5-6`;
+   - `architecture.toml:57` (`sqlx`);
+   - `.claude/settings.json:31`, `:68`, `:93`.
+5. **Outside the repository:** the maintainer removes the required status check "Persistence query metadata" from the branch rules of `main` (story 5.2 hand-off).
 
 ## Assumptions
 
-Every `> Assumption:` line of the five files, in file order and shortened to one line. The full text, with its reason, is at the place named.
+Every `> Assumption:` line of the other six files, in file order.
 
-> Assumption: each assumption keeps a line of its own, which makes this file longer than a summary usually is. The plugin asks for every assumption, and a merged line would hide which decision belongs to which requirement or story.
+### research.md (4)
 
-### research.md (18, all in "Assumptions")
+1. the facts tagged [V] in the three fact files are taken as given and not re-verified here, because the budget of this run was nearly spent; the [U] items are carried as risks or as checks inside the stories (story 3.4 runs `cargo deny` through `make.check_security`, story 1.3 confirms the image digest against the registry).
+2. the election and lock measurements are cited only as the reason those mechanisms were dropped; the unaudited lock results are never quoted as figures.
+3. the Kafka probes are functional evidence (behaviour, error kinds, recovery after outages), and the single-run delays they recorded are not presented as performance of this design.
+4. the open points of the fact files (failover timing of a multi-broker cluster, `connect` against an address that never answers, a leader change) stay open; the design bounds every broker call by `KAFKA_REQUEST_TIMEOUT` so that none of them can hang a node.
 
-- The stream parameter is the comma-separated `types`, not `?type=<name>` of the issue text; it matches the WebSocket command field.
-- The ingestion adapter does not use the SQS timeouts of the health probe; the architecture stage chooses between an overridden receive timeout and a second client.
-- Timestamps cross the sqlx boundary as integers converted in SQL; `occurred_at` is `SystemTime` in the domain.
-- `PgLeaseStore::release` keeps the row and sets `expires_at` to the past; the term starts at 1 and grows by 1 with every change of holder.
-- Criterion 6 is read as a takeover within `CLUSTER_LEASE_TTL + CLUSTER_RENEW_INTERVAL` after a crash and within one renew interval after a graceful stop, each plus two lease calls; only a node with `EVENT_QUEUE_URL` campaigns.
-- `3 * CLUSTER_RENEW_INTERVAL <= CLUSTER_LEASE_TTL` is a cross-field rule of `config.rs`; "at most half" is not enough.
-- The leader gating of ingest and prune is wired in `crates/service` from the cluster status channel; the use cases know nothing about leadership.
-- `EventSignal::changed` returns a `Result`; on an error the relay waits for its poll tick and tries again.
-- Without the attribute `event-id` the SQS `MessageId` is the event id; an id that is not a UUID makes the message invalid, and none is generated.
-- `event-time` is optional RFC 3339 text in UTC, parsed in the application layer; absent means `Clock::now()`, unparsable means an invalid message.
-- A message with empty data, U+0000, data above `EVENT_MAX_DATA_BYTES` or an invalid type is logged at warn and acknowledged; a dead-letter queue is a deployment concern.
-- The GraphQL query is `eventTypes(page: Int! = 1, itemsPerPage: Int! = 30): [EventType!]!`, the committed convention.
-- `API_VERSION` becomes `1.1.0`, and the OpenAPI tags gain `EventStream` and `Cluster`.
-- The K6 smoke scenario uses the stock image, publishes through a loopback LocalStack port of the load-test project and records delivery latency as a custom trend; the `health` budgets do not change.
-- The streaming routes are plain `axum` routes outside the OpenAPI document and are specified in a protocol document under `docs/`.
-- A cursor older than the retention window is served from the oldest retained event without an error, as Mercure does.
-- The advisory-lock key is one documented constant of `event-stream-infrastructure`; the service takes advisory locks in that crate only.
-- The example context `company-subdomain/some-module` stays untouched; its migration test is narrowed to its own table.
+### product-brief.md (3)
 
-### product-brief.md (11, all in "Assumptions")
+1. the client receives the whole envelope as one JSON object in `data`, because it must see the envelope `id` to deduplicate.
+2. the status route `GET /api/events/status` is mirrored in GraphQL as `eventStreamStatus`, which keeps the GraphQL snapshot valid for the protected contract test after the example is removed.
+3. S16's budgets are those of `tests/Load/config.json.dist`; this brief sets no number.
 
-- The SSE parameter is the comma-separated `types`, not `?type=<name>`.
-- Leader election is a PostgreSQL lease with a fencing term; Raft is rejected, because its crates are not on the protected allow-list and it would add a second consensus system.
-- The first ingestion adapter is SQS on the local stack; the Kafka adapter is a follow-up, because its client is not on the allow-list.
-- Event `data` is opaque UTF-8 text limited by `EVENT_MAX_DATA_BYTES` (default 65536); a schema is not validated until the schema repository exists.
-- The service is an alternative to the Mercure hub, not an implementation of the Mercure protocol.
-- The positioning relies on the public description of Mercure; the PRD adds finer claims only with a source.
-- S12 (10 000 subscribers, p99 below 100 ms) is a design target and not a merge gate; the performance merge gate is the K6 smoke scenario.
-- The latency budget of the K6 smoke scenario is the one defined under `tests/Load/`; the brief sets none.
-- Make targets are named by profile key, formed from the target name.
-- The three user groups are internal to VilnaCRM; external integrators wait for subscriber authorization.
-- "Ingestion continues" in criterion 6 means that the new leader resumes reading the queue; unacknowledged messages are redelivered and deduplicated by event id.
+### prd.md (32)
 
-### prd.md (34, by requirement group)
+1. the catalog is capped at 1 000 distinct names. Every external input is bounded (NFR-14), and a catalog page is built from the whole list on every request.
+2. the route is `GET /api/events/status`, next to the two streaming routes. Issue criterion 7 asks for a status route; the first plan's `GET /api/cluster` is gone with the leader.
+3. the status is also a GraphQL query. When the example context is removed (FR-33), `EventType` would be the first object type of the sorted GraphQL snapshot with a single field, and the protected contract test removes the first field of the first type, which leaves an empty type the diff tool cannot load. `EventStreamStatus` sorts before `EventType` and has several single-line fields, and the query is useful to a frontend on its own.
+4. the parameter is the comma-separated `types`, the same on both transports, as the issue writes it.
+5. `types` is optional on the WebSocket route because criterion 3 lets the client subscribe at run time; it stays required on the SSE route, which has no other way to name types.
+6. a run-time subscribe starts at the position of the node and does not replay, also not when the connection later falls behind and catches up (FR-24). Replay belongs to the connection request, which is where the cursor is given.
+7. the size limit of a command is a constant, 16 384 bytes: the largest valid command, 100 names of 128 characters, takes 13 135 bytes. The transport limit for a message and for a frame is twice the command limit, and the read buffer of a connection is 4 096 bytes. `HTTP_MAX_BODY_BYTES` does not apply to WebSocket messages.
+8. both routes accept both carriers. A browser `EventSource` sends the header by itself on reconnect; a browser WebSocket cannot set headers, so it uses the query parameter.
+9. the replay is capped by a number of offsets below the tail, `EVENT_REPLAY_MAX_OFFSETS` (default 1 000 000), and not by age. An age cap needs record timestamps, which producers set and which can be skewed, or a time index lookup the plan has not verified on the pinned client; a count of offsets is exact and costs nothing to compute. At 100 events per second the default reaches back about 2.8 hours; the topic's retention bounds it further.
+10. the 4 permits and the page of 500 records are constants. No deployment has to tune them, and they bound what one reconnect storm can make a node read at a time (NFR-14).
+11. a cursor ahead of the topic end is not clamped and not refused, although design decision D7 offered those two forms. Lowering it to `E` would deliver ids at or below the cursor, which decision D8 forbids. Refusing it needs the true end of the topic at request time: the node's own `E` can be older than the cursor a faster node issued a moment ago, so a valid cursor would be refused, and a fresh broker read in the request path is excluded by FR-12. Waiting is exact for every cursor a node issued. A cursor from another topic (a recreated topic) receives nothing until the topic passes it; the protocol document tells operators and clients that cursors become invalid when the topic is recreated.
+12. a malformed cursor is a 400 because it cannot be parsed, as `page=abc` is; the type list parses as text, so its faults are constraint violations and return 422.
+13. the 403 and the 503 answers come before validation. A node that cannot serve says so to every request, and a refused origin learns nothing about the parameters.
+14. a topic whose partition count grows while the node runs is not noticed until the node restarts. The pinned client does not report it to an assigned reader; a periodic re-check is a follow-up.
+15. the event data is any JSON value and the client receives the whole envelope as one JSON object, instead of the first plan's opaque text in `data`. Design decision D4 makes the record value a JSON envelope, and decision D8 makes the client deduplicate by the envelope `id`, so the client must receive that `id`; the SSE frame has no field for it besides `data`. One object with the same shape on both transports is the smallest form that carries it.
+16. `EVENT_MAX_DATA_BYTES` limits the whole record value, checked before the value is parsed. The name is kept from the first plan; the parse cost and the window then have a hard bound per record. Members other than the four are dropped so that a producer cannot enlarge what every client receives.
+17. `occurredAt` accepts UTC only because the application layer may use `humantime` and no other time parser (protected allow-list), and `humantime::parse_rfc3339` accepts `Z` and `+00:00` only.
+18. a skipped record is dropped after the log entry; dead-letter handling is a concern of the producers and of a follow-up.
+19. a broker outage after the start does not fail the readiness probe and does not refuse new subscriptions. Every node is equally affected, so a failing probe on all of them would take the catalog and the window resumes away without moving a client anywhere better. The status route reports the outage (`brokerReachable`, `lag`).
+20. no gap signal is sent when a cursor is below the replay floor. A gap signal is a follow-up; the client reloads its state through the owning service when it suspects a loss.
+21. a full queue does not disconnect the subscriber. Issue criterion 11 asks that a client that lags past the buffer catches up on its own connection, which this requirement does; only a client that takes no data at all is disconnected.
+22. the pause after a failed round grows from 1 s to 30 s. Every node retries on its own, so during a broker outage the number of connection attempts per node stays small; a recovered broker is seen within 30 s, and FR-21 brings the backlog in by a seek.
+23. a dead loop ends the node; it is not restarted in place. The lint policy leaves no panicking path in the service's code, so a panic comes from a dependency in a state nobody has analysed.
+24. the close codes are 1001 (going away) for shutdown and 1011 (internal error) for a replay that cannot read Kafka, from RFC 6455. The 2 s wait is a constant: an upgraded WebSocket is outside the HTTP drain, and no deployment has to tune the wait.
+25. when the variable is unset the CORS layer is absent, not installed with an empty list, so no existing status code changes (NFR-21). With the variable unset a WebSocket handshake that carries `Origin` is refused, also from the service's own origin, because behind a proxy the service does not know its public origin.
+26. `KAFKA_BOOTSTRAP_SERVERS` has a default instead of being required. A protected test runs the production image with no Kafka variable and waits for the container to be healthy (liveness `GET /ping`); a required variable would break it. A node pointed at an address without a broker stays `starting`, which its status route, its readiness probe and its log show.
+27. Kafka security covers plaintext, TLS with the public roots, SASL PLAIN and SCRAM. The pinned client compiles TLS (rustls) and these SASL mechanisms with its own dependencies (verified in its source, not probed against a broker); the architecture confirms each against the dependency policy and drops a value it cannot support, recording that in its decision record. OAUTHBEARER, AWS MSK IAM, a custom root and client certificates are follow-ups (decision D17).
+28. the connect time-out equals `KAFKA_REQUEST_TIMEOUT` (the client requires the request time-out to be at least the connect time-out), so one variable covers both.
+29. how the host reaches the broker (a host port and the variable for it, and any protected Bats edit that needs) is decided by the architecture, which lists it among the protected changes if it needs one.
+30. the publisher is part of the load-test stack and not of K6, because the pinned stock K6 image has no Kafka client and a custom image is not reproducible. The architecture chooses its form (design decision D14).
+31. the smoke budgets start at the documented smoke ceiling of 500 ms for the catalog and 2 000 ms for delivery; they are budgets, not measurements, and are tightened by the rule of `docs/load-testing.md` after the first hosted-runner run. The scenario name sorts after `health`, which a protected test needs.
+32. the two streaming routes stay out of the OpenAPI document because OpenAPI cannot describe WebSocket and a never-ending response would hang the Schemathesis gate.
 
-- Catalog: a catalog entry is never removed in this issue; removal needs the schema repository.
-- Catalog: a client may subscribe to a well-formed type that is not in the catalog; the catalog is informative.
-- SSE: the parameter is the comma-separated `types` on both transports, not `?type=<name>`.
-- WebSocket: `types` is optional on the WebSocket route and required on the SSE route.
-- WebSocket: a run-time subscribe starts at the position of the node and never replays, also not in a later catch-up.
-- WebSocket: the command limit is the constant 16 384 bytes, not `HTTP_MAX_BODY_BYTES`; message and frame limit are twice that, and the read buffer is 4 096 bytes.
-- Resume: both routes accept both cursor carriers, the header `Last-Event-ID` and the parameter `lastEventId`.
-- Resume: a cursor older than the retention window starts at the oldest retained event, and the loss is not signalled.
-- Validation: a malformed cursor is a 400; faults of the type list are constraint violations and return 422.
-- Ingestion: an invalid message is dropped after its log entry; a dead-letter queue is a setting of the queue.
-- Ingestion: a body holds at least one byte and no U+0000 (PostgreSQL `text`, and the `data:` line of SSE).
-- Ingestion: `event-time` is accepted in UTC only (`Z` or `+00:00`), because `humantime` is the one allowed time parser.
-- Cluster: the takeover bound of criterion 6 is the lease time plus one renew interval plus two lease calls, 13 s with the defaults and at most the lease time plus three renew intervals.
-- Protection: a full queue does not disconnect the subscriber; it catches up from the log on its connection. This departs from the first wording of criterion 8 and keeps its purpose.
-- Protection: every accepted connection gets the send bound `TCP_USER_TIMEOUT` with the value of `STREAM_KEEP_ALIVE`; its three limits are stated (HTTP/2 flow control, a stall shortly before a shutdown, a best-effort log entry).
-- Protection: the close codes are 1001 for a shutdown and 1011 for a log that cannot be read during a replay; 1013 is not used.
-- Protection: new connections are refused from the signal on, before the loops stop; the order of FR-24 governs the work that is already there.
-- Protection: the wait for the WebSocket tasks at shutdown is a constant of 2 s, not a variable.
-- Configuration: `NODE_ID`, `EVENT_TYPES` and `CORS_ALLOWED_ORIGINS` have no entry in `.env`.
-- Configuration: the allow-list of origins is the one variable that the validation added; every other new bound is a constant.
-- Configuration: the bounds of the variables are chosen in the PRD; the renew interval is at most a third of the lease time.
-- Load test: the smoke budget starts at 500 ms and the delivery ceiling at 2000 ms; both are tightened after the first hosted-runner measurement, and neither is a protected value.
-- Load test: the SSE subscriber of K6 is checked by the frames in its body; the delivery time is measured on the WebSocket subscribers.
-- Load test: the scenario is named `subscriptions`, so that it runs after `health` and the protected Bats test keeps its outcome.
-- Documentation: the two streaming routes stay out of the OpenAPI document (WebSocket cannot be described, and an endless response would hang the Schemathesis gate).
-- Browser access: the service answers CORS itself, with an allow-list that allows nothing by default.
-- Browser access: the same list guards the WebSocket handshake.
-- Browser access: with the variable unset, a WebSocket handshake that carries `Origin` is refused, also from the service's own origin.
-- Browser access: with the variable unset the CORS layer is absent, so the two existing `OPTIONS` status codes do not change.
-- Browser access: a page can still make browsers open SSE requests without reading them; that limit per client stays with the edge proxy.
-- Supervision: a dead loop ends the node; it is neither reported by a readiness probe nor restarted in place.
-- Supervision: a hung round is cut and retried and does not end the node.
-- Supervision: the limit of a round is derived from the configuration and is neither a variable nor a constant.
-- Control plane: the three connections of the loops and the share of the replays are constants; measured, the renewals answered within 10 ms while 30 000 clients reconnected.
+### architecture.md (25)
 
-### architecture.md (46, by section)
+1. `krafka` is built with `default-features = false` and the feature `rustls-aws-lc-rs`. aws-lc-rs is already the crypto provider of the workspace (sqlx `tls-rustls-aws-lc-rs` today, the AWS SDK), so the change adds no second provider choice, and the crate states that aws-lc-rs wins when both rustls providers are enabled. `make.check_security` (`cargo deny`) was never run on `krafka`; the story that adds it runs it, and a refused licence or advisory is escalated, never answered by an edit of `deny.toml`.
+2. `StoredEvent` carries the encoded event object as text, not the parsed members. The domain may not use `serde_json`, the window and the replay pages hold events for many connections, and every transport writes exactly this object; parsing once and keeping the text makes the encoding cost of NFR-2 one serialisation per event per node.
+3. the port has a third error, `Undecodable { at }`, beyond the two of the design brief. FR-19 requires the tail to skip an undecodable batch, log it with the reason `undecodable batch` and count it once; without a variant of its own the application cannot tell it from an outage, which must not skip anything.
+4. `serde_json` becomes a normal dependency of the application crate (protected allow-list entry, "Protected Changes"). The envelope is JSON (D4), the client must receive its `id` (D8, FR-18), and the domain and infrastructure layers may not use `serde_json` either; the application layer is where record values become events.
+5. `data` is held as `serde_json::Value`, so member order inside it and the spelling of numbers may change (FR-18 allows both) and a number beyond the range of `i64`, `u64` and `f64` loses precision. The alternative, `RawValue`, needs a new feature of `serde_json` and keeps the producer's white space, which FR-18 removes.
+6. `occurredAt` ending in `+00:00` is rewritten to `Z` before parsing and forwarded as written. This accepts exactly the two forms of FR-18 whether or not `humantime::parse_rfc3339` itself accepts `+00:00`, which this plan did not verify.
+7. the window is bounded by bytes only, as FR-13 states, with at least one event kept so that a single large event does not empty it. The cost is `StoredEvent::cost`: the json bytes, the type bytes and 128 bytes for the `Arc`, the deque slot and the struct. A count bound (the brief's `EVENT_WINDOW_MAX_EVENTS`) is not needed: 128 bytes per event already bound the count to `EVENT_WINDOW_BYTES / 128`.
+8. the long-poll wait of the tail is a constant of 500 ms, the client's default `fetch_max_wait`. FR-29 makes it a constant; a shorter wait costs more requests, a longer one delays a new event by nothing (the poll returns early with records) but lengthens the round limit.
+9. the three 503 answers are checked twice: by the `availability` middleware before validation (FR-16's order) and again by `register` under the lock, which alone decides the cap race-free. A request that passes the first check while the last slot is being taken gets the capacity 503 after its parameters were validated; nothing else changes order.
+10. `tokio` joins the infrastructure allow-list as a normal dependency (protected change), because the adapter must wrap every client call in its own time-out: `poll` is bounded by the request time-out and not by its argument (probe 09). The first plan kept tokio out of infrastructure; that rule cannot hold for this client.
+11. a reader is not closed explicitly when it is dropped; the client then logs a warning, which the service's log filter hides (`krafka=error`, "Composition Root"). A `close` method on the ports would add a call that every fake and test must honour for no behaviour a client can see.
+12. `.env` names the host listener `localhost:9095` and not the default `localhost:9092`. The test targets run on the host and export `.env` and `.env.test`; in container mode the app container's own `KAFKA_BOOTSTRAP_SERVERS=kafka:9092` from compose wins, because `scripts/with-env.sh` never changes a variable the caller already has.
+13. the client's own log is limited to errors. A missing topic makes `krafka::metadata` write about 10 warnings per second, a dropped consumer writes a warning, and the spawned-binary tests compare the whole log of an idle node (`tests/integration/serve.rs:128-148`); the service's own entries (NFR-15) report every state an operator needs.
+14. the entry `event tail behind retention` is added to the table of NFR-15. Retention that overtakes the tail loses events for every client of the node, and the PRD's entries do not cover it; NFR-15 lists what must be written, not everything that may be.
+15. `TailState::started` is not affected by a broker outage, and nothing is logged for failures before the first success. NFR-15 defines `event tail failed` as "the first failed or cut round after a success".
+16. the tail skips an undecodable batch only when the second consecutive round fails at the same position. A single `Protocol` error may be transient (it was not probed), and skipping on it would lose events; FR-19 asks for the skip, the brief's open point preferred no skip, and two rounds is the smallest rule that keeps both.
+17. the variables, constants and readiness rules of the PRD replace those of the design brief where they differ (`EVENT_WINDOW_BYTES`, `EVENT_WINDOW_PRELOAD`, `EVENT_REPLAY_MAX_OFFSETS`, a single `KAFKA_REQUEST_TIMEOUT` for request and connect, the retry pause of 1 s to 30 s, 4 permits as a constant, no `EVENT_TAIL_STALE_AFTER`, a fixed start goal, no replay stall count but a stall time of `KAFKA_REQUEST_TIMEOUT`). The task binds this document to the PRD's names, and the PRD was written after the brief with these choices recorded.
+18. the replay cap never raises the floor above the window floor `F`: the rule is `max(c, L, min(F, p - MAX))`, which equals FR-14's `max(c, L, P - MAX)` whenever `p - MAX <= F`, and gives FR-14's stated behaviour for `MAX = 0` (a cursor below `F` starts at `F`). The cap bounds Kafka reads; events still in memory are always served.
+19. a cursor ahead of the tail waits without a broker read and without the brief's two-observation wait: the floor is the cursor, the subscription is live at once and drops queued frames at or below it. This is FR-15's rule (neither clamped nor refused), which the PRD chose over the brief's clamp.
+20. a replay that meets an undecodable batch skips one offset per page read without a log entry or count, as FR-19 says for invalid records met by a replay; the tail has logged and counted it when it passed.
+21. `DEPS` becomes `localstack` and not `localstack kafka`, because the broker is started by `ensure-kafka` with its host listener ("Local Stack and Load Test"); the two protected lines that pin the dependency list change to that text.
+22. the plugin skill `bounded-context-scaffolding` names "no protected file changed" as a success criterion of a scaffold; story 1.1 meets it (the scaffold changes no protected file), and the allow-list entries come in their own approved story, as D16 requires.
+23. the host reaches the broker through a fourth listener `EXTERNAL://localhost:9095`, published only by `docker-compose.kafka-host.yml`, which `make start` does not read. A host port in the files `make start` reads would collide between the development project and the private projects of the protected Bats suite, which get free ports only for `DB_PORT`, `LOCALSTACK_PORT`, `APP_PORT` and `STRUCTURIZR_PORT`; this keeps the feature free of Bats edits. The cost: `ensure-kafka` recreates a running `kafka` container of the development project when it lacks the port (compose recreates on a changed configuration); its topic data survives on the volume.
+24. the stack creates the topic in the broker's health check (`--if-not-exists`, not probed), so no one-shot service is needed and every `up --wait` waits until the topic exists.
+25. the publisher writes at a fixed 10 events per second set in the stack, not driven by the K6 profile. It is the smallest honest publisher the pinned K6 image allows (no Kafka module); a profile-driven rate is a follow-up.
 
-- Domain crate: event data holds at least one byte and no U+0000; the rule is checked in the domain.
-- Domain crate: `Cursor` is its own value object, because a client cursor may be 0 and a stored `Sequence` may not.
-- Domain crate: the stored form is `StoredEvent`, not `Event`, which would fail `clippy::struct_field_names`.
-- Domain crate: the size limit of event data is a rule of ingestion only; `EventData::stored` rebuilds a row without it.
-- Domain crate: the log has two reads, `read_after` for the relay and `read_between` with `PageLimit` for a replay; `retained_range` gives both ends of the log.
-- Domain crate: `PageLimit` has public fields and no validating constructor; both members are 1 or more.
-- Application crate: the hub, the frames and the subscription live in the `http` module; the relay reaches the hub through the trait `EventPublisher`.
-- Application crate: a subscriber whose queue is full falls behind and catches up from the log; the service disconnects only a client that accepts no data for `STREAM_KEEP_ALIVE`.
-- Application crate: the frame is encoded under the registry lock, after the lookup found a subscriber.
-- Application crate: the command limit is `Session::MAX_COMMAND_BYTES` (16 384 bytes), not `HTTP_MAX_BODY_BYTES`.
-- Application crate: `Subscriptions::open` reads nothing from the database; the replay starts inside the stream, so the only answers from server state are the three 503 of `HubError`.
-- Application crate: `IngestReport::duplicates` and the info entry `duplicate events skipped` are the only trace of a skipped duplicate.
-- Infrastructure crate (event-stream): the prune bounds are 200 rows per statement and 5 000 statements per call, values of the adapter and not variables.
-- Infrastructure crate (event-stream): `prune` keeps its port signature and loops inside the adapter.
-- Infrastructure crate (event-stream): `APPEND_LOCK_KEY`, `NOTIFY_CHANNEL`, the lease name, the page sizes and the attribute names are constants; the append always sends the `NOTIFY`.
-- Infrastructure crate (cluster): the takeover test uses a lease of zero, not of 1 ms (500 of 500 attempts against 17 of 500).
-- Adapters: the control pool has three connections and is not a variable.
-- Adapters: `round_timeout` is derived from the configuration (41 s with the defaults), so a batch that is still answered is never cut.
-- Browser origins: the allow-list is a variable, and the WebSocket route follows the same list.
-- Browser origins: with the variable unset, a WebSocket handshake with an `Origin` is refused, also from the service's own origin.
-- Browser origins: a page can still make browsers open SSE requests without reading them; the list does not claim to prevent it.
-- Configuration: the long-poll wait, the batch size, the prune period, the retry delay, the two pool sizes, the drain limit and the preflight age are constants; the variables grow from eleven to twelve.
-- Configuration: `NODE_ID`, `EVENT_TYPES` and `CORS_ALLOWED_ORIGINS` have no line in `.env`; FR-25 is amended accordingly.
-- Configuration: the default of `MAX_SUBSCRIBERS` stays 100 000; the production compose reference sets 5 000, because a protected test pins its memory limit at 256 MiB.
-- Supervision and shutdown: a dead loop ends the node; it is not reported by a readiness probe and not restarted in place.
-- Supervision and shutdown: a hung round is cut and retried and does not end the node.
-- Supervision and shutdown: every accepted connection gets `TCP_USER_TIMEOUT` with the value of `STREAM_KEEP_ALIVE` (decision of the orchestrator after the validation); its three measured limits are stated where they apply.
-- Supervision and shutdown: `bootstrap::application`, `Background` and `Running` are the public seam for tests; `bootstrap::router` keeps its signature.
-- Supervision and shutdown: the listener is closed before the loops stop; the order of FR-24 governs the work that is already there.
-- Supervision and shutdown: a panic of a loop task during the shutdown itself does not become exit status 1.
-- Data Model and Queries: each table has its own migration pair, created by the story whose code reads the table.
-- Wire Protocols: close code 1011 is used when the log cannot be read during a replay, 1013 is not used, and a valid command gets no acknowledgement frame.
-- Wire Protocols: `event-time` is accepted in UTC only, in the forms `Z` and `+00:00` that `humantime::parse_rfc3339` reads.
-- Subscription Algorithm: the replay keeps windows of 10 000 sequences with a start floor at the oldest stored event; the anchored statement of the validation is not taken, and the cost is stated.
-- Subscription Algorithm: the byte budget of a replay page stays 1 MiB and is not lowered to 64 KiB, because it is also the catch-up rate; the memory cost is stated.
-- Relay Algorithm: the start-up gap is closed by the 503 problem `the node is starting` until the relay has started, not by a stream that waits.
-- Relay Algorithm: falling behind is logged by the relay once per page with a count; `subscriber evicted` remains for the write deadline of the WebSocket pump.
-- Ingestion Algorithm: the visibility timeout is a constant of the adapter (30 s), not the setting of the queue and not a variable.
-- Election Algorithm: a node without an event source does not observe the lease either; it reports `leader` `null` with `term` 0.
-- Election Algorithm: the lease rule is tightened to a third, instead of a fixed-rate timer or a call timeout derived from `T - 2R`.
-- Performance Design: `MAX_SUBSCRIBERS` is sized by memory (100 000 idle connections take about 0.6 GiB as WebSockets and about 2 GiB as SSE streams).
-- Performance Design: the registry is one mutex, and sharding by type is a later optimisation; NFR-1 is a design target that this change does not measure.
-- Local Stack and Load Test: the K6 SSE subscriber is checked by the frames in its body, not by status 200; delivery latency is measured on the WebSocket subscriber.
-- Local Stack and Load Test: the delivery ceiling starts at 2000 ms and is tightened after the first hosted-runner measurement.
-- Test Strategy: the Gherkin world may bind one loopback listener for the WebSocket scenarios, with an item-level `#[expect(clippy::disallowed_methods, reason = "..")]`.
-- Decision Records: the transport bound gets no record of its own; record 0018 states it, and the list stays 0013 to 0020.
+### epics.md (19)
 
-### epics.md (63, by story)
-
-- 1.1: `InvalidEvent` starts with the variants `TypeLength` and `TypePattern`; story 3.1 adds the other four.
-- 1.1: `API_VERSION` becomes `1.1.0` in this story; story 1.2 stays inside the same unreleased minor version.
-- 1.1: the application manifest declares `tokio` only as a dev-dependency; later stories add what their production code first uses.
-- 1.1: the adapter field of the story is `Adapters.catalog_reader` on the request pool; `event_catalog` on the control pool comes with story 5.2.
-- 1.1: `InMemoryEventCatalog` carries call records and run-time controls beyond the table of fakes, so that later stories leave `tests/support` alone.
-- 1.1: `make.ci_delivery` of C12 runs against a stand-in image when the session cannot build the Dockerfile; CI judges the real image.
-- 1.2: the three cluster variables and the lease rule stay in this story and are not moved to story 2.1.
-- 1.2: `bootstrap` builds the `Elector` and hands its status to `ClusterState`; the loops campaign only from story 5.2 on.
-- 1.2: the story introduces the control pool (`pool_settings`, `CONTROL_POOL_CONNECTIONS`, `Pools`).
-- 1.2: the helper `bounded_duration` and the struct for the new members of `Config` are written here; story 2.1 extends both.
-- 1.2: the decision record 0013 is written here; the records 0014 to 0020 are written in story 6.5.
-- 1.2: `InMemoryLeaseStore` carries call records, a gate and run-time controls; its mode is one enum.
-- 1.2: the GraphQL schema does not change; `make.generate_graphql_spec` must leave the snapshot unchanged.
-- 2.1: FR-28 has no story of its own; the allow-list is one more variable of `Config`, read by `assemble` in the same change.
-- 2.1: two cases of the router test list move to stories 5.2 and 6.1, which have the routes they need.
-- 2.1: `.env` gets no line for `EVENT_TYPES`, `CORS_ALLOWED_ORIGINS` or `EVENT_QUEUE_URL` here; story 2.2 adds the queue line.
-- 2.1: the entries of `EVENT_TYPES` are not trimmed, and a repeated name is kept once.
-- 2.1: the row of `STREAM_KEEP_ALIVE` in `docs/environment.md` is written here with its final text.
-- 2.2: the dependency containers of a running session are re-created after this story, so that LocalStack runs the new ready hook.
-- 3.1: the three fakes carry call records, a gate and run-time controls beyond the table of fakes.
-- 3.1: `InMemoryEventLog::insert` and `remove_through` act from the test side without a recorded port call.
-- 3.2: the manifest lines `tokio` and `tracing` have this story as their one writer; story 3.4 relies on the second.
-- 3.2: `error_json` is written by story 4.4, its first caller.
-- 3.2: the SSE half of a frame is asserted by rendering it through `axum::response::sse::Sse`; `futures-util` enters as a dev-dependency.
-- 3.2: the recording `EventPublisher` of the relay tests is defined in the tests of the application crate.
-- 3.4: the tests count the clock reads with a local double `CountingClock`; `FixedClock` is not changed.
-- 3.4: the manifest line `tracing` comes from story 3.2; this story adds only `humantime`.
-- 3.5: `thiserror` enters the infrastructure manifest here; story 3.6 uses the same line.
-- 3.6: this is the third and last migration pair, with only the table `notification_events`; the four pinning tests are not touched.
-- 3.6: the session runs `make.sqlx_prepare` after each adapter file and after every change of a query text; story 4.1 stays in the wave.
-- 4.1: the criteria follow the hub test list and assert effects; none expects an eviction by the hub.
-- 4.1: a workspace-wide target can fail to compile in the infrastructure crate while story 3.6 has no metadata; that is not a failure of this story.
-- 4.2: every test uses a real `Hub` that its arrangement starts, real channels and `InMemoryEventLog` with an exact call budget, under paused time.
-- 4.2: a replay starts at or above the oldest stored event (`retained_range`), with windows of 10 000 sequences and pages of 500 events or 1 048 576 bytes.
-- 4.3: the story adds `Adapters.replay_log` and builds the hub and the subscriptions in `bootstrap`.
-- 4.3: until story 5.2 the hub of the composition root is never started, so the route answers 503 through `bootstrap::router`.
-- 4.4: the integration target of the application crate needs no database; the socket helpers of its hand-written client carry the item-level lint expectation.
-- 4.4: the pong that answers a client ping is written by the library; the real-socket test proves it.
-- 4.4: the scripted `Connection` of the pump tests is defined in the tests of the crate.
-- 4.4: the entry `subscriber evicted` is asserted with the scripted connection only; on a real socket it is best effort.
-- 5.1: the supervisor is two stories: the loops here, `Background` from the adapters and `serve` in story 5.2.
-- 5.1: every double of these tests comes from `tests/support`, because `crates/service` has no `async-trait` dependency.
-- 5.1: the outage criterion stays one test over several loops, because NFR-11 needs the recovery of the whole node shown once.
-- 5.2: the tests of the pools and of the shutdown with open streams are the new modules `tests/integration/pools.rs` and `shutdown.rs`.
-- 5.2: a served-binary test that needs a leader points `EVENT_QUEUE_URL` at the queue of the local stack and sends no message.
-- 5.2: the transport bound (`TCP_USER_TIMEOUT` with the value of `STREAM_KEEP_ALIVE`) is part of this story, which owns `serve.rs`.
-- 5.2: a test asserts only the value of the socket option; that a stalled SSE client is ended is a QA observation.
-- 5.2: the helper has two forms chosen by `cfg(target_os = "linux")`; the other form has an empty body, which is not an exclusion.
-- 5.2: a served binary of this story is asked for the SSE route only; the WebSocket half is asserted in story 6.4.
-- 5.2: the cases "whose database returns" are proved in process (stories 5.1 and 6.1), not with a served binary.
-- 6.1: the two module names are chosen in the story.
-- 6.1: the subscribers are SSE subscribers read through `oneshot`; the cross-node case with a WebSocket subscriber is in story 6.4.
-- 6.1: every `Application` is built by `bootstrap::application` without spawned loops; an expired lease is forced with a zero-lease renewal.
-- 6.2: `tests/e2e/Cargo.toml` gets a context crate only if a step names an item of it.
-- 6.2: the world binds one loopback listener with one item-level `#[expect(..)]`.
-- 6.3: the profiles `average`, `stress` and `spike` are sized for a generator on the machine of the node; none holds 10 000 subscribers.
-- 6.3: `make.smoke_load_tests` runs locally against a stand-in image and in CI against the real image.
-- 6.4: each test creates its own queue in LocalStack and sends with `aws-sdk-sqs` as a dev-dependency of `crates/service`.
-- 6.4: the takeover test uses a lease of 1 s and a renew interval of 200 ms and asserts the bound `T + 3R` plus a scheduling margin.
-- 6.4: the module name is `streaming.rs`; a subscription request is repeated while the answer is the 503 problem `the node is starting`.
-- 6.4: a stalled client is not part of any test of this story.
-- 6.5: the rows of the twelve new variables were written by stories 1.2, 2.1 and 2.2; this story changes two existing rows.
-- 6.6: the four targets that need the container image run locally against a stand-in image and in CI against the real one; the close-out names the image of each result.
+1. the envelope parser and the tail use case come after the approval, not before it as the task text ordered. `architecture.md` makes `serde_json` a protected allow-list entry of the application layer ("Protected Changes"), and `parse_event` (used by `TailEvents` and by the Kafka pages of `Subscription::step`) cannot be written without it. So the subscription state machine, the SSE route, the WebSocket session and route, supervision and shutdown, which all reach `parse_event` or `TailEvents`, follow story 3.1. Everything that does not reach it (scaffold, configuration, origins, broker, domain, window, status, hub, frames, status route) stays before the approval.
+2. the frame encoder of story 2.3 writes the WebSocket `type` member and the `error` member as `"` + text + `"` without calling `serde_json`. An event type name only holds `a-z 0-9 . _ -` and every error reason of the protocol is a fixed ASCII text without `"`, `\` or a control character, so the output is byte-equal to `serde_json::to_string` (tested against it as a dev-dependency, which the application layer already allows). This keeps the hub and the frames free of the protected entry; `architecture.md`'s `http/frame.rs` signatures are unchanged.
+3. the proof stories (Epic 4) come before the removal (Epic 5), not after it as the task text ordered. FR-34 makes the removal "the last epic", and the notification feature must not wait for the second label `approved-breaking-change` (decision D10). The full verification of the change (Epic 6) runs after the removal.
+4. the Kafka broker in the compose environments and CI (story 1.3) needs no approval, because `architecture.md` keeps it out of every protected file (`DEPS` and the Bats files untouched, the host listener in a compose file `make start` does not read). It is therefore placed before the approval.
+5. C6 is done with the infrastructure crate as the scaffolder writes it and no adapter. The context stores nothing, so it has no `persistence.rs` and no migration test; a scaffolder file that assumes a database table is removed in this story. The Kafka adapter is added by story 3.4, after the approval.
+6. C7 adds the fixture only. The domain has no port in this story; the fakes of the topic ports are added with the ports in story 2.1.
+7. `EVENT_TYPES` is parsed in this story, because the catalog slice needs it; the other variables of FR-29 come in story 1.2. `event-stream-infrastructure` gets its workspace entry in story 1.2, where `crates/service` first uses it.
+8. `make.ci_delivery` of C12 runs with `BUILD_IMAGE=0` and `APP_IMAGE` set to a stand-in image built from the head of the story when the session cannot build the Dockerfile; CI builds and judges the real image. A stage that cannot run at all is recorded `not run (<reason>)`.
+9. the Kafka setting types live in `kafka.rs` of the infrastructure crate from this story on, as plain data, so that `config.rs` can build `KafkaSettings` before the client crate is allowed; story 3.4 adds `KafkaTopic`, `CLIENT_ID` and the adapters to the same file.
+10. the digest of `apache/kafka:4.1.1` written in `architecture.md` was read from a local image; this story confirms it against the registry before it is committed and uses the registry digest if they differ.
+11. `tail.rs` is created here with its types and trait only; `TailEvents` and its constants are added by story 3.2, after the approval, because the round calls `parse_event`.
+12. until story 3.7 replaces it with `bootstrap::application`, the composition root builds the status from a hub that is never started and a tail state channel holding `TailState::default()`, so the route answers `starting` with reason `catching-up`. No streaming route exists yet, so nothing else depends on the hub.
+13. `cargo deny` was never run on `krafka`. This story runs `make.check_security`; a refusal by `deny.toml` is escalated to the maintainer and `deny.toml` is not edited.
+14. the streaming routes are wired in the composition root in this story, with the `Adapters.topic` field of story 3.4 as the source of `TopicReplay`. The hub of the router is not started until story 3.7, so a served request answers `the node is starting`; delivery is tested in the application crate with a started hub and `StaticTopic`.
+15. the broker outage of a served binary is produced by a small TCP forwarder inside the test between the node and the broker of the stack, because stopping the shared broker would break the tests that run in parallel.
+16. the decision record "PostgreSQL is removed" is written in story 5.3 with the removal, because it supersedes `docs/adr/0005` only once the removal is done; story 4.4 writes the other seven records.
+17. this story is committed on a branch of its own cut from `main` with the subject `chore(#4): story 5.1 drop sqlx and migrations from required directories`, not on the feature branch, because the guard must see the shortened list on the base of the feature pull request; the feature branch picks it up by merging `main` before story 5.2.
+18. parts A and B are one story with two commits because `postgres-removal.md` shows they are green in `make ci` only together (stage 3 needs the targets, stage 7 the Bats files); each commit passes the hooks on its own (part A keeps clippy, `cargo deny` unused and shear green in one commit).
+19. the maintainer removes the required status check "Persistence query metadata" from the branch rules of `main`; the story records it as a hand-off and does not wait on that check.
 
 ## Next step
 
-`/rs-sdlc-implement`, in the workflow form described under "Deviations from the plugin procedure":
-
-1. Close the three minor readiness findings before the wave that each one names (finding 3 best before wave 1), and commit the bundle.
-2. Stage the bundle with the staging protocol of the plugin: `stage-planning-artifacts.sh`, then `bmalph implement`, then the check that `.ralph/PROJECT_CONTEXT.md` holds both parts of "Constraints" (the literal `(#4)` and the ten `make.*` keys).
-3. Run the eleven waves of `epics.md`: wave 1: 1.1; wave 2: 1.2; wave 3: 2.1, 2.2, 3.1; wave 4: 3.2, 3.3, 3.4, 3.5; wave 5: 3.6, 4.1; wave 6: 4.2, 5.1; wave 7: 4.3; wave 8: 4.4, 5.2; wave 9: 6.1, 6.2, 6.3, 6.5; wave 10: 6.4; wave 11: 6.6. Per wave: one implementer per story in one working tree, a review, one serialized verify step on the whole gate set, one commit per story as `<type>(#4): story N.M <title>` with the hooks active, then `make.mutation_tests_diff` over the commits of the wave.
-4. After wave 11: `/rs-sdlc-review`, `/rs-sdlc-qa` and `/rs-sdlc-finish-pr` on pull request #5.
-
-By instruction of the user (2026-11-14) the implementer agents run on the Opus model; planning, review, verification and orchestration stay on the session model.
+1. Commit the bundle with `/rs-sdlc-plan` (step 8), or let `/rs-sdlc` continue.
+2. Implement waves 1 to 5 (stories 1.1, 1.3, 1.2, 2.1, 2.2, 2.3, 2.4) with `/rs-sdlc-implement` or the feature workflow, on Opus 5.5, before any approval.
+3. In parallel, ask the maintainer for the label `approved-config-change` on pull request #5 for story 3.1. Later ask for the removal approvals: story 5.1 as its own pull request, then `approved-breaking-change` for story 5.2.
