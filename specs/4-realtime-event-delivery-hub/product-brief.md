@@ -40,7 +40,7 @@ Without it each backend team would have to build its own push channel, each with
 
 1. A client can discover event types and subscribe to them over SSE or WebSocket with no knowledge of the event bus.
 2. Delivery is ordered and resumable: the event log sequence is the total order, the SSE `id` and the resume cursor.
-3. The cluster has no single point of failure in the service tier: a node loss costs its clients one reconnect, and a leader loss pauses ingestion for at most the lease time.
+3. The cluster has no single point of failure in the service tier: a node loss costs its clients one reconnect, and a leader loss pauses ingestion for at most the lease time plus one renew interval and the answer time of two lease calls (13 s with the defaults; 3 s after a graceful stop), provided a second node has the event queue configured.
 4. Fan-out cost is proportional to the number of interested subscribers, not to the number of connections, and a connected client causes no per-event database read.
 5. The event-bus transport is replaceable behind a port, so the Kafka adapter and the schema repository can be added later without a change to the domain or application crates.
 6. The change meets the repository quality bar without any exception: every gate of `make.ci` that can run locally passes.
@@ -56,7 +56,8 @@ Without it each backend team would have to build its own push channel, each with
 - A PostgreSQL event log shared by all nodes, with a relay on every node and pruning by the leader.
 - Leader election by a PostgreSQL lease with a monotonically increasing term, and `GET /api/cluster`.
 - The `EventSource` ingestion port and its first adapter, which consumes the SQS queue of the local stack.
-- Slow-consumer protection: a bounded queue per subscriber, disconnection on overflow, and a cap on subscribers per node.
+- Slow-consumer protection: a bounded queue per subscriber, catch-up from the event log on the same connection when the queue overflows, disconnection of a client that takes no data at all, and a cap on connections per node.
+- Browser access: one allow-list of origins (`CORS_ALLOWED_ORIGINS`) for the CORS headers of the HTTP routes and for the WebSocket handshake; no other origin is allowed by default.
 - Unit, integration, two-node, end-to-end and K6 smoke tests, the documentation of the streaming protocols under `docs/`, and the update of `workspace.dsl`.
 
 ### Out of scope
@@ -79,9 +80,9 @@ Without it each backend team would have to build its own push channel, each with
 | S3 | A WebSocket client subscribes and unsubscribes at run time with JSON commands and receives matching events as JSON text frames; an invalid command gets an error frame and the connection stays open. | AC 3 |
 | S4 | A client that reconnects with a cursor receives every retained event after it, in sequence order, without duplicates, before any live event. | AC 4 |
 | S5 | With two nodes on one database, an event ingested by one node reaches subscribers of the other node. | AC 5 |
-| S6 | At any time at most one node holds the lease; after the leader stops, another node holds it within `CLUSTER_LEASE_TTL` (default 10s) and ingestion continues; `GET /api/cluster` reports node id, role, leader and term. | AC 6 |
+| S6 | At any time at most one node holds the lease; after the leader stops, another node that has the event queue configured holds it within `CLUSTER_LEASE_TTL` plus one `CLUSTER_RENEW_INTERVAL` plus the answer time of two lease calls (13 s with the defaults and a healthy database; 3 s after a graceful stop) and ingestion continues; `GET /api/cluster` reports node id, role, leader and term. | AC 6 |
 | S7 | The domain and application crates of `notification/event-stream` contain no reference to SQS; the SQS adapter passes its integration tests against the local stack. | AC 7 |
-| S8 | A subscriber that stops reading is disconnected when its queue (`SUBSCRIBER_BUFFER`, default 256) is full, while other subscribers and ingestion continue without delay. | AC 8 |
+| S8 | A subscriber whose queue (`SUBSCRIBER_BUFFER`, default 256) is full never delays other subscribers or ingestion: it is taken off live delivery and catches up from the event log on its connection, without loss or duplicate; a client that takes no data at all is disconnected after `STREAM_KEEP_ALIVE`. (AC 8 words this as "disconnected when it lags past the buffer"; the PRD records the deviation at FR-22.) | AC 8 |
 | S9 | An invalid event type name, more than 100 types, and a malformed `Last-Event-ID` each produce an RFC 9457 problem response. | AC 9 |
 | S10 | The K6 smoke scenario holds 50 SSE subscribers while events are published and stays inside its latency budget. | AC 10 |
 | S11 | Every gate of `make.ci` that can run locally passes; line and function coverage stay at 100 % and no mutant survives in the changed code. | AC 11 |
@@ -98,11 +99,11 @@ Mercure is the established open protocol and hub for pushing updates to browsers
 | No subscriber authorization in this issue | Any client can read any event type | Carry only events that are safe for every client; state it in the security notes; follow-up issue for JWT |
 | PostgreSQL is the single consistent store | An outage pauses new events and elections | Existing connections stay open; a node whose lease store fails steps down to follower; PostgreSQL HA is a deployment prerequisite |
 | Serialised appends (advisory lock) bound the ingestion rate | Ingestion throughput has a ceiling | Batched appends; the target is 100 events/s; measure in the load tests before raising the target |
-| Leader loss | Ingestion pauses for up to the lease time | Lease released on graceful shutdown, so a planned restart fails over at once; expiry is judged by the database clock, so clock skew cannot give two leaders |
+| Leader loss | Ingestion pauses for up to the lease time plus one renew interval and the answer time of two lease calls (13 s with the defaults) | Lease released on graceful shutdown, so a planned restart fails over within one renew interval; expiry is judged by the database clock, so clock skew cannot give two leaders; only nodes that have the event queue configured campaign, so at least two of them are needed for a takeover |
 | A client offline longer than the retention window | Events older than `EVENT_RETENTION` are lost for that client | Document the window; the client reloads its state through the owning service's API |
-| Slow clients and connection floods | Memory growth, or delay for other clients | Bounded queue with eviction, `MAX_SUBSCRIBERS` cap answered with 503 |
+| Slow clients and connection floods | Memory growth, or delay for other clients | Bounded queue per subscriber; a subscriber that falls behind catches up from the log instead of being queued for; a send bound on every accepted connection and a write deadline on WebSocket connections, so a client that takes no data is disconnected after `STREAM_KEEP_ALIVE`; the `MAX_SUBSCRIBERS` cap on connections answered with 503; database connections of their own for the election and the relay, so client reads cannot reach them. Limits per client stay with the edge proxy, and a stalled stream on an HTTP/2 connection is not bounded by the service (PRD, out of scope) |
 | Streaming routes are outside OpenAPI | Their contract is not covered by the snapshot and Schemathesis gates | Specify them in `docs/` and cover them with end-to-end features |
-| 10 000 subscribers per node is unproven in CI | The capacity target may not hold | The CI gate is the 50-subscriber smoke scenario; the capacity target is checked with the on-demand load profiles |
+| 10 000 subscribers per node is unproven in CI | The capacity target may not hold | The CI gate is the 50-subscriber smoke scenario; the capacity target is a design target whose structural conditions are tested, and its measurement is a follow-up that needs a load generator outside the node and server-side timestamps (PRD, NFR-1 and out of scope) |
 | Quality bar on concurrent code (100 % coverage, no surviving mutant, complexity 8) | Schedule risk for hub, relay and elector | Small functions, time only through the `Clock` port and tokio time, fakes for every port |
 | Kafka adapter depends on a protected-config approval | The production bus cannot be connected by this issue alone | The port and the attribute-plus-body envelope are fixed now so the adapter is a contained follow-up |
 
