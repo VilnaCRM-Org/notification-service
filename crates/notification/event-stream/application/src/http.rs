@@ -1,10 +1,14 @@
 //! REST adapter of the event stream: the state its handlers read, the router that registers
 //! them, the frames of the streaming transports and the hub that hands them to the subscribers.
+//!
+//! It also holds the subscriptions that read every connection by position: from the window, from
+//! a Kafka replay below it, then live.
 
 pub mod dto;
 pub mod frame;
 pub mod handler;
 pub mod hub;
+pub mod subscription;
 
 use std::sync::Arc;
 
