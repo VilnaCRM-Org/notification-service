@@ -34,6 +34,7 @@ repository = "https://github.com/VilnaCRM-Org/notification-service"
 # Workspace crates
 event-stream-application = { path = "crates/notification/event-stream/application" }
 event-stream-domain = { path = "crates/notification/event-stream/domain" }
+event-stream-infrastructure = { path = "crates/notification/event-stream/infrastructure" }
 health-check-application = { path = "crates/internal/health-check/application" }
 health-check-domain = { path = "crates/internal/health-check/domain" }
 health-check-infrastructure = { path = "crates/internal/health-check/infrastructure" }

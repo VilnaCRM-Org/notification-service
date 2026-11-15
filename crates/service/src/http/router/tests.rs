@@ -57,14 +57,18 @@ fn adapters() -> Adapters {
 }
 
 async fn send_to(app: &Router, request: Request<Body>) -> Answer {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let (parts, body) = response.into_parts();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    Answer {
-        status: parts.status,
-        headers: parts.headers,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        Answer {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn send(app_env: &str, request: Request<Body>) -> Answer {
@@ -542,4 +546,267 @@ fn the_extractor_check_accepts_the_allowed_extractors() {
         ValidatedJson(j): ValidatedJson<J>) -> Response {}";
 
     assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+}
+
+const ORIGIN: &str = "https://app.example.com";
+
+fn config_with_origins(origins: crate::config::AllowedOrigins) -> Config {
+    let mut config = config("test");
+    config.allowed_origins = origins;
+    config
+}
+
+fn from_origin(
+    method: Method,
+    path: &str,
+    body: Option<&str>,
+    origin: Option<&str>,
+) -> Request<Body> {
+    let mut request = request(method, path, body);
+    if let Some(origin) = origin {
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+    }
+    request
+}
+
+/// Method, path, body and status of a request to each kind of answer: a success, GraphQL, the
+/// 404, 405, 422 and 500 problems.
+fn answers_of_every_kind() -> Vec<(Method, &'static str, Option<&'static str>, StatusCode)> {
+    vec![
+        (Method::GET, "/api/event-types", None, StatusCode::OK),
+        (
+            Method::POST,
+            "/api/graphql",
+            Some(r#"{"query":"{ exampleApiResources { id } }"}"#),
+            StatusCode::OK,
+        ),
+        (Method::GET, "/api/unknown", None, StatusCode::NOT_FOUND),
+        (
+            Method::DELETE,
+            "/api/event-types",
+            None,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
+        (
+            Method::GET,
+            "/api/event-types?page=0",
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Method::GET,
+            "/api/health",
+            None,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    ]
+}
+
+fn panicking_router(config: &Config) -> Router {
+    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Database)));
+    router(adapters, config).unwrap()
+}
+
+/// The body of an answer with the generated request id blanked out wherever it is repeated, so
+/// that two answers to the same request compare equal.
+fn comparable_body(answer: &Answer) -> String {
+    let id = answer.headers["x-request-id"].to_str().unwrap();
+    answer.body.replace(id, "<request-id>")
+}
+
+/// The headers of an answer as sorted name and value pairs, without the named ones.
+fn comparable_headers(headers: &HeaderMap, without: &[&str]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| !without.contains(&name.as_str()))
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Asserts that two answers have the same status, the same body and the same headers apart from
+/// the generated request id and the named headers.
+fn assert_same_answer(left: &Answer, right: &Answer, without: &[&str], route: &str) {
+    assert_eq!(left.status, right.status, "{route}");
+    assert_eq!(comparable_body(left), comparable_body(right), "{route}");
+    let mut ignored = vec!["x-request-id"];
+    ignored.extend_from_slice(without);
+    assert_eq!(
+        comparable_headers(&left.headers, &ignored),
+        comparable_headers(&right.headers, &ignored),
+        "{route}"
+    );
+}
+
+fn has_cors_headers(headers: &HeaderMap) -> bool {
+    headers
+        .keys()
+        .any(|name| name.as_str().starts_with("access-control-"))
+        || headers.contains_key(header::VARY)
+}
+
+#[tokio::test]
+async fn without_allowed_origins_no_answer_changes() {
+    let app = panicking_router(&config("test"));
+
+    for (method, path, body, status) in answers_of_every_kind() {
+        let route = format!("{method} {path}");
+        let with = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
+        let without = send_to(&app, from_origin(method.clone(), path, body, None)).await;
+        assert_eq!(without.status, status, "{route}");
+        assert!(!has_cors_headers(&with.headers), "{route}");
+        assert!(!has_cors_headers(&without.headers), "{route}");
+        assert_same_answer(&with, &without, &[], &route);
+    }
+    let preflight = |path: &str| {
+        Request::options(path)
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let known = send_to(&app, preflight("/api/event-types")).await;
+    assert_eq!(known.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(!has_cors_headers(&known.headers));
+    let unknown = send_to(&app, preflight("/api/unknown")).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert!(!has_cors_headers(&unknown.headers));
+}
+
+#[tokio::test]
+async fn an_allowed_origin_gets_the_cors_headers_on_every_kind_of_answer() {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let app = panicking_router(&config_with_origins(origins));
+    let unset = panicking_router(&config("test"));
+
+    for (method, path, body, status) in answers_of_every_kind() {
+        let route = format!("{method} {path}");
+        let baseline = send_to(&unset, from_origin(method.clone(), path, body, None)).await;
+        let allowed = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
+        assert_eq!(allowed.status, status, "{route}");
+        assert_same_answer(
+            &allowed,
+            &baseline,
+            &["vary", "access-control-allow-origin"],
+            &route,
+        );
+        assert_eq!(
+            allowed.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            ORIGIN,
+            "{route}"
+        );
+        assert!(
+            allowed.headers[header::VARY]
+                .to_str()
+                .unwrap()
+                .contains("origin"),
+            "{route}"
+        );
+        assert_common_headers(&allowed, DEFAULT_CONTENT_SECURITY_POLICY, &route);
+
+        let other = send_to(
+            &app,
+            from_origin(
+                method.clone(),
+                path,
+                body,
+                Some("https://other.example.com"),
+            ),
+        )
+        .await;
+        assert_eq!(other.status, status, "{route}");
+        assert!(
+            !other
+                .headers
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "{route}"
+        );
+
+        let without = send_to(&app, from_origin(method.clone(), path, body, None)).await;
+        assert_eq!(without.status, status, "{route}");
+        assert!(
+            !without
+                .headers
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "{route}"
+        );
+        // The CORS layer adds `vary` to every answer so that a cache keeps the answers to
+        // different origins apart; nothing else of an answer without `Origin` changes.
+        assert_same_answer(&without, &baseline, &["vary"], &route);
+    }
+}
+
+#[tokio::test]
+async fn a_preflight_is_answered_by_the_router_for_every_path() {
+    for origins in [
+        crate::config::AllowedOrigins::Any,
+        crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]),
+    ] {
+        let app = router(adapters(), &config_with_origins(origins.clone())).unwrap();
+        for path in ["/api/event-types", "/api/unknown"] {
+            let request = Request::options(path)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap();
+
+            let answer = send_to(&app, request).await;
+
+            assert_eq!(answer.status, StatusCode::OK, "{origins:?} {path}");
+            assert_eq!(answer.body, "", "{path}");
+            assert_eq!(answer.headers[header::ACCESS_CONTROL_MAX_AGE], "600");
+            assert!(answer.headers.contains_key("x-request-id"), "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_websocket_handshake_from_a_refused_origin_is_the_403_problem() {
+    let app = router(adapters(), &config("test")).unwrap();
+    let request = Request::get("/api/event-types")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
+}
+
+#[tokio::test]
+async fn the_cors_layer_wraps_the_refusal_of_a_websocket_handshake() {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let app = router(adapters(), &config_with_origins(origins)).unwrap();
+    let request = Request::get("/api/event-types")
+        .header(header::ORIGIN, "https://other.example.com")
+        .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    // The CORS layer adds `vary` only to the answers that pass through it, so the 403 carries it
+    // only when the CORS layer is outside the origin check of the handshake.
+    assert!(
+        answer.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+    assert!(
+        !answer
+            .headers
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
 }

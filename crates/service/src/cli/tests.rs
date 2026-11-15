@@ -64,6 +64,50 @@ fn serve_takes_every_setting_as_a_flag() {
         "6s",
         "--event-types",
         "user.created,order.paid",
+        "--kafka-bootstrap-servers",
+        "a:9092",
+        "--kafka-topic",
+        "events",
+        "--kafka-security-protocol",
+        "sasl_ssl",
+        "--kafka-sasl-mechanism",
+        "PLAIN",
+        "--kafka-sasl-username",
+        "reader",
+        "--kafka-sasl-password",
+        "secret",
+        "--kafka-client-id",
+        "node",
+        "--kafka-request-timeout",
+        "4s",
+        "--kafka-connect-timeout",
+        "1s",
+        "--kafka-fetch-max-wait",
+        "100ms",
+        "--kafka-retry-delay",
+        "2s",
+        "--event-max-data-bytes",
+        "1024",
+        "--event-window-max-events",
+        "10",
+        "--event-window-max-bytes",
+        "3000000",
+        "--event-window-start-events",
+        "5",
+        "--event-replay-max-events",
+        "20",
+        "--event-replay-permits",
+        "3",
+        "--event-tail-stale-after",
+        "20s",
+        "--subscriber-buffer",
+        "8",
+        "--max-subscribers",
+        "9",
+        "--stream-keep-alive",
+        "30s",
+        "--cors-allowed-origins",
+        "*",
     ])
     .unwrap();
 
@@ -91,6 +135,30 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.http_max_body_bytes.as_deref(), Some("2048"));
     assert_eq!(args.shutdown_grace_period.as_deref(), Some("6s"));
     assert_eq!(args.event_types.as_deref(), Some("user.created,order.paid"));
+    let kafka = &args.kafka;
+    assert_eq!(kafka.bootstrap_servers.as_deref(), Some("a:9092"));
+    assert_eq!(kafka.topic.as_deref(), Some("events"));
+    assert_eq!(kafka.security_protocol.as_deref(), Some("sasl_ssl"));
+    assert_eq!(kafka.sasl_mechanism.as_deref(), Some("PLAIN"));
+    assert_eq!(kafka.sasl_username.as_deref(), Some("reader"));
+    assert_eq!(kafka.sasl_password.as_deref(), Some("secret"));
+    assert_eq!(kafka.client_id.as_deref(), Some("node"));
+    assert_eq!(kafka.request_timeout.as_deref(), Some("4s"));
+    assert_eq!(kafka.connect_timeout.as_deref(), Some("1s"));
+    assert_eq!(kafka.fetch_max_wait.as_deref(), Some("100ms"));
+    assert_eq!(kafka.retry_delay.as_deref(), Some("2s"));
+    let streams = &args.streams;
+    assert_eq!(streams.max_data_bytes.as_deref(), Some("1024"));
+    assert_eq!(streams.window_max_events.as_deref(), Some("10"));
+    assert_eq!(streams.window_max_bytes.as_deref(), Some("3000000"));
+    assert_eq!(streams.window_start_events.as_deref(), Some("5"));
+    assert_eq!(streams.replay_max_events.as_deref(), Some("20"));
+    assert_eq!(streams.replay_permits.as_deref(), Some("3"));
+    assert_eq!(streams.tail_stale_after.as_deref(), Some("20s"));
+    assert_eq!(streams.subscriber_buffer.as_deref(), Some("8"));
+    assert_eq!(streams.max_subscribers.as_deref(), Some("9"));
+    assert_eq!(streams.keep_alive.as_deref(), Some("30s"));
+    assert_eq!(args.cors_allowed_origins.as_deref(), Some("*"));
 }
 
 #[test]
@@ -240,19 +308,41 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "AWS_ENDPOINT_URL_SQS",
         "AWS_REGION",
         "AWS_SECRET_ACCESS_KEY",
+        "CORS_ALLOWED_ORIGINS",
         "DATABASE_ACQUIRE_TIMEOUT",
         "DATABASE_MAX_CONNECTIONS",
         "DATABASE_STATEMENT_TIMEOUT",
         "DATABASE_URL",
+        "EVENT_MAX_DATA_BYTES",
+        "EVENT_REPLAY_MAX_EVENTS",
+        "EVENT_REPLAY_PERMITS",
+        "EVENT_TAIL_STALE_AFTER",
         "EVENT_TYPES",
+        "EVENT_WINDOW_MAX_BYTES",
+        "EVENT_WINDOW_MAX_EVENTS",
+        "EVENT_WINDOW_START_EVENTS",
         "HEALTH_PROBE_TIMEOUT",
         "HTTP_MAX_BODY_BYTES",
         "HTTP_REQUEST_TIMEOUT",
+        "KAFKA_BOOTSTRAP_SERVERS",
+        "KAFKA_CLIENT_ID",
+        "KAFKA_CONNECT_TIMEOUT",
+        "KAFKA_FETCH_MAX_WAIT",
+        "KAFKA_REQUEST_TIMEOUT",
+        "KAFKA_RETRY_DELAY",
+        "KAFKA_SASL_MECHANISM",
+        "KAFKA_SASL_PASSWORD",
+        "KAFKA_SASL_USERNAME",
+        "KAFKA_SECURITY_PROTOCOL",
+        "KAFKA_TOPIC",
         "LOG_LEVEL",
+        "MAX_SUBSCRIBERS",
         "SHUTDOWN_GRACE_PERIOD",
         "SQS_CONNECT_TIMEOUT",
         "SQS_MAX_ATTEMPTS",
         "SQS_OPERATION_TIMEOUT",
+        "STREAM_KEEP_ALIVE",
+        "SUBSCRIBER_BUFFER",
     ];
     expected.sort_unstable();
     assert_eq!(variables, expected);

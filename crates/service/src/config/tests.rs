@@ -57,8 +57,36 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(config.request_timeout, Duration::from_secs(10));
     assert_eq!(config.max_body_bytes, 65_536);
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(10));
-    assert_eq!(config.streams, StreamConfig::default());
-    assert_eq!(config.streams.catalog, EventCatalog::default());
+    assert_eq!(
+        config.kafka,
+        KafkaSettings {
+            bootstrap_servers: "localhost:9092".to_owned(),
+            topic: "notifications".to_owned(),
+            client_id: "notification-service".to_owned(),
+            security: KafkaSecurity::Plaintext,
+            request_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(2),
+            fetch_wait: Duration::from_millis(500),
+        }
+    );
+    assert_eq!(
+        config.streams,
+        StreamConfig {
+            catalog: EventCatalog::default(),
+            max_data_bytes: 65_536,
+            window_max_events: 100_000,
+            window_max_bytes: 67_108_864,
+            start_events: 100_000,
+            replay_max_events: 1_000_000,
+            replay_permits: 4,
+            retry_delay: Duration::from_secs(1),
+            stale_after: Duration::from_secs(10),
+            buffer: 256,
+            max_subscribers: 100_000,
+            keep_alive: Duration::from_secs(15),
+        }
+    );
+    assert_eq!(config.allowed_origins, AllowedOrigins::NoOrigin);
 }
 
 #[test]
@@ -86,6 +114,32 @@ fn every_variable_accepts_a_valid_value() {
         http_max_body_bytes: some("2048"),
         shutdown_grace_period: some("15s"),
         event_types: some("user.created,order.paid"),
+        kafka: KafkaArgs {
+            bootstrap_servers: some("a:9092,b:9093"),
+            topic: some("events.v1"),
+            security_protocol: some("sasl_ssl"),
+            sasl_mechanism: some("SCRAM-SHA-256"),
+            sasl_username: some("reader"),
+            sasl_password: some("s3cret-value"),
+            client_id: some("node-a"),
+            request_timeout: some("5s"),
+            connect_timeout: some("5s"),
+            fetch_max_wait: some("1s"),
+            retry_delay: some("2s"),
+        },
+        streams: StreamArgs {
+            max_data_bytes: some("1024"),
+            window_max_events: some("10"),
+            window_max_bytes: some("3000000"),
+            window_start_events: some("0"),
+            replay_max_events: some("20"),
+            replay_permits: some("8"),
+            tail_stale_after: some("30s"),
+            subscriber_buffer: some("16"),
+            max_subscribers: some("50"),
+            keep_alive: some("20s"),
+        },
+        cors_allowed_origins: some("https://app.example.com"),
     };
 
     let config = Config::from_args(args).unwrap();
@@ -116,6 +170,37 @@ fn every_variable_accepts_a_valid_value() {
     assert_eq!(
         config.streams.catalog,
         catalog(&["order.paid", "user.created"])
+    );
+    assert_eq!(
+        config.kafka,
+        KafkaSettings {
+            bootstrap_servers: "a:9092,b:9093".to_owned(),
+            topic: "events.v1".to_owned(),
+            client_id: "node-a".to_owned(),
+            security: KafkaSecurity::SaslSsl(SaslCredentials {
+                mechanism: SaslMechanism::ScramSha256,
+                username: "reader".to_owned(),
+                password: "s3cret-value".to_owned(),
+            }),
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            fetch_wait: Duration::from_secs(1),
+        }
+    );
+    assert_eq!(config.streams.max_data_bytes, 1024);
+    assert_eq!(config.streams.window_max_events, 10);
+    assert_eq!(config.streams.window_max_bytes, 3_000_000);
+    assert_eq!(config.streams.start_events, 0);
+    assert_eq!(config.streams.replay_max_events, 20);
+    assert_eq!(config.streams.replay_permits, 8);
+    assert_eq!(config.streams.retry_delay, Duration::from_secs(2));
+    assert_eq!(config.streams.stale_after, Duration::from_secs(30));
+    assert_eq!(config.streams.buffer, 16);
+    assert_eq!(config.streams.max_subscribers, 50);
+    assert_eq!(config.streams.keep_alive, Duration::from_secs(20));
+    assert_eq!(
+        config.allowed_origins,
+        AllowedOrigins::List(vec![HeaderValue::from_static("https://app.example.com")])
     );
 }
 
@@ -835,7 +920,7 @@ type Mutator = fn(&mut ServeArgs);
 
 /// One row per variable of `ServeArgs`: the variable, a way to make it the only problem, and the
 /// variable that the problem names.
-const FIELDS: [(&str, Mutator, &str); 20] = [
+const FIELDS: [(&str, Mutator, &str); 42] = [
     ("APP_ENV", |a| a.app_env = some("x"), "APP_ENV"),
     ("APP_HOST", |a| a.app_host = some("x"), "APP_HOST"),
     ("APP_PORT", |a| a.app_port = some("x"), "APP_PORT"),
@@ -908,6 +993,112 @@ const FIELDS: [(&str, Mutator, &str); 20] = [
         "SHUTDOWN_GRACE_PERIOD",
     ),
     ("EVENT_TYPES", |a| a.event_types = some(""), "EVENT_TYPES"),
+    (
+        "KAFKA_BOOTSTRAP_SERVERS",
+        |a| a.kafka.bootstrap_servers = some("x"),
+        "KAFKA_BOOTSTRAP_SERVERS",
+    ),
+    ("KAFKA_TOPIC", |a| a.kafka.topic = some(""), "KAFKA_TOPIC"),
+    (
+        "KAFKA_SECURITY_PROTOCOL",
+        |a| a.kafka.security_protocol = some("x"),
+        "KAFKA_SECURITY_PROTOCOL",
+    ),
+    (
+        "KAFKA_SASL_MECHANISM",
+        |a| a.kafka.sasl_mechanism = some("PLAIN"),
+        "KAFKA_SASL_MECHANISM",
+    ),
+    (
+        "KAFKA_SASL_USERNAME",
+        |a| a.kafka.sasl_username = some("u"),
+        "KAFKA_SASL_USERNAME",
+    ),
+    (
+        "KAFKA_SASL_PASSWORD",
+        |a| a.kafka.sasl_password = some("p"),
+        "KAFKA_SASL_PASSWORD",
+    ),
+    (
+        "KAFKA_CLIENT_ID",
+        |a| a.kafka.client_id = some(""),
+        "KAFKA_CLIENT_ID",
+    ),
+    (
+        "KAFKA_REQUEST_TIMEOUT",
+        |a| a.kafka.request_timeout = some("x"),
+        "KAFKA_REQUEST_TIMEOUT",
+    ),
+    (
+        "KAFKA_CONNECT_TIMEOUT",
+        |a| a.kafka.connect_timeout = some("x"),
+        "KAFKA_CONNECT_TIMEOUT",
+    ),
+    (
+        "KAFKA_FETCH_MAX_WAIT",
+        |a| a.kafka.fetch_max_wait = some("x"),
+        "KAFKA_FETCH_MAX_WAIT",
+    ),
+    (
+        "KAFKA_RETRY_DELAY",
+        |a| a.kafka.retry_delay = some("x"),
+        "KAFKA_RETRY_DELAY",
+    ),
+    (
+        "EVENT_MAX_DATA_BYTES",
+        |a| a.streams.max_data_bytes = some("x"),
+        "EVENT_MAX_DATA_BYTES",
+    ),
+    (
+        "EVENT_WINDOW_MAX_EVENTS",
+        |a| a.streams.window_max_events = some("x"),
+        "EVENT_WINDOW_MAX_EVENTS",
+    ),
+    (
+        "EVENT_WINDOW_MAX_BYTES",
+        |a| a.streams.window_max_bytes = some("x"),
+        "EVENT_WINDOW_MAX_BYTES",
+    ),
+    (
+        "EVENT_WINDOW_START_EVENTS",
+        |a| a.streams.window_start_events = some("x"),
+        "EVENT_WINDOW_START_EVENTS",
+    ),
+    (
+        "EVENT_REPLAY_MAX_EVENTS",
+        |a| a.streams.replay_max_events = some("x"),
+        "EVENT_REPLAY_MAX_EVENTS",
+    ),
+    (
+        "EVENT_REPLAY_PERMITS",
+        |a| a.streams.replay_permits = some("x"),
+        "EVENT_REPLAY_PERMITS",
+    ),
+    (
+        "EVENT_TAIL_STALE_AFTER",
+        |a| a.streams.tail_stale_after = some("x"),
+        "EVENT_TAIL_STALE_AFTER",
+    ),
+    (
+        "SUBSCRIBER_BUFFER",
+        |a| a.streams.subscriber_buffer = some("x"),
+        "SUBSCRIBER_BUFFER",
+    ),
+    (
+        "MAX_SUBSCRIBERS",
+        |a| a.streams.max_subscribers = some("x"),
+        "MAX_SUBSCRIBERS",
+    ),
+    (
+        "STREAM_KEEP_ALIVE",
+        |a| a.streams.keep_alive = some("x"),
+        "STREAM_KEEP_ALIVE",
+    ),
+    (
+        "CORS_ALLOWED_ORIGINS",
+        |a| a.cors_allowed_origins = some("x"),
+        "CORS_ALLOWED_ORIGINS",
+    ),
 ];
 
 #[test]
@@ -931,3 +1122,7 @@ fn every_field_of_serve_args_is_consumed_by_from_args() {
         assert_eq!(variables(args), [reported], "{variable} is not consumed");
     }
 }
+
+mod kafka;
+mod origins;
+mod streams;

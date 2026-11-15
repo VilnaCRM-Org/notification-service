@@ -32,9 +32,29 @@ A service that adds variables for its own adapters adds their rows here. The syn
 | `SHUTDOWN_GRACE_PERIOD` | duration | `10s` | no | `service` | none |
 | `EVENT_TYPES` | comma-separated event type names, 1 to 1 000 distinct names, each 1 to 128 characters matching `^[a-z][a-z0-9]*([._-][a-z0-9]+)*$`; no empty value or entry; a repeated name counts once | unset (an empty catalog) | no | `service` (the catalog of `GET /api/event-types`) | none |
 | `KAFKA_BOOTSTRAP_SERVERS` | comma-separated `host:port`, 1 to 16 entries; host a DNS name, an IPv4 address or a bracketed IPv6 address; port 1 to 65 535; no empty entry | `localhost:9092` | no | `service`; compose (`docker-compose.yml` sets `kafka:9092` in the `app` container, `docker-compose.prod.yml` defaults to `kafka:9092`); `.env` holds `localhost:9095`, the host listener of the local broker that `make ensure-kafka` publishes | none |
+| `KAFKA_TOPIC` | Kafka topic name: 1 to 249 characters of `A-Z a-z 0-9 . _ -`, not `.` or `..` | `notifications` | no | `service` (the topic of the events) | none |
+| `KAFKA_SECURITY_PROTOCOL` | `plaintext`, `ssl`, `sasl_plaintext` or `sasl_ssl` | `plaintext` | no | `service`; TLS verifies the broker against the public root certificates the client ships | none |
+| `KAFKA_SASL_MECHANISM` | `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512` | unset | yes with `sasl_plaintext` or `sasl_ssl`; must be unset otherwise | `service` | none |
+| `KAFKA_SASL_USERNAME` | text, not empty | unset | yes with `sasl_plaintext` or `sasl_ssl`; must be unset otherwise | `service` | none |
+| `KAFKA_SASL_PASSWORD` | secret text, not empty; never logged or printed | unset | yes with `sasl_plaintext` or `sasl_ssl`; must be unset otherwise | `service` | none |
+| `KAFKA_CLIENT_ID` | text, 1 to 128 characters | `notification-service` | no | `service` (the client id of every Kafka connection of the node) | none |
+| `KAFKA_REQUEST_TIMEOUT` | duration, `1s` to `30s` | `3s` | no | `service` (the request time-out of the client and the base of the time-out of every broker call) | none |
+| `KAFKA_CONNECT_TIMEOUT` | duration, `100ms` to `30s`, not longer than `KAFKA_REQUEST_TIMEOUT` | `2s` | no | `service` (the connect time-out of the client) | none |
+| `KAFKA_FETCH_MAX_WAIT` | duration, `50ms` to `5s` | `500ms` | no | `service` (the long-poll wait of the tail) | none |
+| `KAFKA_RETRY_DELAY` | duration, `100ms` to `1m` | `1s` | no | `service` (the pause after a failed round of the tail) | none |
+| `EVENT_MAX_DATA_BYTES` | integer 1 to 1 048 576 | `65536` | no | `service` (the size limit of a record value) | none |
+| `EVENT_WINDOW_MAX_EVENTS` | integer 1 to 10 000 000 | `100000` | no | `service` (events in the memory window) | none |
+| `EVENT_WINDOW_MAX_BYTES` | integer 2 097 152 to 17 179 869 184 | `67108864` (64 MiB) | no | `service` (bytes in the memory window) | none |
+| `EVENT_WINDOW_START_EVENTS` | integer 0 to 10 000 000 | `100000` | no | `service` (offsets below the end of the topic read at start) | none |
+| `EVENT_REPLAY_MAX_EVENTS` | integer 1 to 100 000 000 | `1000000` | no | `service` (offsets below the tail a replay may reach) | none |
+| `EVENT_REPLAY_PERMITS` | integer 1 to 64 | `4` | no | `service` (concurrent replay reads and Kafka replay connections of a node) | none |
+| `EVENT_TAIL_STALE_AFTER` | duration, `1s` to `5m` | `10s` | no | `service` (the age at which the readiness probe of the event stream fails) | none |
+| `SUBSCRIBER_BUFFER` | integer 1 to 65 536 | `256` | no | `service` (queued events per subscriber) | none |
 | `MAX_SUBSCRIBERS` | integer 1 to 1 000 000 | `100000` (the production reference `docker-compose.prod.yml` defaults to `5000`) | no | `service` (the subscriber cap of a node); compose | none |
+| `STREAM_KEEP_ALIVE` | duration, `1s` to `5m` | `15s` | no | `service` (keep-alive, WebSocket ping, send bound and write deadline of the streams) | none |
+| `CORS_ALLOWED_ORIGINS` | exactly `*`, or comma-separated origins as a browser sends them: scheme `http` or `https`, a host, an optional port, lower case, nothing else; `*` inside a list and an empty entry are invalid | unset (no other origin: no CORS header, and a WebSocket handshake with an `Origin` header is refused) | no | `service` (the CORS layer of the HTTP routes and the origin check of the WebSocket handshake) | none |
 
-Cross-field rules checked at start-up: `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`; `HEALTH_PROBE_TIMEOUT >= SQS_OPERATION_TIMEOUT`; `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT`; the two AWS key variables are both set or both unset (the error names the missing one). A configuration problem never prints the value of a variable.
+Cross-field rules checked at start-up: `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`; `HEALTH_PROBE_TIMEOUT >= SQS_OPERATION_TIMEOUT`; `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT`; the two AWS key variables are both set or both unset (the error names the missing one). `KAFKA_CONNECT_TIMEOUT` is not longer than `KAFKA_REQUEST_TIMEOUT`; the three `KAFKA_SASL_*` variables are each required when `KAFKA_SECURITY_PROTOCOL` is `sasl_plaintext` or `sasl_ssl` and must be unset otherwise. The rules between variables are reported after the problems of single variables. A configuration problem never prints the value of a variable.
 
 ## Compose and local stack
 

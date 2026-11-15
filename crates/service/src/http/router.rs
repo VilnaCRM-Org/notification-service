@@ -1,5 +1,7 @@
 //! The assembled router: routes, fallbacks and the fixed middleware order (AD-15, AD-14).
 
+use std::sync::Arc;
+
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
@@ -15,6 +17,7 @@ use crate::config::{AppEnv, Config};
 use crate::graphql::handler::{execute, explorer};
 use crate::graphql::schema::ApiSchema;
 use crate::http::docs::{docs_asset, docs_page, openapi_json};
+use crate::http::origin;
 use crate::http::ping::ping;
 use crate::http::request_id::{REQUEST_ID_HEADER, sanitize_request_id};
 use crate::http::{AppState, security_headers, trace};
@@ -24,7 +27,9 @@ use crate::openapi::api_router;
 ///
 /// It holds the REST routes, the `GraphQL` route (with the explorer in `dev` only), liveness, the
 /// documentation routes and the two fallbacks, all under one middleware stack whose first layer is
-/// the outermost.
+/// the outermost: request id, security headers, tracing, the CORS layer of the allowed origins
+/// (absent when none is allowed), the origin check of a WebSocket handshake, the panic catcher,
+/// the request budget and the body limit.
 pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
     let (rest, _document) = api_router().split_for_parts();
     let mut graphql = post(execute);
@@ -42,6 +47,11 @@ pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
                 .on_response(trace::on_response)
                 .on_failure(()),
         )
+        .option_layer(origin::cors(&config.allowed_origins))
+        .layer(from_fn_with_state(
+            Arc::new(config.allowed_origins.clone()),
+            origin::websocket_origin,
+        ))
         .layer(CatchPanicLayer::custom(panic_response))
         .layer(from_fn_with_state(config.request_timeout, request_timeout))
         .layer(DefaultBodyLimit::max(config.max_body_bytes));

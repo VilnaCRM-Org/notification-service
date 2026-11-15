@@ -41,7 +41,10 @@ crates/service/src/cli/
 crates/service/src/config.rs
 crates/service/src/config/
 crates/service/src/http.rs
+crates/service/src/http/router.rs
 crates/service/src/http/router/tests.rs
+crates/service/src/http/origin.rs
+crates/service/src/http/origin/
 crates/service/tests/integration/bootstrap.rs
 crates/service/tests/integration/migrate.rs
 crates/service/tests/integration/serve.rs

@@ -6,15 +6,16 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Display;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::RangeInclusive;
 use std::str::FromStr;
 use std::time::Duration;
 
-use axum::http::Uri;
 use axum::http::uri::Authority;
+use axum::http::{HeaderValue, Uri};
 use event_stream_application::EventCatalog;
 use event_stream_domain::EventType;
+use event_stream_infrastructure::{KafkaSecurity, KafkaSettings, SaslCredentials, SaslMechanism};
 use shared_infrastructure::messaging::SqsSettings;
 use shared_infrastructure::persistence::{
     MAX_STATEMENT_TIMEOUT, MIN_STATEMENT_TIMEOUT, PostgresSettings,
@@ -22,7 +23,7 @@ use shared_infrastructure::persistence::{
 use sqlx::postgres::PgConnectOptions;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{DatabaseArgs, MigrateArgs, ServeArgs};
+use crate::cli::{DatabaseArgs, KafkaArgs, MigrateArgs, ServeArgs, StreamArgs};
 
 /// Deployment environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,15 +82,64 @@ pub struct Config {
     pub max_body_bytes: usize,
     /// Time the in-flight requests get to finish after a termination signal.
     pub shutdown_grace_period: Duration,
+    /// Settings of the Kafka connection.
+    pub kafka: KafkaSettings,
     /// Settings of the event stream.
     pub streams: StreamConfig,
+    /// The browser origins whose pages may use the service (`CORS_ALLOWED_ORIGINS`).
+    pub allowed_origins: AllowedOrigins,
 }
 
 /// Settings of the event stream.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfig {
     /// The subscribable event types (`EVENT_TYPES`).
     pub catalog: EventCatalog,
+    /// Largest record value in bytes (`EVENT_MAX_DATA_BYTES`).
+    pub max_data_bytes: usize,
+    /// Events in the memory window (`EVENT_WINDOW_MAX_EVENTS`).
+    pub window_max_events: usize,
+    /// Bytes in the memory window (`EVENT_WINDOW_MAX_BYTES`).
+    pub window_max_bytes: usize,
+    /// Offsets below the end of the topic read at start (`EVENT_WINDOW_START_EVENTS`).
+    pub start_events: u64,
+    /// Offsets below the tail a replay may reach (`EVENT_REPLAY_MAX_EVENTS`).
+    pub replay_max_events: u64,
+    /// Concurrent replay reads of the node (`EVENT_REPLAY_PERMITS`).
+    pub replay_permits: usize,
+    /// Pause after a failed round of the tail (`KAFKA_RETRY_DELAY`).
+    pub retry_delay: Duration,
+    /// Age at which the readiness probe of the tail fails (`EVENT_TAIL_STALE_AFTER`).
+    pub stale_after: Duration,
+    /// Queued events per subscriber (`SUBSCRIBER_BUFFER`).
+    pub buffer: usize,
+    /// Subscribers of the node (`MAX_SUBSCRIBERS`).
+    pub max_subscribers: usize,
+    /// Keep-alive, ping, send bound and write deadline of the streams (`STREAM_KEEP_ALIVE`).
+    pub keep_alive: Duration,
+}
+
+/// The browser origins whose pages may use the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowedOrigins {
+    /// No other origin: no CORS layer, and a WebSocket handshake with an `Origin` is refused.
+    NoOrigin,
+    /// Every origin (`*`).
+    Any,
+    /// These origins, compared byte for byte with the `Origin` header.
+    List(Vec<HeaderValue>),
+}
+
+impl AllowedOrigins {
+    /// Whether a request of `origin` is allowed.
+    #[must_use]
+    pub fn allows(&self, origin: &HeaderValue) -> bool {
+        match self {
+            Self::NoOrigin => false,
+            Self::Any => true,
+            Self::List(origins) => origins.contains(origin),
+        }
+    }
 }
 
 impl Config {
@@ -108,33 +158,61 @@ impl Config {
         let database = database(&mut collector, &args.database);
         let sqs = sqs(&mut collector, &args);
         let limits = limits(&mut collector, &args);
+        let kafka = kafka_fields(&mut collector, &args.kafka);
         let streams = stream_settings(&mut collector, &args);
+        let allowed_origins = allowed_origins(&mut collector, &args);
         collector.cross_field_rules(
             database.as_ref().map(|settings| settings.acquire_timeout),
             sqs.as_ref().map(|settings| settings.operation_timeout),
             limits.as_ref().map(|limits| limits.health_probe_timeout),
             limits.as_ref().map(|limits| limits.request_timeout),
         );
-        match (server, database, sqs, limits, streams) {
-            (Some(server), Some(database), Some(sqs), Some(limits), Some(streams))
-                if collector.problems.is_empty() =>
-            {
-                Ok(Self {
-                    app_env: server.app_env,
-                    host: server.host,
-                    port: server.port,
-                    log_level: server.log_level,
-                    database,
-                    sqs,
-                    health_probe_timeout: limits.health_probe_timeout,
-                    request_timeout: limits.request_timeout,
-                    max_body_bytes: limits.max_body_bytes,
-                    shutdown_grace_period: limits.shutdown_grace_period,
-                    streams,
-                })
-            }
+        let parts = Parts {
+            kafka: kafka_settings(&mut collector, &args.kafka, kafka),
+            server,
+            database,
+            sqs,
+            limits,
+            streams,
+            allowed_origins,
+        };
+        match parts.complete() {
+            Some(config) if collector.problems.is_empty() => Ok(config),
             _ => Err(ConfigErrors(collector.problems)),
         }
+    }
+}
+
+/// The groups of a configuration, each `None` when one of its variables is invalid.
+struct Parts {
+    server: Option<Server>,
+    database: Option<PostgresSettings>,
+    sqs: Option<SqsSettings>,
+    limits: Option<Limits>,
+    kafka: Option<KafkaSettings>,
+    streams: Option<StreamConfig>,
+    allowed_origins: Option<AllowedOrigins>,
+}
+
+impl Parts {
+    /// The configuration when every group is valid.
+    fn complete(self) -> Option<Config> {
+        let (server, limits) = (self.server?, self.limits?);
+        Some(Config {
+            app_env: server.app_env,
+            host: server.host,
+            port: server.port,
+            log_level: server.log_level,
+            database: self.database?,
+            sqs: self.sqs?,
+            health_probe_timeout: limits.health_probe_timeout,
+            request_timeout: limits.request_timeout,
+            max_body_bytes: limits.max_body_bytes,
+            shutdown_grace_period: limits.shutdown_grace_period,
+            kafka: self.kafka?,
+            streams: self.streams?,
+            allowed_origins: self.allowed_origins?,
+        })
     }
 }
 
@@ -238,6 +316,44 @@ impl Collector {
             "HEALTH_PROBE_TIMEOUT",
             probe,
         );
+    }
+
+    /// `KAFKA_CONNECT_TIMEOUT` must not be longer than `KAFKA_REQUEST_TIMEOUT`; skipped when either
+    /// is invalid.
+    fn connect_within_request(&mut self, connect: Option<Duration>, request: Option<Duration>) {
+        if let (Some(connect), Some(request)) = (connect, request)
+            && connect > request
+        {
+            self.problems.push(ConfigProblem {
+                variable: "KAFKA_CONNECT_TIMEOUT",
+                reason: "must not be longer than KAFKA_REQUEST_TIMEOUT".to_owned(),
+            });
+        }
+    }
+
+    /// The three SASL variables are each required with a SASL protocol and must be unset with any
+    /// other; skipped when the protocol is invalid. A set but empty variable counts as set.
+    fn sasl_rule(&mut self, protocol: Option<SecurityProtocol>, args: &KafkaArgs) {
+        let Some(protocol) = protocol else {
+            return;
+        };
+        let sasl = protocol.is_sasl();
+        let variables = [
+            ("KAFKA_SASL_MECHANISM", args.sasl_mechanism.is_some()),
+            ("KAFKA_SASL_USERNAME", args.sasl_username.is_some()),
+            ("KAFKA_SASL_PASSWORD", args.sasl_password.is_some()),
+        ];
+        for (variable, set) in variables {
+            let reason = match (sasl, set) {
+                (true, false) => SASL_REQUIRED,
+                (false, true) => SASL_FORBIDDEN,
+                (true, true) | (false, false) => continue,
+            };
+            self.problems.push(ConfigProblem {
+                variable,
+                reason: reason.to_owned(),
+            });
+        }
     }
 
     fn at_least(
@@ -382,9 +498,447 @@ fn limits(collector: &mut Collector, args: &ServeArgs) -> Option<Limits> {
     })
 }
 
+const SASL_REQUIRED: &str =
+    "is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl";
+const SASL_FORBIDDEN: &str =
+    "must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl";
+
+/// The value of `KAFKA_SECURITY_PROTOCOL`, before the credentials are attached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecurityProtocol {
+    Plaintext,
+    Ssl,
+    SaslPlaintext,
+    SaslSsl,
+}
+
+impl SecurityProtocol {
+    const fn is_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+}
+
+/// The Kafka variables, each parsed on its own; [`kafka_settings`] applies the rules between them.
+struct KafkaFields {
+    bootstrap_servers: Option<String>,
+    topic: Option<String>,
+    protocol: Option<SecurityProtocol>,
+    mechanism: Option<SaslMechanism>,
+    username: Option<String>,
+    password: Option<String>,
+    client_id: Option<String>,
+    request_timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    fetch_wait: Option<Duration>,
+}
+
+/// Parses each Kafka variable on its own and records its problem.
+///
+/// The design names one group function `kafka_settings`; it is split in two because the rules
+/// between variables must be reported after every per-variable problem, including those of
+/// `CORS_ALLOWED_ORIGINS`: `from_args` calls this function first, then `allowed_origins`, and only
+/// then [`kafka_settings`], which applies those rules.
+fn kafka_fields(collector: &mut Collector, args: &KafkaArgs) -> KafkaFields {
+    KafkaFields {
+        bootstrap_servers: collector.collect(
+            "KAFKA_BOOTSTRAP_SERVERS",
+            bootstrap_servers(args.bootstrap_servers.as_deref()),
+        ),
+        topic: collector.collect("KAFKA_TOPIC", topic(args.topic.as_deref())),
+        protocol: collector.collect(
+            "KAFKA_SECURITY_PROTOCOL",
+            security_protocol(args.security_protocol.as_deref()),
+        ),
+        mechanism: collector
+            .collect(
+                "KAFKA_SASL_MECHANISM",
+                sasl_mechanism(args.sasl_mechanism.as_deref()),
+            )
+            .flatten(),
+        username: collector
+            .collect(
+                "KAFKA_SASL_USERNAME",
+                not_empty(args.sasl_username.as_deref()),
+            )
+            .flatten(),
+        password: collector
+            .collect(
+                "KAFKA_SASL_PASSWORD",
+                not_empty(args.sasl_password.as_deref()),
+            )
+            .flatten(),
+        client_id: collector.collect("KAFKA_CLIENT_ID", client_id(args.client_id.as_deref())),
+        request_timeout: collector.collect(
+            "KAFKA_REQUEST_TIMEOUT",
+            ranged_duration(args.request_timeout.as_deref(), &KAFKA_REQUEST_TIMEOUT),
+        ),
+        connect_timeout: collector.collect(
+            "KAFKA_CONNECT_TIMEOUT",
+            ranged_duration(args.connect_timeout.as_deref(), &KAFKA_CONNECT_TIMEOUT),
+        ),
+        fetch_wait: collector.collect(
+            "KAFKA_FETCH_MAX_WAIT",
+            ranged_duration(args.fetch_max_wait.as_deref(), &KAFKA_FETCH_MAX_WAIT),
+        ),
+    }
+}
+
+/// Applies the two rules between Kafka variables and builds the settings when every part is valid.
+fn kafka_settings(
+    collector: &mut Collector,
+    args: &KafkaArgs,
+    fields: KafkaFields,
+) -> Option<KafkaSettings> {
+    collector.connect_within_request(fields.connect_timeout, fields.request_timeout);
+    collector.sasl_rule(fields.protocol, args);
+    let security = security(
+        fields.protocol?,
+        fields.mechanism,
+        fields.username,
+        fields.password,
+    )?;
+    Some(KafkaSettings {
+        bootstrap_servers: fields.bootstrap_servers?,
+        topic: fields.topic?,
+        client_id: fields.client_id?,
+        security,
+        request_timeout: fields.request_timeout?,
+        connect_timeout: fields.connect_timeout?,
+        fetch_wait: fields.fetch_wait?,
+    })
+}
+
+/// The security of the protocol; a SASL protocol needs all three credentials.
+fn security(
+    protocol: SecurityProtocol,
+    mechanism: Option<SaslMechanism>,
+    username: Option<String>,
+    password: Option<String>,
+) -> Option<KafkaSecurity> {
+    let credentials = || {
+        Some(SaslCredentials {
+            mechanism: mechanism?,
+            username: username?,
+            password: password?,
+        })
+    };
+    match protocol {
+        SecurityProtocol::Plaintext => Some(KafkaSecurity::Plaintext),
+        SecurityProtocol::Ssl => Some(KafkaSecurity::Ssl),
+        SecurityProtocol::SaslPlaintext => credentials().map(KafkaSecurity::SaslPlaintext),
+        SecurityProtocol::SaslSsl => credentials().map(KafkaSecurity::SaslSsl),
+    }
+}
+
 fn stream_settings(collector: &mut Collector, args: &ServeArgs) -> Option<StreamConfig> {
+    let retry_delay = collector.collect(
+        "KAFKA_RETRY_DELAY",
+        ranged_duration(args.kafka.retry_delay.as_deref(), &KAFKA_RETRY_DELAY),
+    );
     let catalog = collector.collect("EVENT_TYPES", event_catalog(args.event_types.as_deref()));
-    Some(StreamConfig { catalog: catalog? })
+    let events = event_limits(collector, &args.streams);
+    let subscribers = subscriber_limits(collector, &args.streams);
+    let (events, subscribers) = (events?, subscribers?);
+    Some(StreamConfig {
+        catalog: catalog?,
+        max_data_bytes: events.max_data_bytes,
+        window_max_events: events.window_max_events,
+        window_max_bytes: events.window_max_bytes,
+        start_events: events.start_events,
+        replay_max_events: events.replay_max_events,
+        replay_permits: events.replay_permits,
+        retry_delay: retry_delay?,
+        stale_after: subscribers.stale_after,
+        buffer: subscribers.buffer,
+        max_subscribers: subscribers.max_subscribers,
+        keep_alive: subscribers.keep_alive,
+    })
+}
+
+struct EventLimits {
+    max_data_bytes: usize,
+    window_max_events: usize,
+    window_max_bytes: usize,
+    start_events: u64,
+    replay_max_events: u64,
+    replay_permits: usize,
+}
+
+fn event_limits(collector: &mut Collector, args: &StreamArgs) -> Option<EventLimits> {
+    let max_data_bytes = collector.collect(
+        "EVENT_MAX_DATA_BYTES",
+        bounded(args.max_data_bytes.as_deref(), 65_536, 1..=1_048_576),
+    );
+    let window_max_events = collector.collect(
+        "EVENT_WINDOW_MAX_EVENTS",
+        bounded(args.window_max_events.as_deref(), 100_000, 1..=10_000_000),
+    );
+    let window_max_bytes = collector.collect(
+        "EVENT_WINDOW_MAX_BYTES",
+        bounded(
+            args.window_max_bytes.as_deref(),
+            67_108_864,
+            2_097_152..=17_179_869_184,
+        ),
+    );
+    let start_events = collector.collect(
+        "EVENT_WINDOW_START_EVENTS",
+        bounded(args.window_start_events.as_deref(), 100_000, 0..=10_000_000),
+    );
+    let replay_max_events = collector.collect(
+        "EVENT_REPLAY_MAX_EVENTS",
+        bounded(
+            args.replay_max_events.as_deref(),
+            1_000_000,
+            1..=100_000_000,
+        ),
+    );
+    let replay_permits = collector.collect(
+        "EVENT_REPLAY_PERMITS",
+        bounded(args.replay_permits.as_deref(), 4, 1..=64),
+    );
+    Some(EventLimits {
+        max_data_bytes: max_data_bytes?,
+        window_max_events: window_max_events?,
+        window_max_bytes: window_max_bytes?,
+        start_events: start_events?,
+        replay_max_events: replay_max_events?,
+        replay_permits: replay_permits?,
+    })
+}
+
+struct SubscriberLimits {
+    stale_after: Duration,
+    buffer: usize,
+    max_subscribers: usize,
+    keep_alive: Duration,
+}
+
+fn subscriber_limits(collector: &mut Collector, args: &StreamArgs) -> Option<SubscriberLimits> {
+    let stale_after = collector.collect(
+        "EVENT_TAIL_STALE_AFTER",
+        ranged_duration(args.tail_stale_after.as_deref(), &EVENT_TAIL_STALE_AFTER),
+    );
+    let buffer = collector.collect(
+        "SUBSCRIBER_BUFFER",
+        bounded(args.subscriber_buffer.as_deref(), 256, 1..=65_536),
+    );
+    let max_subscribers = collector.collect(
+        "MAX_SUBSCRIBERS",
+        bounded(args.max_subscribers.as_deref(), 100_000, 1..=1_000_000),
+    );
+    let keep_alive = collector.collect(
+        "STREAM_KEEP_ALIVE",
+        ranged_duration(args.keep_alive.as_deref(), &STREAM_KEEP_ALIVE),
+    );
+    Some(SubscriberLimits {
+        stale_after: stale_after?,
+        buffer: buffer?,
+        max_subscribers: max_subscribers?,
+        keep_alive: keep_alive?,
+    })
+}
+
+fn allowed_origins(collector: &mut Collector, args: &ServeArgs) -> Option<AllowedOrigins> {
+    collector.collect(
+        "CORS_ALLOWED_ORIGINS",
+        origins(args.cors_allowed_origins.as_deref()),
+    )
+}
+
+/// The default and the inclusive range of a duration variable, with the range as the reason
+/// names it.
+struct DurationRule {
+    default: Duration,
+    min: Duration,
+    max: Duration,
+    range: &'static str,
+}
+
+const KAFKA_REQUEST_TIMEOUT: DurationRule = DurationRule {
+    default: Duration::from_secs(3),
+    min: Duration::from_secs(1),
+    max: Duration::from_secs(30),
+    range: "1s to 30s",
+};
+const KAFKA_CONNECT_TIMEOUT: DurationRule = DurationRule {
+    default: Duration::from_secs(2),
+    min: Duration::from_millis(100),
+    max: Duration::from_secs(30),
+    range: "100ms to 30s",
+};
+const KAFKA_FETCH_MAX_WAIT: DurationRule = DurationRule {
+    default: Duration::from_millis(500),
+    min: Duration::from_millis(50),
+    max: Duration::from_secs(5),
+    range: "50ms to 5s",
+};
+const KAFKA_RETRY_DELAY: DurationRule = DurationRule {
+    default: Duration::from_secs(1),
+    min: Duration::from_millis(100),
+    max: Duration::from_secs(60),
+    range: "100ms to 1m",
+};
+const EVENT_TAIL_STALE_AFTER: DurationRule = DurationRule {
+    default: Duration::from_secs(10),
+    min: Duration::from_secs(1),
+    max: Duration::from_secs(300),
+    range: "1s to 5m",
+};
+const STREAM_KEEP_ALIVE: DurationRule = DurationRule {
+    default: Duration::from_secs(15),
+    min: Duration::from_secs(1),
+    max: Duration::from_secs(300),
+    range: "1s to 5m",
+};
+
+/// A duration inside the range of `rule`; a value that is not a duration fails with the same
+/// reason as one outside the range.
+fn ranged_duration(raw: Option<&str>, rule: &DurationRule) -> Parsed<Duration> {
+    let reason = || format!("must be a duration from {}", rule.range);
+    let Some(value) = raw else {
+        return Ok(rule.default);
+    };
+    humantime::parse_duration(value)
+        .ok()
+        .filter(|duration| (rule.min..=rule.max).contains(duration))
+        .ok_or_else(reason)
+}
+
+/// The most entries of `KAFKA_BOOTSTRAP_SERVERS`.
+const MAX_BOOTSTRAP_SERVERS: usize = 16;
+
+/// `KAFKA_BOOTSTRAP_SERVERS`: 1 to 16 `host:port` entries separated by commas.
+fn bootstrap_servers(raw: Option<&str>) -> Parsed<String> {
+    let value = raw.unwrap_or("localhost:9092");
+    let entries: Vec<&str> = value.split(',').collect();
+    if entries.len() <= MAX_BOOTSTRAP_SERVERS && entries.iter().all(|entry| is_host_port(entry)) {
+        Ok(entries.join(","))
+    } else {
+        Err("must be a comma-separated list of host:port addresses".to_owned())
+    }
+}
+
+/// `host:port`: a DNS name, an IPv4 address or a bracketed IPv6 address, then a port from 1 to
+/// 65 535.
+fn is_host_port(entry: &str) -> bool {
+    let Some((host, port)) = entry.rsplit_once(':') else {
+        return false;
+    };
+    let host_ok = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .map_or_else(
+            || is_dns_name(host),
+            |inner| inner.parse::<Ipv6Addr>().is_ok(),
+        );
+    host_ok
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+/// A DNS name (an IPv4 address is one too): 1 to 253 characters, labels of 1 to 63 ASCII letters,
+/// digits and hyphens that neither start nor end with a hyphen.
+fn is_dns_name(host: &str) -> bool {
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+/// The longest Kafka topic name.
+const MAX_TOPIC_LENGTH: usize = 249;
+
+/// `KAFKA_TOPIC`: 1 to 249 characters of `A-Za-z0-9._-`, neither `.` nor `..`.
+fn topic(raw: Option<&str>) -> Parsed<String> {
+    let value = raw.unwrap_or("notifications");
+    let valid = (1..=MAX_TOPIC_LENGTH).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && value != "."
+        && value != "..";
+    if valid {
+        Ok(value.to_owned())
+    } else {
+        Err("must be a Kafka topic name".to_owned())
+    }
+}
+
+fn security_protocol(raw: Option<&str>) -> Parsed<SecurityProtocol> {
+    match raw {
+        None | Some("plaintext") => Ok(SecurityProtocol::Plaintext),
+        Some("ssl") => Ok(SecurityProtocol::Ssl),
+        Some("sasl_plaintext") => Ok(SecurityProtocol::SaslPlaintext),
+        Some("sasl_ssl") => Ok(SecurityProtocol::SaslSsl),
+        Some(_) => Err("must be one of plaintext, ssl, sasl_plaintext, sasl_ssl".to_owned()),
+    }
+}
+
+fn sasl_mechanism(raw: Option<&str>) -> Parsed<Option<SaslMechanism>> {
+    match raw {
+        None => Ok(None),
+        Some("PLAIN") => Ok(Some(SaslMechanism::Plain)),
+        Some("SCRAM-SHA-256") => Ok(Some(SaslMechanism::ScramSha256)),
+        Some("SCRAM-SHA-512") => Ok(Some(SaslMechanism::ScramSha512)),
+        Some(_) => Err("must be one of PLAIN, SCRAM-SHA-256, SCRAM-SHA-512".to_owned()),
+    }
+}
+
+/// An optional text that, when set, is not empty.
+fn not_empty(raw: Option<&str>) -> Parsed<Option<String>> {
+    raw.map(|value| required(Some(value))).transpose()
+}
+
+/// The longest `KAFKA_CLIENT_ID`.
+const MAX_CLIENT_ID_LENGTH: usize = 128;
+
+/// `KAFKA_CLIENT_ID`: 1 to 128 characters.
+fn client_id(raw: Option<&str>) -> Parsed<String> {
+    let value = raw.unwrap_or("notification-service");
+    if (1..=MAX_CLIENT_ID_LENGTH).contains(&value.chars().count()) {
+        Ok(value.to_owned())
+    } else {
+        Err("must be 1 to 128 characters".to_owned())
+    }
+}
+
+/// `CORS_ALLOWED_ORIGINS`: unset is no origin, `*` is every origin, anything else is a list of
+/// origins as a browser sends them.
+fn origins(raw: Option<&str>) -> Parsed<AllowedOrigins> {
+    match raw {
+        None => Ok(AllowedOrigins::NoOrigin),
+        Some("*") => Ok(AllowedOrigins::Any),
+        Some(value) => value
+            .split(',')
+            .map(origin)
+            .collect::<Option<Vec<_>>>()
+            .map(AllowedOrigins::List)
+            .ok_or_else(|| {
+                "must be * or a comma-separated list of origins such as https://app.example.com"
+                    .to_owned()
+            }),
+    }
+}
+
+/// One origin as a browser sends it: `http` or `https`, `://`, a lower-case host and an optional
+/// port, and nothing else (no user information, path, query or fragment).
+fn origin(entry: &str) -> Option<HeaderValue> {
+    let authority = entry
+        .strip_prefix("https://")
+        .or_else(|| entry.strip_prefix("http://"))?;
+    let plain = !authority
+        .bytes()
+        .any(|byte| byte.is_ascii_uppercase() || matches!(byte, b'/' | b'?' | b'#' | b'@'));
+    let parsed = Authority::from_str(authority).ok()?;
+    (plain && has_host_and_valid_port(&parsed))
+        .then(|| HeaderValue::from_str(entry).ok())
+        .flatten()
 }
 
 /// The largest number of distinct names of `EVENT_TYPES`.

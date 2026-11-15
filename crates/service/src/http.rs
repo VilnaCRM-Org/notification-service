@@ -6,6 +6,7 @@ use health_check_application::HealthCheckState;
 use some_module_application::http::SomeModuleState;
 
 pub mod docs;
+pub mod origin;
 pub mod ping;
 pub mod request_id;
 pub mod router;
