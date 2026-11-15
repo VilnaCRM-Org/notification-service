@@ -43,9 +43,10 @@ utoipa-swagger-ui.workspace = true
 [dev-dependencies]
 futures-util.workspace = true
 http-body-util.workspace = true
+krafka.workspace = true
 rstest.workspace = true
 test-support.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }
 tokio-tungstenite.workspace = true
 
 [lints]

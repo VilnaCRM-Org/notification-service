@@ -72,5 +72,8 @@ crates/service/src/command/serve.rs
 crates/service/src/telemetry.rs
 crates/shared/application/src/http/problem.rs
 crates/service/tests/integration/support.rs
+crates/service/tests/integration/main.rs
 docs/operations.md
 docs/getting-started.md
+docs/load-testing.md
+SECURITY.md

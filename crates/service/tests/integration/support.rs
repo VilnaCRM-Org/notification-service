@@ -169,7 +169,8 @@ pub(crate) struct Answer {
 }
 
 impl Answer {
-    fn parse(raw: &str) -> Self {
+    /// The answer whose raw bytes, read up to the end of the connection, are `raw`.
+    pub(crate) fn parse(raw: &str) -> Self {
         let (head, body) = raw.split_once("\r\n\r\n").unwrap();
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();
         Self {
@@ -178,6 +179,14 @@ impl Answer {
             body: body.to_owned(),
         }
     }
+}
+
+/// The log lines with `message`.
+pub(crate) fn messages_of<'a>(lines: &'a [Value], message: &str) -> Vec<&'a Value> {
+    lines
+        .iter()
+        .filter(|line| line["message"] == message)
+        .collect()
 }
 
 /// A running `service serve` process with its standard output read as JSON lines.

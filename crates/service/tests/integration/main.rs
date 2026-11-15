@@ -3,16 +3,26 @@
 #[cfg(test)]
 mod bootstrap;
 #[cfg(test)]
+mod broker;
+#[cfg(test)]
 mod check_config;
+#[cfg(test)]
+mod client;
+#[cfg(test)]
+mod cluster;
 #[cfg(test)]
 mod export;
 #[cfg(test)]
 mod healthcheck;
+#[cfg(test)]
+mod limit;
 #[cfg(test)]
 mod migrate;
 #[cfg(test)]
 mod panic;
 #[cfg(test)]
 mod serve;
+#[cfg(test)]
+mod serve_stream;
 #[cfg(test)]
 mod support;

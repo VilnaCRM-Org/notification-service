@@ -8,8 +8,8 @@ use sqlx::{AssertSqlSafe, PgPool};
 use tokio::time::Instant;
 
 use crate::support::{
-    DEAD_DATABASE_URL, READINESS, Scratch, Server, VALID_ENVIRONMENT, database_url, serve,
-    stack_with,
+    DEAD_DATABASE_URL, READINESS, Scratch, Server, VALID_ENVIRONMENT, database_url, messages_of,
+    serve, stack_with,
 };
 
 const REQUEST_ID: &str = "serve-test-1";
@@ -51,13 +51,6 @@ fn as_pairs<'a>(owned: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a s
     owned
         .iter()
         .map(|(name, value)| (*name, value.as_str()))
-        .collect()
-}
-
-fn messages_of<'a>(lines: &'a [Value], message: &str) -> Vec<&'a Value> {
-    lines
-        .iter()
-        .filter(|line| line["message"] == message)
         .collect()
 }
 
