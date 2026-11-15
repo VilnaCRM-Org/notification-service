@@ -8,6 +8,7 @@ Runbooks for operating the service and for maintaining the repository that hosts
 - [Health-probe runbook](#health-probe-runbook)
 - [Logs and request ids](#logs-and-request-ids)
 - [Shutdown sequence](#shutdown-sequence)
+- [Event stream](#event-stream)
 - [Toolchain update procedure](#toolchain-update-procedure)
 - [Tool-version review](#tool-version-review)
 - [First measurements](#first-measurements)
@@ -162,6 +163,18 @@ Fixed messages:
 | `health probe failed` | WARN | `dependency`, `cause` | see the health-probe runbook |
 | `event publication failed` | ERROR | `event_name`, `event_id`, `error` | one per failing subscriber, `error` is the whole error chain joined by a colon and a space; the request still succeeds |
 | `domain event` | INFO, target `audit` | `event_name`, `event_id`, `aggregate_id`, `occurred_at` | the audit subscriber |
+| `event tail ready` | INFO | `position` | the node read to the end of the topic for the first time and accepts subscriptions from now on; written once |
+| `event topic invalid` | ERROR | `reason` (`topic-not-found`, `partition-count`) | at start, once per change of the fault: the topic does not exist or has not exactly one partition; the node stays `starting` and retries after `KAFKA_RETRY_DELAY` |
+| `event topic unreachable` | WARN | `error` | at start, when the fault changes to a broker or topic that cannot be read; the node stays `starting` and retries |
+| `event tail failed` | WARN | `error` | the first failed round of the tail after a successful one (broker away, partition leader away, a batch the client cannot decode); written once per outage |
+| `event tail recovered` | INFO | `position` | the first successful round after `event tail failed` |
+| `events lost to retention` | ERROR | `from`, `to`, `distance` | retention removed records the tail had not read yet; the tail jumped to the earliest retained offset, and the `distance` events between were lost for every client of this node; counted in `retentionLosses` |
+| `event record rejected` | WARN | `offset`, `reason` | a record that is not a valid event was skipped; `reason` is `missing value`, `value too large`, `not a JSON object with the envelope members`, `invalid id`, `invalid type` or `invalid occurredAt`; the value, key and headers are never logged; counted in `rejectedRecords` |
+| `replay capped` | INFO | `from`, `to` | a resume started at the replay floor instead of its cursor, because the cursor was more than `EVENT_REPLAY_MAX_EVENTS` below the tail; counted in `replayCapped` |
+| `replay failed` | WARN | `transport` (`sse`, `ws`), `error` | a replay below the memory window could not read Kafka, and its stream ended (WebSocket close code 1011); the client reconnects |
+| `subscribers fell behind` | WARN | `count` | once per batch of the tail in which subscribers fell more than `SUBSCRIBER_BUFFER` events behind; they catch up on their own connections |
+| `subscriber evicted` | WARN | `transport` (`ws`), `types` (the number of event types of the connection), `last_id` | a WebSocket write missed its deadline of `STREAM_KEEP_ALIVE`; best effort, because the send bound of the operating system usually ends such a connection first, without an entry |
+| `subscription rejected` | WARN | `detail` | a subscription request got a 503: `the node is starting`, `the node is at its subscriber capacity` or `the node is shutting down` |
 | `shutdown signal received` | INFO | `signal` | start of the shutdown sequence |
 | `background task failed` | ERROR | `task` (`tail`) | the tail loop died; the shutdown sequence runs and `serve` then logs `serve failed` and exits with status 1 |
 | `grace period elapsed, forcing shutdown` | WARN | `grace_period` | `serve` then exits with status 1 |
@@ -192,9 +205,140 @@ A client that reports a problem should quote the `x-request-id` of the response;
 
 A tail loop that dies (`background task failed`) runs the same sequence from step 2 and ends with `serve failed` and exit status 1.
 
-An exit status 1 after a deployment therefore means that at least one request was cut off by the end of the grace period. Check the access log for requests that did not log `request completed`, and consider raising `SHUTDOWN_GRACE_PERIOD` or lowering `HTTP_REQUEST_TIMEOUT` (default 10 seconds). A bind failure or runtime failure also exits with status 1 and logs `serve failed`. Status 2 is always an invalid configuration.
+An exit status 1 has one of the causes in the table below; with `grace period elapsed, forcing shutdown` as the last entry, at least one connection was cut off by the end of the grace period. In that case check the access log for requests that did not log `request completed`, and consider raising `SHUTDOWN_GRACE_PERIOD` or lowering `HTTP_REQUEST_TIMEOUT` (default 10 seconds). Status 2 is always an invalid configuration.
+
+Exit statuses of `serve`:
+
+| Status | Meaning | Last entries |
+| --- | --- | --- |
+| 0 | a signal, and the tail loop, the streams and every request ended inside `SHUTDOWN_GRACE_PERIOD` | `shutdown signal received`, `stopped` |
+| 1 | the grace period ended with a connection still open | `grace period elapsed, forcing shutdown` |
+| 1 | the tail loop of the event stream died; the shutdown sequence ran | `background task failed`, `serve failed` |
+| 1 | the socket could not be bound, or the runtime failed | `serve failed` |
+| 2 | the configuration is invalid; nothing was started | one `invalid configuration` per problem |
+
+An SSE client that stopped taking data shortly before the signal keeps the HTTP drain open until the send bound ends its connection, about `STREAM_KEEP_ALIVE` after it stalled (see [The send bound and HTTP/2](#the-send-bound-and-http2)). A deployment in which exit status 0 matters in that case too keeps `STREAM_KEEP_ALIVE` (default 15 seconds) below `SHUTDOWN_GRACE_PERIOD`. With the defaults it is not, and such a shutdown can end with status 1.
 
 Set the orchestrator's termination timeout to at least 15 seconds, so that SIGKILL does not arrive before the grace period ends. The container healthcheck runs `["/app/service", "healthcheck"]` (the image has no shell) every 10 seconds with a timeout of 3 seconds and 3 retries; it probes `/ping` on the address in `APP_HOST` (the loopback address when `APP_HOST` is `0.0.0.0` or `::`, as in the image), so a service bound to one specific address is probed on that address.
+
+## Event stream
+
+The service delivers the events of one Kafka topic to its clients over Server-Sent Events and WebSocket; the protocol is specified in [`streaming-protocol.md`](streaming-protocol.md) and the design in [`architecture.md`](architecture.md#the-event-stream). Every node reads the whole topic itself, without a consumer group, keeps its position in memory and sends each event to its own subscribers. There is no leader and no state shared between nodes besides the topic: a node can be added, restarted or removed without configuring the others, and a client resumes on any node.
+
+### The topic and its one partition
+
+- The topic is `KAFKA_TOPIC` (default `notifications`) on the brokers of `KAFKA_BOOTSTRAP_SERVERS`. It must have **exactly one partition**: one partition gives one total order of the events, so a single number, the event id (offset plus 1), is a cursor that every node understands.
+- The operator creates the topic before the nodes start. The service never creates a topic and never asks a broker to create one. A node whose topic does not exist stays `starting` with the reason `topic-not-found`, a topic with another number of partitions keeps it `starting` with `partition-count`; it writes `event topic invalid` once per change, retries after `KAFKA_RETRY_DELAY` and becomes ready as soon as the topic exists with one partition.
+- The partition count is checked at start, in every round of the tail until the check first passes, and never after. A partition added while a node runs is not noticed until the node restarts, and the events written to the new partition are never read: never add partitions to the topic.
+- In the development stack the broker's health check creates `notifications` with one partition (`docker-compose.yml`), and `make ensure-kafka` starts the broker with its host listener on `127.0.0.1:9095` for the tests that run on the host.
+
+A topic for production, created with the tools of the Kafka distribution (the values are the recommendations of the next section):
+
+```sh
+kafka-topics.sh --bootstrap-server <broker:port> --create --topic notifications \
+  --partitions 1 --replication-factor 3 \
+  --config min.insync.replicas=2 --config cleanup.policy=delete --config retention.ms=<milliseconds>
+```
+
+**Recreating the topic.** The offsets of a recreated topic start at 0 again. A running node keeps its position, which is now above the end of the new topic, and delivers nothing new. Its readiness probe does not notice: the position is at or above the end the node reads, so the node counts as caught up. After you delete and recreate the topic, restart every node. The cursors that clients hold name events of the old topic; a cursor above the end of the new topic is clamped to that end, so such a client receives every later event and none of the old ones. Tell the client teams, because they reload their state through the owning services.
+
+### Broker settings a deployment needs
+
+The service only reads: it produces nothing, joins no consumer group and commits nothing. What it can deliver therefore depends on how the topic and its producers are set up. These settings belong to the Kafka deployment, not to the service:
+
+| Setting | Where | Recommendation | Why |
+| --- | --- | --- | --- |
+| replication factor | topic | 3 | the partition stays readable, and its records stay, when a broker is lost |
+| `min.insync.replicas` | topic | 2 | together with `acks=all`, a write is acknowledged only when two replicas hold it |
+| `acks` | every producer | `all`, with `enable.idempotence=true` | an acknowledged event survives the loss of the partition leader; idempotence keeps the producer's own retries from writing duplicates (clients remove the rest by the envelope `id`) |
+| `retention.ms`, `retention.bytes` | topic | at least the longest time a client may be away and still expect a complete resume | a resume reaches back to the earliest retained offset at most (see [How far back a replay reaches](#how-far-back-a-replay-reaches)) |
+| `cleanup.policy` | topic | `delete` | compaction removes older events of a key, which a resuming client would then never receive |
+| `max.message.bytes` | topic | not much above `EVENT_MAX_DATA_BYTES` (default 65 536) | the broker compares it with the record batch after compression, so it refuses an oversized record to its producer only when `compression.type` is `none` on the topic and its producers (see [Oversized records](#oversized-records)) |
+| `auto.create.topics.enable` | broker | `false` | a mistyped topic name stays an error that the status route shows |
+| transactions | producers | keep them short | the service reads with read-committed isolation: a record of an open transaction, and every record after it, waits until the transaction ends |
+| access rights | broker | `Describe` and `Read` on the topic for the service's principal | the service reads metadata, watermarks and records, and nothing else |
+
+The connection settings of the service are the `KAFKA_*` variables of `docs/environment.md`: the security protocol (`KAFKA_SECURITY_PROTOCOL`, plaintext, TLS or SASL), the client id and the time-outs. Each node holds one Kafka connection for its tail, one for its watermark reads, and up to `EVENT_REPLAY_PERMITS` readers for replays, which stay open for the next replay. Every call to a broker is bounded by `KAFKA_REQUEST_TIMEOUT` (the tail's fetch also by `KAFKA_FETCH_MAX_WAIT`), so a broker that does not answer can never hang a node.
+
+#### Oversized records
+
+Every node skips a record whose value is larger than `EVENT_MAX_DATA_BYTES`, measured on the uncompressed value, and writes `event record rejected` with the reason `value too large`; the event is lost for every client. The broker compares `max.message.bytes` with the record batch after compression, so with producer or topic compression a value larger than `EVENT_MAX_DATA_BYTES` can be accepted by the broker and then be skipped by every node, and its producer gets no error. A deployment therefore takes one of two measures: every producer checks the size of the value against `EVENT_MAX_DATA_BYTES` before it writes, or the deployment relies on the broker limit and sets `compression.type` to `none` on the topic and on its producers, so that the broker refuses an oversized record to its producer.
+
+### Readiness and the status route
+
+A node accepts subscriptions from the first time its position reached the end of the topic (it is then `started`, and writes `event tail ready`). Its readiness probe, the `event_stream` entry of `GET /api/health`, is stricter: it passes only while the last successful watermark read and the last time the position reached the end are each at most `EVENT_TAIL_STALE_AFTER` old (default 10 seconds). A load balancer that routes new clients by `GET /api/health` therefore stops sending them to a node that is cut off from Kafka, or whose tail is stuck, while the other nodes deliver. The probe fails with the first of four reasons that holds, which the log line `health probe failed` carries as its `cause`; the [runbook entry `Event stream is not ready`](#event-stream-is-not-ready) explains each:
+
+1. the start-up fault of the topic: `the topic is unreachable`, `the topic does not exist` or `the topic must have exactly one partition`;
+2. `the node is starting`;
+3. `the topic is unreachable`: no successful watermark read for `EVENT_TAIL_STALE_AFTER`;
+4. `the event tail is behind`: the position has not reached the end for `EVENT_TAIL_STALE_AFTER`.
+
+A started node whose probe fails still accepts subscriptions, so that a client that reaches it is served from its memory window. Lower `EVENT_TAIL_STALE_AFTER` to take such nodes out of rotation sooner; it must stay well above the watermark period of 1 second and above `KAFKA_REQUEST_TIMEOUT`, or a slow watermark read fails the probe.
+
+`GET /api/events/status` shows what a node knows about its tail and its subscribers. It reads no broker, answers in every state (also while the node is starting or shutting down) and never answers 503. The GraphQL query `eventStreamStatus` returns the same fields.
+
+```sh
+curl -s http://localhost:8081/api/events/status | jq
+```
+
+| Field | Meaning | What to look for |
+| --- | --- | --- |
+| `state` | `starting`, `ready` or `shutting-down` | `ready` on every node in rotation |
+| `reason` | while `starting`: `broker-unreachable`, `topic-not-found`, `partition-count` or `catching-up`; else `null` | `catching-up` after a start is normal while the node reads the last `EVENT_WINDOW_START_EVENTS` offsets into its window |
+| `brokerReachable` | the last watermark read succeeded | `false` with `ready`: the broker or partition leader is away; open streams stay open, nothing new arrives |
+| `position`, `endOffset`, `lag` | the tail position, the end of the topic at the last watermark read, and the difference, as decimal strings | a `lag` that keeps growing: the node cannot keep up with the topic, or a batch cannot be decoded (`event tail failed` in the log) |
+| `windowFirst`, `windowLast` | the lowest cursor the memory window serves, and the newest event in it | how far back a resume is served from memory |
+| `subscribers` | open streams on this node | compare with `MAX_SUBSCRIBERS` |
+| `rejectedRecords` | invalid records skipped since the process started | a rise: a producer writes records that are not valid envelopes (`event record rejected` names the offset and the reason) |
+| `retentionLosses` | times since the process started that retention removed records before the tail read them | anything above 0: retention is too short for this node's tail; the `distance` field of `events lost to retention` gives the number of offsets lost |
+| `replayCapped` | resumes since the process started whose start the cap of `EVENT_REPLAY_MAX_EVENTS` raised | a rise: clients come back from further away than the cap reaches |
+
+### The send bound and HTTP/2
+
+The service sets the socket option `TCP_USER_TIMEOUT` to `STREAM_KEEP_ALIVE` on every connection it accepts. The kernel then ends a connection whose peer leaves sent data unacknowledged, or announces a zero window, for longer than that, and the stream's slot and buffers are freed. A client that reads slowly or idles is not affected: the bound counts only while the kernel waits for the peer. WebSocket writes have a deadline of the same length. This is the only case in which the service ends a connection because of its client, and it writes no log entry for the kernel's part.
+
+The send bound works on Linux, for HTTP/1.1 connections. It does not end an SSE stream on an HTTP/2 connection that is stalled by its own flow control while the connection stays alive: such a stream keeps its slot and its buffers until its client leaves. Behind a proxy the bound acts on the proxy's connection to the service, not on the client's connection to the proxy (see [The edge proxy](#the-edge-proxy)).
+
+### Sizing a node
+
+The memory of a node is bounded by its variables. Size them by this rule: `MAX_SUBSCRIBERS` times the cost of an idle connection, plus `EVENT_WINDOW_MAX_BYTES`, plus `EVENT_REPLAY_PERMITS` replay pages, stays below half the memory limit of the container. The other half is left to what the rule does not count: the runtime and the allocator's own overhead, the HTTP server's write buffers, the frames queued for slow subscribers (at most `SUBSCRIBER_BUFFER` shared frames each), the operating system's socket buffers, and the Kafka client.
+
+| Part | Cost to count |
+| --- | --- |
+| an idle WebSocket connection | about 6 KiB, an estimate: no measurement exists |
+| an idle SSE stream | about 20 KiB, an estimate: no measurement exists |
+| the memory window | `EVENT_WINDOW_MAX_BYTES` (default 64 MiB); the window counts each event's object and type name plus 128 bytes, which approximates the memory it holds |
+| one replay page | up to 500 events, about 1 MiB plus one record batch (the client's fetch limits are soft) |
+
+`EVENT_WINDOW_MAX_EVENTS` needs no memory budget of its own. The window charges each event its object, its type name and 128 bytes against `EVENT_WINDOW_MAX_BYTES`, so that bound caps the window's memory whatever the count bound is; raising `EVENT_WINDOW_MAX_EVENTS` (default 100 000, at most 10 000 000) adds no memory beyond it. The count bound only shortens the window further: it decides first when `EVENT_WINDOW_MAX_EVENTS` × (128 bytes + the average size of an event's object and type name) is below `EVENT_WINDOW_MAX_BYTES`.
+
+Worked example, with the estimates above: the production reference `docker-compose.prod.yml` gives the service a memory limit of 256 MiB and sets `MAX_SUBSCRIBERS` to 5 000, so the rule leaves 128 MiB. With WebSocket clients only: 5 000 × 6 KiB (about 29 MiB) + 64 MiB + 4 × 1 MiB is about 97 MiB, within the rule. With SSE clients only: 5 000 × 20 KiB (about 98 MiB) + 64 MiB + 4 MiB is about 166 MiB, above it; such a deployment lowers `EVENT_WINDOW_MAX_BYTES` to 16 MiB (`16777216`, about 118 MiB in all) or `MAX_SUBSCRIBERS` to 3 000 (about 127 MiB), or raises the memory limit.
+
+How many subscribers one node can serve at what latency has not been measured. The design target of the service is 10 000 subscribers on a node of 4 vCPU and 8 GiB, with a fan-out below 100 ms (99th percentile) at 100 events per second; it is a target, not a measured figure, and the K6 scenario measures a different interval. Plan capacity by the memory rule, watch `subscribers` and the node's CPU, and add nodes for more subscribers. Adding nodes does not raise the event rate the system can carry: every node reads and validates every event of the one partition.
+
+### The edge proxy
+
+The service speaks plain HTTP and limits streams per node, not per client. The proxy or load balancer in front of it must:
+
+- **limit connections per client address**: the service sets no limit per client, so without this one client can take every slot of a node (`MAX_SUBSCRIBERS`), and every client after it gets the 503 `the node is at its subscriber capacity`;
+- keep streams open: an idle or read time-out above `STREAM_KEEP_ALIVE`, because a keep-alive comment or a ping arrives every `STREAM_KEEP_ALIVE` and nothing else may arrive for a long time; no limit on the total duration of a response on `/api/events/stream` and `/api/events/ws`, or one long enough that the reconnects it causes do not matter;
+- not buffer `text/event-stream` responses: the service sends `x-accel-buffering: no`, which nginx honours; other proxies need their own setting;
+- pass the WebSocket upgrade (`Upgrade`, `Connection`) and the headers `Origin`, `Last-Event-ID` and `Sec-WebSocket-*` unchanged;
+- route new connections by readiness (`GET /api/health`) and to any node: a client may reconnect to a node other than the one it had;
+- terminate TLS and add `Strict-Transport-Security`, as for every route.
+
+The send bound of the service acts on the connection the proxy opened to it. It ends the stream of a stalled client only when the proxy passes the back-pressure through (no response buffering) on its own HTTP/1.1 connection to the service per stream; otherwise the proxy's time-outs must end a client that takes no data.
+
+### How far back a replay reaches
+
+A client that resumes with a cursor receives the events above it from the node's memory window or, below the window, from Kafka. How far back that reaches is the lower of two limits:
+
+1. the earliest offset the topic still retains (its retention settings);
+2. `EVENT_REPLAY_MAX_EVENTS` offsets (default 1 000 000) below the position of the node that serves the resume.
+
+Events below that floor are not delivered and the client is not told; a replay that was raised by the second limit is counted in `replayCapped` and logged as `replay capped`. Offsets are not events: transaction markers, aborted records, invalid records and events of other types take offsets too. For a topic that receives 100 records per second, the default reaches back about 2.8 hours (1 000 000 / 100 seconds); this is arithmetic, not a measurement. To reach further, raise the topic's retention and `EVENT_REPLAY_MAX_EVENTS` (at most 100 000 000) together; each replay then reads more pages from Kafka, still under the `EVENT_REPLAY_PERMITS` permits of its node.
+
+A resume within the memory window reads nothing from Kafka. The window starts at `EVENT_WINDOW_START_EVENTS` offsets below the end of the topic when the node starts and keeps the newest `EVENT_WINDOW_MAX_EVENTS` events within `EVENT_WINDOW_MAX_BYTES`; `windowFirst` of the status route shows where it starts.
 
 ## Toolchain update procedure
 

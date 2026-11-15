@@ -18,6 +18,8 @@ GET {{baseUrl}}/api/event-types?page=1&itemsPerPage=30
 GET {{baseUrl}}/api/events/status
 
 ### Event stream (SSE) of the listed event types: 200 text/event-stream that stays open, one frame per event, a comment line ":" after STREAM_KEEP_ALIVE without a frame; 400 for a missing types or an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down
+# The protocol of both streaming routes is specified in docs/streaming-protocol.md; neither route is in the OpenAPI document.
+# Each frame is "id: <id>", "event: <type>" and "data: <event>", where <event> is {"id":"<uuid>","type":"<type>","occurredAt":"<time>","data":<data>}; deduplicate by its "id".
 # Resume after the last id received with the Last-Event-ID header or the lastEventId parameter (the header wins); 0 replays every retained event.
 GET {{baseUrl}}/api/events/stream?types=user.created,order.paid
 Accept: text/event-stream
@@ -25,7 +27,7 @@ Last-Event-ID: 0
 
 ### Event stream (WebSocket) of the listed event types: 101 that upgrades the connection; types is optional, and the client adds and removes types at run time with the text frames {"action":"subscribe","types":["order.paid"]} and {"action":"unsubscribe","types":["order.paid"]}
 # Each event is one text frame {"id":"<id>","type":"<type>","data":<event>}; an invalid command gets one frame {"error":"<reason>"} and the connection stays open; a ping every STREAM_KEEP_ALIVE; close code 1001 at shutdown, 1011 when a replay cannot read Kafka.
-# Before the upgrade: 400 for an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down, then the 4xx of a request that is not a valid upgrade, each as a problem. Resume as on the SSE route (Last-Event-ID wins over lastEventId).
+# Before the upgrade, in this order: 403 for an Origin header that CORS_ALLOWED_ORIGINS does not allow, 400 for an unreadable query, 422 for invalid types, 400 for an invalid cursor, 503 while the node is shutting down, starting or at its subscriber capacity, then the 4xx of a request that is not a valid upgrade, each as a problem. Resume as on the SSE route (Last-Event-ID wins over lastEventId); the cursor replays only the types of this request (without types the socket starts live), so a reconnecting client names its whole set of types here.
 # JetBrains IDEs open the socket with WEBSOCKET; other clients use any WebSocket tool on the same URL.
 WEBSOCKET {{wsUrl}}/api/events/ws?types=user.created&lastEventId=0
 
