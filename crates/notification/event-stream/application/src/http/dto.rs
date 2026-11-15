@@ -80,24 +80,24 @@ pub struct EventStreamStatusResponse {
     pub state: String,
     /// Why the service is not ready yet, only while starting: `broker-unreachable`,
     /// `topic-not-found`, `partition-count` or `catching-up`.
-    #[schema(example = "catching-up")]
+    #[schema(required = true, example = "catching-up")]
     pub reason: Option<String>,
     /// Whether the last read of the topic watermarks succeeded.
     pub broker_reachable: bool,
     /// Id of the last event read from the topic; `null` before the first read.
-    #[schema(example = "42")]
+    #[schema(required = true, example = "42")]
     pub position: Option<String>,
     /// End of the topic at the last successful watermark read; `null` before it.
-    #[schema(example = "42")]
+    #[schema(required = true, example = "42")]
     pub end_offset: Option<String>,
     /// Events between the position and the end of the topic; `null` while either is unknown.
-    #[schema(example = "0")]
+    #[schema(required = true, example = "0")]
     pub lag: Option<String>,
     /// Floor of the memory window: events after it can be resumed from memory.
-    #[schema(example = "0")]
+    #[schema(required = true, example = "0")]
     pub window_first: Option<String>,
     /// Id of the newest event held in the memory window.
-    #[schema(example = "42")]
+    #[schema(required = true, example = "42")]
     pub window_last: Option<String>,
     /// Number of open subscriptions served here.
     #[schema(example = 0)]

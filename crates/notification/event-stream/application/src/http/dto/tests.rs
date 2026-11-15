@@ -230,13 +230,33 @@ fn the_status_schema_is_named_and_requires_the_twelve_fields() {
         schema["required"],
         json!([
             "state",
+            "reason",
             "brokerReachable",
+            "position",
+            "endOffset",
+            "lag",
+            "windowFirst",
+            "windowLast",
             "subscribers",
             "rejectedRecords",
             "retentionLosses",
             "replayCapped"
         ])
     );
+    for name in [
+        "reason",
+        "position",
+        "endOffset",
+        "lag",
+        "windowFirst",
+        "windowLast",
+    ] {
+        assert_eq!(
+            properties[name]["type"],
+            json!(["string", "null"]),
+            "{name} stays nullable"
+        );
+    }
     for (name, property) in properties {
         let description = property["description"].as_str().unwrap_or_default();
         assert!(!description.is_empty(), "{name} has no description");

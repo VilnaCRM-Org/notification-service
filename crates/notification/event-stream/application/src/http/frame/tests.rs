@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::response::IntoResponse as _;
 use axum::response::sse::Sse;
@@ -30,13 +31,14 @@ const EVENT_JSON: &str = r#"{"id":"0192f3a0-7b1c-7d2e-8f3a-4b5c6d7e8f90","type":
 /// The bytes the SSE response writes for exactly this one event.
 async fn sse_bytes(frame: &Frame) -> String {
     let events = futures_util::stream::iter([Ok::<_, Infallible>(frame.sse.clone())]);
-    let body = Sse::new(events)
-        .into_response()
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        Sse::new(events).into_response().into_body().collect(),
+    )
+    .await
+    .expect("the SSE body completes in time")
+    .unwrap()
+    .to_bytes();
     String::from_utf8(body.to_vec()).unwrap()
 }
 

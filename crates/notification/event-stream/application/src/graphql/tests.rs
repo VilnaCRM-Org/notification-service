@@ -1,6 +1,7 @@
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_graphql::{EmptyMutation, EmptySubscription, Request, Schema};
 use event_stream_domain::{Cursor, EventType};
@@ -21,6 +22,9 @@ use crate::query::list_event_types::{ListEventTypes, ListEventTypesHandler};
 use crate::status::StatusSource;
 use crate::tail::{TailState, TopicFault};
 use crate::window::Window;
+
+/// The bound of every awaited query of these tests.
+const WAIT: Duration = Duration::from_secs(5);
 
 type TestSchema = Schema<EventStreamQuery, EmptyMutation, EmptySubscription>;
 
@@ -94,7 +98,10 @@ fn schema(state: EventStreamState) -> TestSchema {
 }
 
 async fn run(schema: &TestSchema, query: &str) -> Value {
-    serde_json::to_value(schema.execute(Request::new(query)).await).unwrap()
+    let response = tokio::time::timeout(WAIT, schema.execute(Request::new(query)))
+        .await
+        .expect("the query answers in time");
+    serde_json::to_value(response).unwrap()
 }
 
 fn three() -> TestSchema {

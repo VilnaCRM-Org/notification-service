@@ -110,24 +110,22 @@ impl Reply {
 }
 
 async fn send_request(state: EventStreamState, request: Request<Body>) -> Reply {
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        app(state).oneshot(request),
-    )
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let response = app(state).oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let content_type = parts
+            .headers
+            .get(CONTENT_TYPE)
+            .map(|value| value.to_str().unwrap().to_owned())
+            .unwrap_or_default();
+        Reply {
+            status: parts.status,
+            content_type,
+            body: body.collect().await.unwrap().to_bytes().to_vec(),
+        }
+    })
     .await
-    .unwrap()
-    .unwrap();
-    let (parts, body) = response.into_parts();
-    let content_type = parts
-        .headers
-        .get(CONTENT_TYPE)
-        .map(|value| value.to_str().unwrap().to_owned())
-        .unwrap_or_default();
-    Reply {
-        status: parts.status,
-        content_type,
-        body: body.collect().await.unwrap().to_bytes().to_vec(),
-    }
+    .expect("the request answers in time")
 }
 
 async fn send(state: EventStreamState, uri: &str) -> Reply {

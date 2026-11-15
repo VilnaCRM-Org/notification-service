@@ -73,14 +73,18 @@ fn app(adapters: Adapters) -> Router {
 }
 
 async fn send(app: &Router, request: Request<Body>) -> Answer {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let (parts, body) = response.into_parts();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    Answer {
-        status: parts.status,
-        headers: parts.headers,
-        body: String::from_utf8(bytes.to_vec()).unwrap(),
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        Answer {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8(bytes.to_vec()).unwrap(),
+        }
+    })
+    .await
+    .expect("the request answers in time")
 }
 
 fn get(path: &str) -> Request<Body> {

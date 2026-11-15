@@ -303,7 +303,13 @@ components:
         `null`.
       required:
       - state
+      - reason
       - brokerReachable
+      - position
+      - endOffset
+      - lag
+      - windowFirst
+      - windowLast
       - subscribers
       - rejectedRecords
       - retentionLosses
