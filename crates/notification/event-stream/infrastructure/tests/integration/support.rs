@@ -5,7 +5,7 @@ use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher as _;
 use std::time::Duration;
 
-use event_stream_domain::{TopicProbe as _, TopicRecord};
+use event_stream_domain::{Cursor, TopicProbe as _, TopicRecord};
 use event_stream_infrastructure::{KafkaSecurity, KafkaSettings, KafkaTopic};
 use krafka::Kafka;
 use krafka::admin::{CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, NewTopic};
@@ -145,16 +145,20 @@ impl TestTopic {
         drop(producer);
     }
 
-    /// Produces `values` in one transaction of id `id`, then commits it or aborts it.
+    /// Produces `values` (at least one) in one transaction of id `id`, then commits it or aborts
+    /// it, and waits until the end of partition 0 passes the transaction marker.
     pub(crate) async fn produce_in_transaction(&self, id: &str, values: &[&str], commit: bool) {
         let transactional_id = format!("{}.{id}", self.name);
         let producer = bounded(self.kafka.producer().build_transactional(transactional_id))
             .await
             .unwrap();
         producer.begin().unwrap();
+        let mut last = None;
         for value in values {
             let record = Record::new(self.name.as_str(), value.as_bytes().to_vec()).partition(0);
-            assert_eq!(bounded(producer.send(record)).await.unwrap().partition, 0);
+            let delivered = bounded(producer.send(record)).await.unwrap();
+            assert_eq!(delivered.partition, 0);
+            last = Some(u64::try_from(delivered.offset).expect("the broker confirms the offset"));
         }
         if commit {
             bounded(producer.commit()).await.unwrap();
@@ -163,6 +167,22 @@ impl TestTopic {
         }
         bounded(producer.close()).await.unwrap();
         drop(producer);
+        let last = last.expect("a transaction holds at least one record");
+        // The marker takes the offset after the last record; the end follows the marker.
+        self.wait_for_end(Cursor::new(last.saturating_add(2))).await;
+    }
+
+    /// Waits until the end of partition 0 reaches `end`. Kafka answers a commit or an abort
+    /// before it writes the transaction markers, so right after it the end can still stop at the
+    /// first record of the transaction.
+    async fn wait_for_end(&self, end: Cursor) {
+        let probe = self.readers().probe();
+        bounded(async {
+            while bounded(probe.watermarks()).await.unwrap().end < end {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
     }
 
     /// Deletes the records of partition 0 below `offset`, which moves the log start there.

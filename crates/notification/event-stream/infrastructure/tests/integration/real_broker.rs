@@ -152,7 +152,7 @@ async fn records_of_an_aborted_transaction_are_never_returned_and_the_position_p
         let batch = bounded(tail.fetch()).await.unwrap();
         fetched.extend(batch.records);
         next = batch.next;
-        if next == end {
+        if next >= end {
             break;
         }
     }
