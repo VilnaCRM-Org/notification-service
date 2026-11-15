@@ -1,7 +1,9 @@
-//! Wire shapes of the event catalog, of the status of this node and of a subscription request.
+//! Wire shapes of the event catalog, of the status of this node, of a subscription request and of
+//! the commands of a WebSocket.
 //!
-//! The catalog has its response and its list parameters; a subscription request has its
-//! parameters and the parsers of its event types and its cursor (FR-12, FR-16).
+//! The catalog has its response and its list parameters; a subscription request has the
+//! parameters of each streaming route and the parsers of its event types and its cursor (FR-12,
+//! FR-16); a WebSocket command adds or removes event types at run time (FR-10).
 
 use std::collections::BTreeSet;
 
@@ -160,6 +162,45 @@ pub struct StreamParams {
     pub last_event_id: Option<String>,
 }
 
+/// Query parameters of the WebSocket route.
+///
+/// Both values are optional: without `types` the connection starts with no event type and
+/// subscribes with a command (FR-8, FR-10). A `types` that is present is parsed like the one of
+/// the SSE route, so an empty value is the 422 violation `required`.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct WsParams {
+    /// Comma-separated event type names.
+    pub types: Option<String>,
+    /// The cursor of a resume when the `Last-Event-ID` header is absent.
+    pub last_event_id: Option<String>,
+}
+
+/// A command a WebSocket client sends in a text frame (FR-10): `{"action":"subscribe",
+/// "types":[..]}` or `{"action":"unsubscribe","types":[..]}`. Any other member, action or shape
+/// does not parse; the names are checked by [`parse_names`] afterwards.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub(crate) enum Command {
+    /// Adds the types to the set of the connection.
+    Subscribe {
+        /// The names of the types.
+        types: Vec<String>,
+    },
+    /// Removes the types from the set of the connection.
+    Unsubscribe {
+        /// The names of the types.
+        types: Vec<String>,
+    },
+}
+
+/// The message of a list without a name or with more than [`Subscription::MAX_TYPES`] distinct
+/// names, both as a violation and as the reason of an error frame.
+const TYPES_COUNT: &str = "types must hold 1 to 100 event type names";
+
+/// The reason of the error frame of a name that is not an event type name, an empty one included.
+const INVALID_NAME: &str = "invalid event type name";
+
 /// The fault of a list of event type names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TypesError {
@@ -186,9 +227,18 @@ impl TypesError {
     /// The violation message of the fault; it never holds a name of the request.
     fn message(self) -> String {
         match self {
-            Self::Empty | Self::TooMany => "types must hold 1 to 100 event type names".to_owned(),
+            Self::Empty | Self::TooMany => TYPES_COUNT.to_owned(),
             Self::Blank => "types must not hold an empty event type name".to_owned(),
             Self::Name(reason) => reason.to_string(),
+        }
+    }
+
+    /// The reason of the WebSocket error frame of the fault (FR-11); it never holds a name of the
+    /// command.
+    pub(crate) const fn reason(self) -> &'static str {
+        match self {
+            Self::Empty | Self::TooMany => TYPES_COUNT,
+            Self::Blank | Self::Name(_) => INVALID_NAME,
         }
     }
 }

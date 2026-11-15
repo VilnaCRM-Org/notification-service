@@ -3,6 +3,7 @@
 # Start the service first (make start), then send a request.
 
 @baseUrl = http://localhost:8081
+@wsUrl = ws://localhost:8081
 
 ### Liveness probe: 200 with the body "pong"
 GET {{baseUrl}}/ping
@@ -21,6 +22,12 @@ GET {{baseUrl}}/api/events/status
 GET {{baseUrl}}/api/events/stream?types=user.created,order.paid
 Accept: text/event-stream
 Last-Event-ID: 0
+
+### Event stream (WebSocket) of the listed event types: 101 that upgrades the connection; types is optional, and the client adds and removes types at run time with the text frames {"action":"subscribe","types":["order.paid"]} and {"action":"unsubscribe","types":["order.paid"]}
+# Each event is one text frame {"id":"<id>","type":"<type>","data":<event>}; an invalid command gets one frame {"error":"<reason>"} and the connection stays open; a ping every STREAM_KEEP_ALIVE; close code 1001 at shutdown, 1011 when a replay cannot read Kafka.
+# Before the upgrade: 400 for an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down, then the 4xx of a request that is not a valid upgrade, each as a problem. Resume as on the SSE route (Last-Event-ID wins over lastEventId).
+# JetBrains IDEs open the socket with WEBSOCKET; other clients use any WebSocket tool on the same URL.
+WEBSOCKET {{wsUrl}}/api/events/ws?types=user.created&lastEventId=0
 
 ### GraphQL query: one page of the subscribable event types (page and itemsPerPage have defaults 1 and 30)
 POST {{baseUrl}}/api/graphql

@@ -2,13 +2,17 @@
 //! them, the frames of the streaming transports and the hub that hands them to the subscribers.
 //!
 //! It also holds the subscriptions that read every connection by position: from the window, from
-//! a Kafka replay below it, then live.
+//! a Kafka replay below it, then live, and the session and the pump of a WebSocket connection.
 
 pub mod dto;
 pub mod frame;
 pub mod handler;
 pub mod hub;
+mod session;
+mod socket;
 pub mod subscription;
+#[cfg(test)]
+mod test_node;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,7 +30,8 @@ use subscription::Subscriptions;
 /// The timing of the streaming transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamSettings {
-    /// The interval of the SSE keep-alive comment (`STREAM_KEEP_ALIVE`).
+    /// The interval of the SSE keep-alive comment and of the WebSocket ping, and the deadline of
+    /// every WebSocket write (`STREAM_KEEP_ALIVE`).
     pub keep_alive: Duration,
 }
 
@@ -47,8 +52,8 @@ pub struct EventStreamState {
 
 /// The routes of the event stream, to be nested under `/api`.
 ///
-/// The streaming route is served but is not an operation of the `OpenAPI` document; no route
-/// carries a layer that needs a state value.
+/// The streaming routes (SSE and WebSocket) are served but are not operations of the `OpenAPI`
+/// document; no route carries a layer that needs a state value.
 pub fn router<S>() -> OpenApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -58,4 +63,5 @@ where
         .routes(routes!(handler::list_event_types))
         .routes(routes!(handler::event_stream_status))
         .route("/events/stream", get(handler::stream))
+        .route("/events/ws", get(handler::ws))
 }

@@ -145,8 +145,22 @@ struct ReplayStalled;
 
 /// A command would raise the types of a connection above [`Subscription::MAX_TYPES`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("a connection subscribes to at most 100 event types")]
+#[error("{}", Self::MESSAGE)]
 pub struct TooManyTypes;
+
+impl TooManyTypes {
+    /// The text of the error, also the reason of the WebSocket error frame of such a command.
+    pub(crate) const MESSAGE: &str = "a connection subscribes to at most 100 event types";
+}
+
+/// Whether a step that reaches below the window floor reads Kafka.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KafkaRead {
+    /// It waits for a permit and reads one Kafka page.
+    Allowed,
+    /// It returns [`Step::Idle`] at once, without a permit and without a read.
+    Deferred,
+}
 
 /// The subscription of one connection. See the module documentation for its rules.
 #[derive(Debug)]
@@ -187,12 +201,24 @@ impl Subscription {
     /// One step, the first that applies of: the rest of the last page, the start of a replay,
     /// a page of the window or of Kafka, the live queue.
     pub async fn step(&mut self) -> Step {
+        self.step_with(KafkaRead::Allowed).await
+    }
+
+    /// One step that never reads Kafka, for a caller that may drop it at any await: where
+    /// [`Self::step`] would wait for a permit and read a Kafka page, because the window evicted
+    /// past the floor after [`Self::replaying`] answered false, it returns [`Step::Idle`] without
+    /// awaiting, and the next [`Self::replaying`] answers true.
+    pub(crate) async fn step_live(&mut self) -> Step {
+        self.step_with(KafkaRead::Deferred).await
+    }
+
+    async fn step_with(&mut self, kafka: KafkaRead) -> Step {
         if let Some(event) = self.pending.pop_front() {
             return self.drain(event);
         }
         match self.target {
             None => self.start().await,
-            Some(target) if self.floor < target => self.page(target).await,
+            Some(target) if self.floor < target => self.page(target, kafka).await,
             Some(_) => self.live().await,
         }
     }
@@ -210,7 +236,9 @@ impl Subscription {
         }
     }
 
-    /// True when the next step reads Kafka: a permit wait and one page read.
+    /// True when the next step reads Kafka: a permit wait and one page read. When it is false the
+    /// window may still evict past the floor before the next step reads it: the live step of the
+    /// WebSocket pump then idles and leaves the read to a step taken after this answers true.
     #[must_use]
     pub fn replaying(&self) -> bool {
         self.pending.is_empty()
@@ -332,8 +360,9 @@ impl Subscription {
         }
     }
 
-    /// One page of the window, or of Kafka when the floor is below the window floor.
-    async fn page(&mut self, target: Cursor) -> Step {
+    /// One page of the window, or of Kafka when the floor is below the window floor and `kafka`
+    /// allows the read.
+    async fn page(&mut self, target: Cursor, kafka: KafkaRead) -> Step {
         if self.subscriber.hub_closed() {
             return Step::End(EndReason::HubClosed);
         }
@@ -342,7 +371,10 @@ impl Subscription {
             .read(self.floor, target, &self.types, Self::REPLAY_PAGE)
         {
             WindowRead::Page { events, settled } => self.window_page(events, settled).await,
-            WindowRead::Evicted => self.kafka_page(target).await,
+            WindowRead::Evicted => match kafka {
+                KafkaRead::Allowed => self.kafka_page(target).await,
+                KafkaRead::Deferred => Step::Idle,
+            },
         }
     }
 
@@ -483,6 +515,12 @@ fn wanted(types: &BTreeMap<EventType, Cursor>, event_type: &EventType, id: Seque
 
 fn log_replay_capped(from: Cursor, to: Cursor) {
     tracing::info!(from = from.value(), to = to.value(), "replay capped");
+}
+
+/// Writes `replay failed` (warn, NFR-15) for a stream of `transport` (`sse` or `ws`) that a replay
+/// ended, with the error chain of [`Subscription::failure`].
+pub(crate) fn log_replay_failed(transport: &'static str, error: &str) {
+    tracing::warn!(transport, error = %error, "replay failed");
 }
 
 #[cfg(test)]

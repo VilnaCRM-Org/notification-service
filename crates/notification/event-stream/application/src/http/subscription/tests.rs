@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::ops::RangeInclusive;
 use std::pin::pin;
@@ -7,27 +6,24 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use event_stream_domain::{
-    Batch, Cursor, EventType, Offset, StoredEvent, TopicError, TopicRecord, TopicReplay,
-};
+use event_stream_domain::{Batch, Cursor, EventType, Offset, TopicError, TopicRecord, TopicReplay};
 use rstest::rstest;
-use test_support::fixture::stored_event;
 use test_support::log::{LogLine, LogRecorder};
 use test_support::static_topic::StaticTopic;
 use test_support::topic::ScriptedTopicReplay;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::coop::{consume_budget, has_budget_remaining};
 use tokio::time::timeout;
 use tracing::Level;
 
 use super::{
-    EndReason, ReplaySettings, Step, Subscription, SubscriptionRequest, Subscriptions, TooManyTypes,
+    EndReason, ReplaySettings, Step, Subscription, SubscriptionRequest, Subscriptions,
+    TooManyTypes, log_replay_failed,
 };
 use crate::http::hub::{Hub, HubError, HubSettings};
+use crate::http::test_node::{Node, REPLAY, names};
 use crate::status::SubscriberCount as _;
-use crate::tail::{EventPublisher as _, TailState};
-use crate::window::Window;
 
 /// Bounds every await of these tests (time is paused, so nothing really waits).
 const WAIT: Duration = Duration::from_secs(5);
@@ -47,12 +43,6 @@ const HUB: HubSettings = HubSettings {
     buffer: 1_024,
 };
 
-const REPLAY: ReplaySettings = ReplaySettings {
-    max_events: 1_000_000,
-    max_data_bytes: 65_536,
-    permits: 4,
-};
-
 /// No permit at all: a step that asks for one waits for ever, so a test that completes with these
 /// settings took none.
 const NO_PERMIT: ReplaySettings = ReplaySettings {
@@ -65,19 +55,8 @@ const fn type_of(id: u64) -> &'static str {
     if id % 2 == 1 { "a" } else { "b" }
 }
 
-fn names(names: &[&str]) -> BTreeSet<EventType> {
-    names
-        .iter()
-        .map(|name| EventType::new((*name).to_owned()).unwrap())
-        .collect()
-}
-
 fn name(name: &str) -> EventType {
     EventType::new(name.to_owned()).unwrap()
-}
-
-fn event(id: u64, event_type: &str) -> StoredEvent {
-    stored_event(id, event_type, &format!(r#"{{"n":{id}}}"#))
 }
 
 /// The record at the offset of the event `id` (offset `id - 1`) with a valid envelope.
@@ -135,44 +114,9 @@ fn all(ids: RangeInclusive<u64>) -> Vec<u64> {
     ids.collect()
 }
 
-/// A started node: the hub, the window, the sender of the tail state and the subscriptions.
-struct Node {
-    hub: Arc<Hub>,
-    window: Arc<Window>,
-    tail: watch::Sender<TailState>,
-    subscriptions: Subscriptions,
-}
-
-/// A node whose hub position and window floor are `floor`, with a window of `window_events`.
-fn node_with(
-    floor: u64,
-    replay: Arc<dyn TopicReplay>,
-    settings: ReplaySettings,
-    hub: HubSettings,
-    window_events: usize,
-) -> Node {
-    let hub = Hub::new(hub);
-    hub.start(Cursor::new(floor));
-    let window = Arc::new(Window::new(window_events, usize::MAX));
-    window.restart(Cursor::new(floor));
-    let (tail, receiver) = watch::channel(TailState::default());
-    let subscriptions = Subscriptions::new(
-        Arc::clone(&hub),
-        Arc::clone(&window),
-        replay,
-        receiver,
-        settings,
-    );
-    Node {
-        hub,
-        window,
-        tail,
-        subscriptions,
-    }
-}
-
+/// A node at `floor` with the hub of these tests and a window bounded by nothing.
 fn node(floor: u64, replay: Arc<dyn TopicReplay>, settings: ReplaySettings) -> Node {
-    node_with(floor, replay, settings, HUB, usize::MAX)
+    Node::started(floor, replay, settings, HUB, usize::MAX)
 }
 
 /// A node at `floor` whose replay pends on any page: a test on it reads no broker.
@@ -181,36 +125,19 @@ fn quiet_node(floor: u64) -> (Node, ScriptedTopicReplay) {
     (node(floor, Arc::new(replay.clone()), NO_PERMIT), replay)
 }
 
-impl Node {
-    /// What the tail does with a valid event: the window first, then the hub.
-    fn pass(&self, id: u64, event_type: &str) {
-        let event = event(id, event_type);
-        self.window.push(Arc::new(event.clone()));
-        self.hub.publish(&event);
+/// What the tail does with each valid event of `ids`, of the type [`type_of`] gives it.
+fn pass_all(node: &Node, ids: RangeInclusive<u64>) {
+    for id in ids {
+        node.pass(id, type_of(id));
     }
+}
 
-    fn pass_all(&self, ids: RangeInclusive<u64>) {
-        for id in ids {
-            self.pass(id, type_of(id));
-        }
-    }
-
-    fn open(&self, types: &[&str], cursor: Option<u64>) -> Subscription {
-        self.subscriptions
-            .open(SubscriptionRequest {
-                types: names(types),
-                cursor: cursor.map(Cursor::new),
-            })
-            .unwrap()
-    }
-
-    /// One more successful watermark read of the tail, with the end `end`.
-    fn observe(&self, end: u64) {
-        self.tail.send_modify(|state| {
-            state.observations = state.observations.saturating_add(1);
-            state.end = Some(Cursor::new(end));
-        });
-    }
+/// One more successful watermark read of the tail of `node`, with the end `end`.
+fn observe(node: &Node, end: u64) {
+    node.tail.send_modify(|state| {
+        state.observations = state.observations.saturating_add(1);
+        state.end = Some(Cursor::new(end));
+    });
 }
 
 /// One step within `WAIT`; panics when it pends.
@@ -451,8 +378,36 @@ fn the_constants_hold_the_limits_of_the_protocol() {
 #[test]
 fn too_many_types_reads_as_the_limit_of_a_connection() {
     assert_eq!(
-        TooManyTypes.to_string(),
+        TooManyTypes::MESSAGE,
         "a connection subscribes to at most 100 event types"
+    );
+    assert_eq!(TooManyTypes.to_string(), TooManyTypes::MESSAGE);
+}
+
+#[rstest]
+#[case::sse("sse")]
+#[case::ws("ws")]
+fn replay_failed_is_a_warning_with_the_transport_and_the_error_chain(
+    #[case] transport: &'static str,
+) {
+    let (recorder, _guard) = LogRecorder::install();
+
+    log_replay_failed(transport, "the topic is unavailable: the broker is away");
+
+    assert_eq!(
+        recorder.lines(),
+        [LogLine {
+            level: Level::WARN,
+            target: "event_stream_application::http::subscription".to_owned(),
+            message: "replay failed".to_owned(),
+            fields: vec![
+                ("transport".to_owned(), transport.to_owned()),
+                (
+                    "error".to_owned(),
+                    "the topic is unavailable: the broker is away".to_owned()
+                ),
+            ],
+        }]
     );
 }
 
@@ -483,7 +438,7 @@ fn open_answers_the_refusal_of_the_hub_and_registers_nothing() {
         HubError::NotReady
     );
 
-    let full = node_with(
+    let full = Node::started(
         0,
         Arc::new(ScriptedTopicReplay::new()),
         REPLAY,
@@ -541,10 +496,10 @@ async fn the_step_and_next_futures_and_the_subscription_are_send() {
 #[tokio::test(start_paused = true)]
 async fn without_a_cursor_the_subscription_is_live_above_the_hub_position_and_reads_no_broker() {
     let (node, replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
 
     let mut subscription = node.open(&["a"], None);
-    node.pass_all(1_001..=1_004);
+    pass_all(&node, 1_001..=1_004);
 
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_003]);
     assert!(waits(&mut subscription).await);
@@ -555,11 +510,11 @@ async fn without_a_cursor_the_subscription_is_live_above_the_hub_position_and_re
 #[tokio::test(start_paused = true)]
 async fn a_cursor_inside_the_window_is_served_from_the_window_then_live_without_a_permit() {
     let (node, replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
 
     assert_eq!(ids(&mut subscription, 25).await, odd(951..=999));
-    node.pass_all(1_001..=1_003);
+    pass_all(&node, 1_001..=1_003);
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_003]);
     assert!(waits(&mut subscription).await);
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
@@ -568,7 +523,7 @@ async fn a_cursor_inside_the_window_is_served_from_the_window_then_live_without_
 #[tokio::test(start_paused = true)]
 async fn a_long_window_resume_is_read_in_pages_of_at_most_500_events() {
     let (node, _replay) = quiet_node(0);
-    node.pass_all(1..=1_200);
+    pass_all(&node, 1..=1_200);
     let mut subscription = node.open(&["a", "b"], Some(0));
     idle(&mut subscription).await;
 
@@ -584,11 +539,11 @@ async fn a_cursor_below_the_window_reads_kafka_pages_then_window_pages_then_live
     replay.push_page(Ok(page(501..=700, 700)));
     replay.push_page(Ok(page(701..=900, 900)));
     let node = node(900, Arc::new(replay.clone()), REPLAY);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(500));
 
     assert_eq!(ids(&mut subscription, 250).await, odd(501..=999));
-    node.pass_all(1_001..=1_003);
+    pass_all(&node, 1_001..=1_003);
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_003]);
     assert!(waits(&mut subscription).await);
     assert_eq!(replay.calls(), cursors(&[500, 700]));
@@ -598,7 +553,7 @@ async fn a_cursor_below_the_window_reads_kafka_pages_then_window_pages_then_live
 async fn a_cursor_below_the_log_start_replays_from_the_earliest_retained_event() {
     let topic = StaticTopic::new(records(101..=1_000), Cursor::new(100), Cursor::new(1_000));
     let node = node(900, Arc::new(topic), REPLAY);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a", "b"], Some(50));
 
     idle(&mut subscription).await;
@@ -614,7 +569,7 @@ async fn a_log_start_above_the_window_floor_continues_from_the_window_floor() {
     let replay = ScriptedTopicReplay::new();
     replay.push_page(below_earliest(100));
     let node = node(99, Arc::new(replay.clone()), REPLAY);
-    node.pass_all(100..=1_000);
+    pass_all(&node, 100..=1_000);
     let mut subscription = node.open(&["a", "b"], Some(50));
 
     idle(&mut subscription).await;
@@ -694,11 +649,11 @@ async fn a_capped_replay_delivers_only_the_events_above_the_raised_floor() {
         ..REPLAY
     };
     let node = node(900, Arc::new(topic), settings);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a", "b"], Some(100));
 
     assert_eq!(ids(&mut subscription, 200).await, all(801..=1_000));
-    node.pass_all(1_001..=1_001);
+    pass_all(&node, 1_001..=1_001);
     assert_eq!(ids(&mut subscription, 1).await, [1_001]);
     assert_eq!(node.hub.replay_capped(), 1);
     assert_eq!(replay_capped_lines(&recorder).len(), 1);
@@ -713,7 +668,7 @@ async fn a_subscription_without_types_and_a_cursor_starts_live_at_the_hub_positi
         ..NO_PERMIT
     };
     let node = node(900, Arc::new(replay.clone()), settings);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&[], Some(500));
 
     idle(&mut subscription).await;
@@ -729,13 +684,13 @@ async fn a_subscription_without_types_and_a_cursor_starts_live_at_the_hub_positi
 #[tokio::test(start_paused = true)]
 async fn a_cursor_at_the_hub_position_reads_nothing_and_is_live() {
     let (node, replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a", "b"], Some(1_000));
 
     idle(&mut subscription).await;
     assert_eq!(subscription.floor, Cursor::new(1_000));
     assert_eq!(subscription.target, Some(Cursor::new(1_000)));
-    node.pass_all(1_001..=1_002);
+    pass_all(&node, 1_001..=1_002);
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_002]);
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
 }
@@ -745,16 +700,16 @@ async fn a_cursor_ahead_of_the_tail_waits_for_two_observations_then_is_live_abov
     let (node, replay) = quiet_node(1_000);
     node.tail.send_modify(|state| state.observations = 7);
     let mut subscription = node.open(&["a", "b"], Some(1_005));
-    node.pass_all(1_001..=1_010);
+    pass_all(&node, 1_001..=1_010);
 
     assert!(waits(&mut subscription).await);
     assert_eq!(subscription.ahead_since, Some(7));
-    node.observe(1_010);
+    observe(&node, 1_010);
     assert!(waits(&mut subscription).await);
-    node.observe(1_010);
+    observe(&node, 1_010);
     assert_eq!(ids(&mut subscription, 5).await, all(1_006..=1_010));
     assert_eq!(subscription.ahead_since, None);
-    node.pass_all(1_011..=1_011);
+    pass_all(&node, 1_011..=1_011);
     assert_eq!(ids(&mut subscription, 1).await, [1_011]);
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
 }
@@ -763,12 +718,12 @@ async fn a_cursor_ahead_of_the_tail_waits_for_two_observations_then_is_live_abov
 async fn a_cursor_above_the_topic_end_is_clamped_to_the_end_of_the_second_observation() {
     let (node, _replay) = quiet_node(1_000);
     let mut subscription = node.open(&["a", "b"], Some(5_000));
-    node.pass_all(1_001..=1_010);
+    pass_all(&node, 1_001..=1_010);
 
     assert!(waits(&mut subscription).await);
-    node.observe(1_008);
-    node.observe(1_010);
-    node.pass_all(1_011..=1_012);
+    observe(&node, 1_008);
+    observe(&node, 1_010);
+    pass_all(&node, 1_011..=1_012);
 
     assert_eq!(ids(&mut subscription, 2).await, [1_011, 1_012]);
     assert_eq!(subscription.position(), Cursor::new(1_012));
@@ -796,10 +751,10 @@ async fn a_step_future_dropped_during_the_wait_keeps_the_count_it_started_from()
 
     assert!(timeout(WAIT, subscription.step()).await.is_err());
     assert_eq!(subscription.ahead_since, Some(3));
-    node.observe(1_010);
+    observe(&node, 1_010);
     assert!(timeout(WAIT, subscription.step()).await.is_err());
     assert_eq!(subscription.ahead_since, Some(3));
-    node.observe(1_010);
+    observe(&node, 1_010);
 
     idle(&mut subscription).await;
     assert_eq!(subscription.ahead_since, None);
@@ -1135,7 +1090,7 @@ async fn a_closed_hub_ends_the_start_step() {
 #[tokio::test(start_paused = true)]
 async fn a_closed_hub_ends_the_step_before_a_window_read() {
     let (node, _replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
     idle(&mut subscription).await;
 
@@ -1236,14 +1191,14 @@ async fn a_subscriber_that_falls_behind_catches_up_from_its_queue_then_the_windo
         max_subscribers: 100,
         buffer: 4,
     };
-    let node = node_with(0, Arc::new(replay.clone()), NO_PERMIT, hub, usize::MAX);
+    let node = Node::started(0, Arc::new(replay.clone()), NO_PERMIT, hub, usize::MAX);
     let mut subscription = node.open(&["a"], None);
 
-    node.pass_all(1..=40);
+    pass_all(&node, 1..=40);
 
     assert_eq!(ids(&mut subscription, 20).await, odd(1..=39));
     assert_eq!(node.hub.subscriber_count(), 1);
-    node.pass_all(41..=42);
+    pass_all(&node, 41..=42);
     assert_eq!(ids(&mut subscription, 1).await, [41]);
     assert!(waits(&mut subscription).await);
     assert_eq!(node.hub.subscriber_count(), 1);
@@ -1257,14 +1212,14 @@ async fn a_subscriber_that_falls_behind_past_the_window_catches_up_from_kafka() 
         max_subscribers: 100,
         buffer: 4,
     };
-    let node = node_with(0, Arc::new(topic), REPLAY, hub, 5);
+    let node = Node::started(0, Arc::new(topic), REPLAY, hub, 5);
     let mut subscription = node.open(&["a"], None);
 
-    node.pass_all(1..=40);
+    pass_all(&node, 1..=40);
     assert_eq!(node.window.start(), Cursor::new(35));
 
     assert_eq!(ids(&mut subscription, 20).await, odd(1..=39));
-    node.pass_all(41..=41);
+    pass_all(&node, 41..=41);
     assert_eq!(ids(&mut subscription, 1).await, [41]);
     assert_eq!(node.hub.subscriber_count(), 1);
 }
@@ -1277,7 +1232,7 @@ async fn a_type_added_during_a_replay_is_written_only_above_the_hub_position_at_
     replay.push_page(Ok(page(501..=700, 700)));
     replay.push_page(Ok(page(701..=900, 900)));
     let node = node(900, Arc::new(replay), REPLAY);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(500));
 
     assert_eq!(ids(&mut subscription, 3).await, [501, 503, 505]);
@@ -1288,7 +1243,7 @@ async fn a_type_added_during_a_replay_is_written_only_above_the_hub_position_at_
     );
 
     assert_eq!(ids(&mut subscription, 247).await, odd(507..=999));
-    node.pass_all(1_001..=1_002);
+    pass_all(&node, 1_001..=1_002);
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_002]);
     assert!(waits(&mut subscription).await);
 }
@@ -1299,7 +1254,7 @@ async fn a_type_added_while_behind_is_not_replayed_below_the_hub_position_at_the
         max_subscribers: 100,
         buffer: 4,
     };
-    let node = node_with(
+    let node = Node::started(
         0,
         Arc::new(ScriptedTopicReplay::new()),
         NO_PERMIT,
@@ -1307,10 +1262,10 @@ async fn a_type_added_while_behind_is_not_replayed_below_the_hub_position_at_the
         usize::MAX,
     );
     let mut subscription = node.open(&["a"], None);
-    node.pass_all(1..=12);
+    pass_all(&node, 1..=12);
 
     subscription.subscribe(names(&["b"])).unwrap();
-    node.pass_all(13..=16);
+    pass_all(&node, 13..=16);
 
     assert_eq!(
         ids(&mut subscription, 10).await,
@@ -1325,13 +1280,13 @@ async fn an_unsubscribed_type_is_not_written_from_the_page_the_window_kafka_or_t
     replay.push_page(Ok(page(501..=700, 700)));
     replay.push_page(Ok(page(701..=900, 900)));
     let node = node(900, Arc::new(replay), REPLAY);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a", "b"], Some(500));
 
     assert_eq!(ids(&mut subscription, 2).await, [501, 502]);
-    node.pass_all(1_001..=1_002);
+    pass_all(&node, 1_001..=1_002);
     subscription.unsubscribe(&names(&["b"]));
-    node.pass_all(1_003..=1_004);
+    pass_all(&node, 1_003..=1_004);
 
     let mut expected = odd(503..=999);
     expected.extend([1_001, 1_003]);
@@ -1366,7 +1321,7 @@ async fn a_subscribe_that_would_pass_100_types_is_refused_and_changes_nothing() 
 async fn subscribing_to_a_held_type_and_unsubscribing_from_an_absent_type_change_nothing() {
     let (node, _replay) = quiet_node(1_000);
     let mut subscription = node.open(&["a"], None);
-    node.pass_all(1_001..=1_005);
+    pass_all(&node, 1_001..=1_005);
 
     subscription.subscribe(names(&["a", "b"])).unwrap();
     subscription.unsubscribe(&names(&["z"]));
@@ -1421,7 +1376,7 @@ async fn a_type_subscribed_again_does_not_write_its_queued_frame_at_the_new_sinc
 #[tokio::test(start_paused = true)]
 async fn next_skips_the_idle_steps_returns_the_first_frame_and_none_at_the_end() {
     let (node, _replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
 
     let frame = within_polls(subscription.next()).await.unwrap().unwrap();
@@ -1435,7 +1390,7 @@ async fn next_skips_the_idle_steps_returns_the_first_frame_and_none_at_the_end()
 #[tokio::test(start_paused = true)]
 async fn next_hands_the_thread_back_at_an_idle_step_once_the_task_budget_is_spent() {
     let (node, _replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
     let mut next = pin!(subscription.next());
 
@@ -1474,7 +1429,7 @@ async fn a_window_page_without_an_event_yields_before_it_returns_idle() {
 #[tokio::test(start_paused = true)]
 async fn a_window_page_with_events_returns_idle_at_once() {
     let (node, _replay) = quiet_node(900);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
     idle(&mut subscription).await;
 
@@ -1513,7 +1468,7 @@ async fn replaying_is_true_only_while_the_next_step_reads_kafka() {
     let replay = ScriptedTopicReplay::new();
     replay.push_page(Ok(page(101..=300, 300)));
     let node = node(900, Arc::new(replay), REPLAY);
-    node.pass_all(901..=1_000);
+    pass_all(&node, 901..=1_000);
 
     let mut below = node.open(&["a"], Some(100));
     assert!(!below.replaying());
@@ -1540,4 +1495,68 @@ async fn replaying_is_false_at_the_target_also_below_the_window_floor() {
     idle(&mut subscription).await;
 
     assert!(!subscription.replaying());
+}
+
+// ----- live steps ------------------------------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_live_step_below_the_window_floor_idles_at_once_without_a_permit_or_a_read() {
+    let (node, replay) = quiet_node(1_000);
+    let mut subscription = node.open(&["a"], Some(10));
+    idle(&mut subscription).await;
+    let replaying = subscription.replaying();
+
+    let first = {
+        let mut future = pin!(subscription.step_live());
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+    };
+
+    assert!(replaying);
+    assert!(matches!(first, Poll::Ready(Step::Idle)));
+    assert_eq!(replay.calls(), Vec::<Cursor>::new());
+    assert_eq!(subscription.position(), Cursor::new(10));
+    assert!(subscription.replaying());
+}
+
+#[tokio::test(start_paused = true)]
+async fn after_a_live_step_below_the_window_floor_the_next_step_reads_the_kafka_page() {
+    let replay = ScriptedTopicReplay::new();
+    replay.push_page(Ok(page(11..=20, 20)));
+    let node = node(1_000, Arc::new(replay.clone()), REPLAY);
+    let mut subscription = node.open(&["a"], Some(10));
+    idle(&mut subscription).await;
+
+    let live = timeout(WAIT, subscription.step_live()).await.unwrap();
+    let calls = replay.calls();
+
+    assert!(matches!(live, Step::Idle));
+    assert_eq!(calls, Vec::<Cursor>::new());
+    assert_eq!(ids(&mut subscription, 5).await, odd(11..=20));
+    assert_eq!(replay.calls(), [Cursor::new(10)]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_live_step_serves_the_window_and_the_live_queue_like_a_step() {
+    let (node, replay) = quiet_node(900);
+    pass_all(&node, 901..=1_000);
+    let mut subscription = node.open(&["a"], Some(996));
+    node.pass(1_001, "a");
+
+    let mut frames = Vec::new();
+    for _ in 0..IDLE_STEPS {
+        match timeout(WAIT, subscription.step_live()).await.unwrap() {
+            Step::Frame(frame) => frames.push(frame.sequence.value()),
+            Step::Idle => {}
+            Step::End(reason) => panic!("the subscription ended: {reason:?}"),
+        }
+        if frames.len() == 3 {
+            break;
+        }
+    }
+
+    assert_eq!(frames, [997, 999, 1_001]);
+    assert_eq!(replay.calls(), Vec::<Cursor>::new());
+    assert_eq!(subscription.position(), Cursor::new(1_001));
 }

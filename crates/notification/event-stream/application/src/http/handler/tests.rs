@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::header::{
+    CACHE_CONTROL, CONNECTION, CONTENT_TYPE, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+};
 use axum::http::response::Parts;
 use axum::http::{Method, Request, StatusCode};
 use event_stream_domain::{
@@ -850,7 +852,7 @@ async fn a_replay_that_cannot_read_kafka_ends_the_response_and_logs_replay_faile
         lines_of(&recorder, "replay failed"),
         [LogLine {
             level: Level::WARN,
-            target: "event_stream_application::http::handler".to_owned(),
+            target: "event_stream_application::http::subscription".to_owned(),
             message: "replay failed".to_owned(),
             fields: vec![
                 ("transport".to_owned(), "sse".to_owned()),
@@ -1149,6 +1151,282 @@ async fn the_stream_route_serves_only_get() {
     assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
 }
 
+// ---- websocket ----
+
+/// The `Sec-WebSocket-Key` of the test handshakes: sixteen zero bytes in base64, a valid key that
+/// no secrets scanner takes for a credential.
+const HANDSHAKE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
+
+/// The text of the rejection of a request that carries every upgrade header but no connection
+/// that can be upgraded, which is what `oneshot` sends.
+const NOT_UPGRADABLE: &str =
+    "WebSocket request couldn't be upgraded since no upgrade state was present";
+
+/// The upgrade headers of a WebSocket handshake.
+const UPGRADE_HEADERS: [(&str, &str); 4] = [
+    ("connection", "upgrade"),
+    ("upgrade", "websocket"),
+    ("sec-websocket-version", "13"),
+    ("sec-websocket-key", HANDSHAKE_KEY),
+];
+
+/// A handshake request on `uri` with the upgrade headers except `without`.
+fn handshake_without(uri: &str, without: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().uri(uri);
+    for (name, value) in UPGRADE_HEADERS {
+        if Some(name) != without {
+            builder = builder.header(name, value);
+        }
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+fn handshake(uri: &str) -> Request<Body> {
+    handshake_without(uri, None)
+}
+
+#[test]
+fn the_upgrade_headers_are_the_four_of_a_handshake() {
+    let names: Vec<&str> = UPGRADE_HEADERS.iter().map(|(name, _)| *name).collect();
+
+    assert_eq!(
+        names,
+        [
+            CONNECTION.as_str(),
+            UPGRADE.as_str(),
+            SEC_WEBSOCKET_VERSION.as_str(),
+            SEC_WEBSOCKET_KEY.as_str()
+        ]
+    );
+}
+
+#[test]
+fn the_websocket_limits_are_those_of_fr_11_and_nfr_9() {
+    assert_eq!(super::MAX_MESSAGE_BYTES, 32_768);
+    assert_eq!(super::READ_BUFFER_BYTES, 4_096);
+}
+
+/// Tungstenite keeps its buffers to itself, so the upgrade is checked to apply each limit.
+#[test]
+fn the_upgrade_applies_the_message_frame_and_read_buffer_limits() {
+    let source = include_str!("../handler.rs");
+
+    assert!(source.contains(".max_message_size(MAX_MESSAGE_BYTES)"));
+    assert!(source.contains(".max_frame_size(MAX_MESSAGE_BYTES)"));
+    assert!(source.contains(".read_buffer_size(READ_BUFFER_BYTES)"));
+}
+
+#[rstest]
+#[case::with_types("/events/ws?types=user.created")]
+#[case::without_types("/events/ws")]
+#[case::with_a_cursor("/events/ws?lastEventId=950")]
+#[tokio::test(start_paused = true)]
+async fn a_valid_request_that_cannot_be_upgraded_is_the_426_problem_and_frees_its_slot(
+    #[case] uri: &str,
+) {
+    let node = ready(1_000);
+
+    let reply = send_request(node.state.clone(), handshake(uri)).await;
+
+    assert_eq!(reply.status, StatusCode::UPGRADE_REQUIRED);
+    assert_eq!(reply.content_type, PROBLEM);
+    assert_eq!(
+        reply.json(),
+        json!({"type": "about:blank", "title": "Upgrade Required", "status": 426, "detail": NOT_UPGRADABLE})
+    );
+    assert_eq!(node.hub.subscriber_count(), 0);
+    assert_eq!(node.hub.type_count(), 0);
+}
+
+#[rstest]
+#[case::connection("connection", "Connection header did not include 'upgrade'")]
+#[case::upgrade("upgrade", "`Upgrade` header did not include 'websocket'")]
+#[case::version(
+    "sec-websocket-version",
+    "`Sec-WebSocket-Version` header did not include '13'"
+)]
+#[case::key("sec-websocket-key", "`Sec-WebSocket-Key` header missing")]
+#[tokio::test(start_paused = true)]
+async fn a_request_that_is_not_a_valid_upgrade_is_the_400_problem_of_its_rejection(
+    #[case] without: &str,
+    #[case] detail: &str,
+) {
+    let node = ready(1_000);
+
+    let reply = send_request(
+        node.state.clone(),
+        handshake_without("/events/ws?types=user.created", Some(without)),
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.content_type, PROBLEM);
+    assert_eq!(
+        reply.json(),
+        json!({"type": "about:blank", "title": "Bad Request", "status": 400, "detail": detail})
+    );
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[rstest]
+#[case::empty("types=", "required")]
+#[case::empty_entry("types=a,,b", "required")]
+#[case::pattern("types=User.Created", "pattern")]
+#[case::length(&format!("types={}", "a".repeat(129)), "length")]
+#[case::max_items(&format!("types={}", distinct_names(101)), "max_items")]
+#[case::before_a_bad_cursor("types=&lastEventId=abc", "required")]
+#[tokio::test(start_paused = true)]
+async fn invalid_types_on_the_websocket_route_are_422_before_the_503_and_the_upgrade(
+    #[case] query: &str,
+    #[case] code: &str,
+) {
+    let node = refusing(8, Life::Unstarted);
+
+    let reply = send(node.state.clone(), &format!("/events/ws?{query}")).await;
+
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.content_type, PROBLEM);
+    let body = reply.json();
+    let violations = body["violations"].as_array().unwrap();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0]["propertyPath"], "types");
+    assert_eq!(violations[0]["code"], code);
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+#[tokio::test(start_paused = true)]
+async fn an_invalid_cursor_on_the_websocket_route_is_400_naming_its_carrier(#[case] value: &str) {
+    let node = refusing(8, Life::Unstarted);
+    let mut by_header = handshake("/events/ws?types=a&lastEventId=5");
+    by_header
+        .headers_mut()
+        .insert("last-event-id", value.parse().unwrap());
+
+    let by_header = send_request(node.state.clone(), by_header).await;
+    let by_parameter = send(
+        node.state.clone(),
+        &format!("/events/ws?lastEventId={value}"),
+    )
+    .await;
+
+    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
+        assert_eq!(reply.content_type, PROBLEM);
+        assert_eq!(
+            reply.json()["detail"],
+            format!("{carrier} must be a decimal unsigned 64-bit integer")
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_websocket_parameter_that_cannot_be_read_is_400_naming_it() {
+    let node = ready(1_000);
+
+    let reply = send(node.state.clone(), "/events/ws?types=a&types=b").await;
+
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.content_type, PROBLEM);
+    let detail = reply.json()["detail"].as_str().unwrap().to_owned();
+    assert!(detail.contains("`types`"), "{detail}");
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[rstest]
+#[case::starting(8, Life::Unstarted, "the node is starting")]
+#[case::shutting_down(8, Life::ClosedStarted, "the node is shutting down")]
+#[case::at_capacity(0, Life::Started, "the node is at its subscriber capacity")]
+#[case::shutting_down_before_starting(0, Life::ClosedUnstarted, "the node is shutting down")]
+#[case::starting_before_the_cap(0, Life::Unstarted, "the node is starting")]
+#[tokio::test(start_paused = true)]
+async fn a_node_that_cannot_take_the_websocket_answers_the_503_before_the_upgrade(
+    #[case] max_subscribers: usize,
+    #[case] life: Life,
+    #[case] detail: &str,
+) {
+    let node = refusing(max_subscribers, life);
+
+    let valid = send_request(node.state.clone(), handshake("/events/ws?types=a")).await;
+    let not_an_upgrade = send(node.state.clone(), "/events/ws?types=a").await;
+
+    for reply in [valid, not_an_upgrade] {
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(reply.content_type, PROBLEM);
+        assert_eq!(
+            reply.json(),
+            json!({"type": "about:blank", "title": "Service Unavailable", "status": 503, "detail": detail})
+        );
+    }
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_websocket_route_counts_against_the_cap_of_the_open_streams() {
+    let node = node_on(
+        1_000,
+        Arc::new(StaticTopic::empty()),
+        HubSettings {
+            max_subscribers: 1,
+            buffer: 4,
+        },
+    );
+    let (_head, _body) = open(node.state.clone(), get("/events/stream?types=a")).await;
+
+    let refused = send_request(node.state.clone(), handshake("/events/ws?types=a")).await;
+
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        refused.json()["detail"],
+        "the node is at its subscriber capacity"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_websocket_problem_and_no_log_entry_holds_a_name_of_the_request() {
+    let (recorder, _guard) = LogRecorder::install();
+    let starting = refusing(8, Life::Unstarted);
+    let ready = ready(1_000);
+
+    let invalid = send(starting.state.clone(), "/events/ws?types=Secret.Name").await;
+    let refused = send(starting.state.clone(), "/events/ws?types=hidden.name").await;
+    let rejected = send(ready.state.clone(), "/events/ws?types=private.name").await;
+
+    assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status, StatusCode::BAD_REQUEST);
+    let lines = recorder.lines();
+    let texts = [
+        String::from_utf8(invalid.body).unwrap(),
+        String::from_utf8(refused.body).unwrap(),
+        String::from_utf8(rejected.body).unwrap(),
+        format!("{lines:?}"),
+    ];
+    for text in texts {
+        for name in ["Secret.Name", "hidden.name", "private.name"] {
+            assert!(!text.contains(name), "{text} holds {name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_websocket_route_serves_only_get() {
+    let reply = send_request(
+        three(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/events/ws?types=a")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
 // ---- documentation ----
 
 fn document() -> Value {
@@ -1358,10 +1636,15 @@ fn handlers_use_only_the_problem_aware_extractors() {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(names, ["list_event_types", "event_stream_status", "stream"]);
+    assert_eq!(
+        names,
+        ["list_event_types", "event_stream_status", "stream", "ws"]
+    );
     assert!(source.contains("ValidatedQuery<ListEventTypesParams>"));
     assert!(source.contains("headers: HeaderMap,"));
     assert!(source.contains("ValidatedQuery<StreamParams>"));
+    assert!(source.contains("ValidatedQuery<WsParams>"));
+    assert!(source.contains("upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,"));
 }
 
 #[rstest]

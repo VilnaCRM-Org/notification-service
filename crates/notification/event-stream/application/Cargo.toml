@@ -31,7 +31,8 @@ validator.workspace = true
 http-body-util.workspace = true
 rstest.workspace = true
 test-support.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }
+tokio-tungstenite.workspace = true
 tower.workspace = true
 
 [lints]

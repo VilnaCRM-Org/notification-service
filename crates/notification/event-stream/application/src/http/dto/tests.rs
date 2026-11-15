@@ -12,8 +12,8 @@ use validator::Validate as _;
 use event_stream_domain::{Cursor, EventType, InvalidEvent, Sequence};
 
 use super::{
-    EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams, StreamParams, TypesError,
-    parse_cursor, parse_names, parse_types, types_problem,
+    Command, EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams, StreamParams,
+    TypesError, WsParams, parse_cursor, parse_names, parse_types, types_problem,
 };
 use crate::query::EventTypeView;
 use crate::status::{NodeState, NodeStatus, StartReason};
@@ -303,6 +303,84 @@ fn the_stream_parameters_require_types_and_leave_the_cursor_optional() {
     assert_eq!(without_cursor.types, "");
     assert_eq!(without_cursor.last_event_id, None);
     assert_eq!(missing.to_string(), "missing field `types`");
+}
+
+#[test]
+fn the_websocket_parameters_read_both_values_in_camel_case() {
+    let parsed: WsParams =
+        serde_json::from_value(json!({"types": "a,b", "lastEventId": "7"})).unwrap();
+
+    assert_eq!(parsed.types.as_deref(), Some("a,b"));
+    assert_eq!(parsed.last_event_id.as_deref(), Some("7"));
+    assert!(parsed.validate().is_ok());
+}
+
+#[test]
+fn the_websocket_parameters_leave_both_values_optional() {
+    let empty: WsParams = serde_json::from_value(json!({})).unwrap();
+    let blank: WsParams = serde_json::from_value(json!({"types": ""})).unwrap();
+
+    assert_eq!(empty.types, None);
+    assert_eq!(empty.last_event_id, None);
+    assert_eq!(blank.types.as_deref(), Some(""));
+}
+
+fn command(text: &str) -> Result<Command, String> {
+    serde_json::from_str::<Command>(text).map_err(|error| error.to_string())
+}
+
+#[test]
+fn a_subscribe_command_reads_its_types() {
+    assert_eq!(
+        command(r#"{"action":"subscribe","types":["user.created","order.paid"]}"#),
+        Ok(Command::Subscribe {
+            types: vec!["user.created".to_owned(), "order.paid".to_owned()]
+        })
+    );
+}
+
+#[test]
+fn an_unsubscribe_command_reads_its_types_in_any_member_order() {
+    assert_eq!(
+        command(r#"{"types":["order.paid"],"action":"unsubscribe"}"#),
+        Ok(Command::Unsubscribe {
+            types: vec!["order.paid".to_owned()]
+        })
+    );
+}
+
+#[test]
+fn an_empty_list_of_types_is_a_command_whose_names_the_session_checks() {
+    assert_eq!(
+        command(r#"{"action":"subscribe","types":[]}"#),
+        Ok(Command::Subscribe { types: Vec::new() })
+    );
+}
+
+#[rstest]
+#[case::not_json("subscribe")]
+#[case::not_an_object(r#"["subscribe"]"#)]
+#[case::unknown_action(r#"{"action":"replay","types":["a"]}"#)]
+#[case::action_in_another_case(r#"{"action":"Subscribe","types":["a"]}"#)]
+#[case::missing_action(r#"{"types":["a"]}"#)]
+#[case::unknown_member(r#"{"action":"subscribe","types":["a"],"since":"1"}"#)]
+#[case::unknown_member_of_unsubscribe(r#"{"action":"unsubscribe","types":["a"],"x":1}"#)]
+#[case::missing_types(r#"{"action":"subscribe"}"#)]
+#[case::types_not_a_list(r#"{"action":"subscribe","types":"a"}"#)]
+#[case::name_not_a_string(r#"{"action":"subscribe","types":[1]}"#)]
+#[case::types_twice(r#"{"action":"subscribe","types":["a"],"types":["b"]}"#)]
+fn a_text_that_is_not_a_command_does_not_parse(#[case] text: &str) {
+    assert!(command(text).is_err(), "{text}");
+}
+
+#[rstest]
+#[case::empty(TypesError::Empty, "types must hold 1 to 100 event type names")]
+#[case::too_many(TypesError::TooMany, "types must hold 1 to 100 event type names")]
+#[case::blank(TypesError::Blank, "invalid event type name")]
+#[case::length(TypesError::Name(InvalidEvent::TypeLength), "invalid event type name")]
+#[case::pattern(TypesError::Name(InvalidEvent::TypePattern), "invalid event type name")]
+fn each_fault_has_the_reason_of_its_error_frame(#[case] error: TypesError, #[case] reason: &str) {
+    assert_eq!(error.reason(), reason);
 }
 
 /// Parses `names` through one instantiation of the generic `parse_names`: the coverage report

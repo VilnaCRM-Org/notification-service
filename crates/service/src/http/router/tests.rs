@@ -837,13 +837,51 @@ async fn the_event_stream_of_an_unstarted_hub_is_the_503_problem_with_the_common
 }
 
 #[test]
-fn the_event_stream_route_is_served_but_not_in_the_openapi_document() {
+fn the_streaming_routes_are_served_but_not_in_the_openapi_document() {
     let document = serde_json::to_value(crate::openapi::document()).unwrap();
 
     let paths = document["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/events/status"));
     assert!(
-        paths.keys().all(|path| !path.contains("stream")),
+        paths
+            .keys()
+            .all(|path| !path.contains("stream") && !path.ends_with("/ws")),
         "{paths:?}"
     );
+}
+
+#[tokio::test]
+async fn the_websocket_route_of_an_unstarted_hub_is_the_503_problem_with_the_common_headers() {
+    let answer = send(
+        "test",
+        request(Method::GET, "/api/events/ws?types=user.created", None),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the node is starting");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "ws");
+}
+
+#[tokio::test]
+async fn a_websocket_handshake_of_the_event_stream_from_a_refused_origin_is_the_403_before_its_checks()
+ {
+    let app = router(adapters(), &config("test")).unwrap();
+    let request = Request::get("/api/events/ws?types=User.Created&lastEventId=x")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "ws 403");
 }
