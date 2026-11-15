@@ -35,6 +35,19 @@ fn start_is_zero() {
 }
 
 #[rstest]
+#[case(1)]
+#[case(1043)]
+#[case(u64::MAX)]
+fn the_value_is_the_number_it_was_made_from(#[case] value: u64) {
+    assert_eq!(Cursor::new(value).value(), value);
+}
+
+#[test]
+fn a_parsed_cursor_has_the_value_of_its_digits() {
+    assert_eq!(Cursor::parse("1043").map(Cursor::value), Ok(1043));
+}
+
+#[rstest]
 #[case(0)]
 #[case(1043)]
 #[case(u64::MAX)]

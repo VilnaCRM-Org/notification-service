@@ -1,6 +1,6 @@
 //! Seeded fixtures of the example context and of the event stream.
 
-use event_stream_domain::EventType;
+use event_stream_domain::{EventType, Sequence, StoredEvent};
 use fake::Fake as _;
 use fake::faker::lorem::en::{Paragraph, Sentence};
 use rand::RngExt as _;
@@ -98,6 +98,26 @@ pub fn event_type(rng: &mut TestRng) -> EventType {
         }
     }
     EventType::new(name).expect("a generated name follows the grammar")
+}
+
+/// A held event with the wire id `sequence`, the type `event_type` and the encoded object `json`;
+/// its publisher id is the sequence as a UUID, so two events of different ids never share one.
+///
+/// # Panics
+///
+/// When `sequence` is 0 or `event_type` is not a valid event type name: a defect of the test.
+#[expect(
+    clippy::expect_used,
+    reason = "the arguments are literals of the calling test; a failure is a defect of that test"
+)]
+#[must_use]
+pub fn stored_event(sequence: u64, event_type: &str, json: &str) -> StoredEvent {
+    StoredEvent {
+        sequence: Sequence::new(sequence).expect("a test sequence is 1 or greater"),
+        id: uuid::Uuid::from_u128(u128::from(sequence)),
+        event_type: EventType::new(event_type.to_owned()).expect("a valid test event type"),
+        json: json.to_owned(),
+    }
 }
 
 #[cfg(test)]
