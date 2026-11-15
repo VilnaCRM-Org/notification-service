@@ -11,6 +11,7 @@ use test_support::clock::FixedClock;
 use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
 use test_support::repository::InMemoryExampleApiResourceRepository;
+use test_support::static_topic::StaticTopic;
 
 use crate::bootstrap::{Adapters, event_bus, router};
 use crate::cli::ServeArgs;
@@ -53,6 +54,9 @@ fn adapters() -> Adapters {
         event_bus: event_bus(),
         clock: Arc::new(FixedClock::at(std::time::SystemTime::UNIX_EPOCH)),
         uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
+        topic_probe: Arc::new(StaticTopic::empty()),
+        topic_tail: Box::new(StaticTopic::empty()),
+        topic_replay: Arc::new(StaticTopic::empty()),
     }
 }
 
@@ -812,4 +816,34 @@ async fn the_cors_layer_wraps_the_refusal_of_a_websocket_handshake() {
             .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
     );
     assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
+}
+
+#[tokio::test]
+async fn the_event_stream_of_an_unstarted_hub_is_the_503_problem_with_the_common_headers() {
+    let answer = send(
+        "test",
+        request(Method::GET, "/api/events/stream?types=user.created", None),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the node is starting");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "stream");
+}
+
+#[test]
+fn the_event_stream_route_is_served_but_not_in_the_openapi_document() {
+    let document = serde_json::to_value(crate::openapi::document()).unwrap();
+
+    let paths = document["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/api/events/status"));
+    assert!(
+        paths.keys().all(|path| !path.contains("stream")),
+        "{paths:?}"
+    );
 }

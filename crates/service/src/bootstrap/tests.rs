@@ -5,6 +5,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use event_stream_application::{EventCatalog, ListEventTypesHandler};
+use event_stream_domain::Cursor;
 use health_check_domain::{Dependency, HealthProbe};
 use health_check_infrastructure::CacheProbe;
 use http_body_util::BodyExt as _;
@@ -20,6 +21,10 @@ use test_support::id::SequenceUuidGenerator;
 use test_support::log::LogRecorder;
 use test_support::probe::StubProbe;
 use test_support::repository::InMemoryExampleApiResourceRepository;
+use test_support::static_topic::StaticTopic;
+use test_support::topic::{
+    ProbeCall, ScriptedTopicProbe, ScriptedTopicReplay, ScriptedTopicTail, TailCall,
+};
 use tower::ServiceExt as _;
 
 use super::{Adapters, BootstrapError, event_bus, register_commands, register_queries, router};
@@ -65,6 +70,9 @@ fn adapters() -> Adapters {
         event_bus: event_bus(),
         clock: Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),
         uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
+        topic_probe: Arc::new(StaticTopic::empty()),
+        topic_tail: Box::new(StaticTopic::empty()),
+        topic_replay: Arc::new(StaticTopic::empty()),
     }
 }
 
@@ -459,4 +467,72 @@ fn the_database_error_keeps_its_message_and_source() {
 
     assert_eq!(error.to_string(), "invalid database settings");
     assert!(std::error::Error::source(&error).is_some());
+}
+
+#[tokio::test]
+async fn the_event_stream_of_a_router_answers_the_503_problem_of_a_starting_node() {
+    let (recorder, _guard) = LogRecorder::install();
+
+    let answer = send(
+        &app(adapters()),
+        get("/api/events/stream?types=user.created"),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    assert_eq!(
+        answer.json(),
+        serde_json::json!({
+            "type": "about:blank",
+            "title": "Service Unavailable",
+            "status": 503,
+            "detail": "the node is starting"
+        })
+    );
+    let rejected: Vec<_> = recorder
+        .lines()
+        .into_iter()
+        .filter(|line| line.message == "subscription rejected")
+        .collect();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].field("detail"), Some("the node is starting"));
+}
+
+#[tokio::test]
+async fn the_event_stream_of_a_router_validates_before_it_answers_the_503() {
+    let app = app(adapters());
+
+    let missing = send(&app, get("/api/events/stream")).await;
+    let invalid = send(&app, get("/api/events/stream?types=User.Created")).await;
+    let cursor = send(&app, get("/api/events/stream?types=a&lastEventId=x")).await;
+
+    assert_eq!(missing.status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(invalid.json()["violations"][0]["code"], "pattern");
+    assert_eq!(cursor.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_router_serves_with_scripted_topic_readers_and_reads_none_of_them() {
+    let probe = ScriptedTopicProbe::new();
+    let tail = ScriptedTopicTail::new();
+    let replay = ScriptedTopicReplay::new();
+    let mut adapters = adapters();
+    adapters.topic_probe = Arc::new(probe.clone());
+    adapters.topic_tail = Box::new(tail.clone());
+    adapters.topic_replay = Arc::new(replay.clone());
+    let app = app(adapters);
+
+    let status = send(&app, get("/api/events/status")).await;
+    let stream = send(&app, get("/api/events/stream?types=a&lastEventId=0")).await;
+
+    assert_eq!(status.status, StatusCode::OK);
+    assert_eq!(stream.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(probe.calls(), Vec::<ProbeCall>::new());
+    assert_eq!(tail.calls(), Vec::<TailCall>::new());
+    assert_eq!(replay.calls(), Vec::<Cursor>::new());
 }

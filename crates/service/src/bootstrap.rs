@@ -9,8 +9,11 @@ use std::sync::Arc;
 use axum::Router;
 use event_stream_application::http::EventStreamState;
 use event_stream_application::{
-    EventCatalog, Hub, HubSettings, ListEventTypesHandler, StatusSource, TailState, Window,
+    EventCatalog, Hub, HubSettings, ListEventTypesHandler, ReplaySettings, StatusSource,
+    StreamSettings, Subscriptions, TailState, Window,
 };
+use event_stream_domain::{TopicProbe, TopicReplay, TopicTail};
+use event_stream_infrastructure::KafkaTopic;
 use health_check_application::HealthCheckState;
 use health_check_application::HealthService;
 use health_check_domain::HealthProbe;
@@ -52,6 +55,12 @@ pub struct Adapters {
     pub clock: Arc<dyn Clock>,
     /// Source of identifiers.
     pub uuid_generator: Arc<dyn UuidGenerator>,
+    /// Reader of the metadata and the watermarks of the event topic.
+    pub topic_probe: Arc<dyn TopicProbe>,
+    /// Reader of the tail of the event topic.
+    pub topic_tail: Box<dyn TopicTail>,
+    /// Reader of pages of older records of the event topic, shared by the replays.
+    pub topic_replay: Arc<dyn TopicReplay>,
 }
 
 /// The application could not be wired.
@@ -67,10 +76,10 @@ pub enum BootstrapError {
 
 impl Adapters {
     /// The production wiring: a lazy connection pool, an in-process cache behind the cache
-    /// probe, the SQS client and the in-process event bus.
+    /// probe, the SQS client, the in-process event bus and the three readers of the event topic.
     ///
     /// Nothing here touches the network; the first connection is made by the first request that
-    /// needs it.
+    /// needs it, and each reader of the topic connects when it is first called.
     ///
     /// # Errors
     ///
@@ -79,6 +88,7 @@ impl Adapters {
         let pool = connect_lazy(&config.database)?;
         let sqs = sqs_client(&config.sqs).await;
         let cache = Arc::new(MokaCache::new());
+        let topic = KafkaTopic::new(config.kafka.clone());
         Ok(Self {
             repository: Arc::new(PgExampleApiResourceRepository::new(pool.clone())),
             probes: vec![
@@ -89,6 +99,9 @@ impl Adapters {
             event_bus: event_bus(),
             clock: Arc::new(SystemClock),
             uuid_generator: Arc::new(UuidV7Generator),
+            topic_probe: Arc::new(topic.probe()),
+            topic_tail: Box::new(topic.tail()),
+            topic_replay: Arc::new(topic.replay()),
         })
     }
 
@@ -133,12 +146,17 @@ fn register_queries(
     Ok(bus.register(get)?.register(list)?.register(event_types)?)
 }
 
-/// The state of the event stream routes.
+/// The state of the event stream routes; the subscriptions replay through `replay`.
 ///
-/// Until the tail is wired (story 3.8) the status reads a hub that is never started and a tail
-/// state that stays `TailState::default()`, so it reports `starting` with `catching-up` and no
+/// Until the tail is wired (story 3.8) the status and the subscriptions read a hub that is never
+/// started and a tail state that stays `TailState::default()`, so the status reports `starting`
+/// with `catching-up`, the streaming routes answer the 503 problem `the node is starting` and no
 /// broker is contacted.
-fn event_stream_state(query_bus: Arc<dyn QueryBus>, streams: &StreamConfig) -> EventStreamState {
+fn event_stream_state(
+    query_bus: Arc<dyn QueryBus>,
+    streams: &StreamConfig,
+    replay: Arc<dyn TopicReplay>,
+) -> EventStreamState {
     let window = Arc::new(Window::new(
         streams.window_max_events,
         streams.window_max_bytes,
@@ -148,6 +166,17 @@ fn event_stream_state(query_bus: Arc<dyn QueryBus>, streams: &StreamConfig) -> E
         buffer: streams.buffer,
     });
     let (_tail_sender, tail_state) = watch::channel(TailState::default());
+    let subscriptions = Arc::new(Subscriptions::new(
+        Arc::<Hub>::clone(&hub),
+        Arc::<Window>::clone(&window),
+        replay,
+        tail_state.clone(),
+        ReplaySettings {
+            max_events: streams.replay_max_events,
+            max_data_bytes: streams.max_data_bytes,
+            permits: streams.replay_permits,
+        },
+    ));
     let status = Arc::new(StatusSource::new(
         tail_state,
         window,
@@ -155,8 +184,12 @@ fn event_stream_state(query_bus: Arc<dyn QueryBus>, streams: &StreamConfig) -> E
     ));
     EventStreamState {
         query_bus,
+        subscriptions,
         status,
         hub,
+        settings: StreamSettings {
+            keep_alive: streams.keep_alive,
+        },
     }
 }
 
@@ -178,7 +211,8 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
     let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository, catalog)?;
     let commands: Arc<dyn CommandBus> = Arc::new(command_bus);
     let queries: Arc<dyn QueryBus> = Arc::new(query_bus);
-    let event_stream = event_stream_state(Arc::clone(&queries), &config.streams);
+    let event_stream =
+        event_stream_state(Arc::clone(&queries), &config.streams, adapters.topic_replay);
     let some_module = SomeModuleState {
         command_bus: commands,
         query_bus: queries,

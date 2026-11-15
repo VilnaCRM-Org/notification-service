@@ -1,14 +1,28 @@
-//! Wire shapes of the event catalog (the response and the list parameters) and of the status of
-//! this node.
+//! Wire shapes of the event catalog, of the status of this node and of a subscription request.
+//!
+//! The catalog has its response and its list parameters; a subscription request has its
+//! parameters and the parsers of its event types and its cursor (FR-12, FR-16).
 
+use std::collections::BTreeSet;
+
+use axum::http::{HeaderMap, StatusCode};
+use event_stream_domain::{Cursor, EventType, InvalidEvent};
 use serde::{Deserialize, Serialize};
+use shared_application::http::{Problem, Violation};
 use shared_domain::PageRequest;
 use utoipa::{IntoParams, ToSchema};
 use validator::Validate;
 
+use crate::http::subscription::Subscription;
 use crate::query::EventTypeView;
 use crate::query::list_event_types::ListEventTypes;
 use crate::status::{NodeState, NodeStatus, StartReason};
+
+/// The header that carries the cursor of a resume; it wins over [`CURSOR_PARAMETER`].
+const CURSOR_HEADER: &str = "Last-Event-ID";
+
+/// The query parameter that carries the cursor of a resume.
+const CURSOR_PARAMETER: &str = "lastEventId";
 
 /// The defaults of the shared kernel, signed like the parameters; both fit in an `i32`.
 const DEFAULT_PAGE: i32 = PageRequest::DEFAULT_PAGE.cast_signed();
@@ -130,6 +144,122 @@ impl From<NodeStatus> for EventStreamStatusResponse {
             replay_capped: status.replay_capped.to_string(),
         }
     }
+}
+
+/// Query parameters of the SSE route.
+///
+/// `types` is required: without it the query string does not deserialize, which is the 400
+/// problem naming `types`. Both values are parsed by the handler, so that every fault of the types
+/// is one 422 violation on `types`.
+#[derive(Debug, Deserialize, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamParams {
+    /// Comma-separated event type names.
+    pub types: String,
+    /// The cursor of a resume when the `Last-Event-ID` header is absent.
+    pub last_event_id: Option<String>,
+}
+
+/// The fault of a list of event type names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TypesError {
+    /// No name was given.
+    Empty,
+    /// A name is empty.
+    Blank,
+    /// A name is not an event type name.
+    Name(InvalidEvent),
+    /// More than [`Subscription::MAX_TYPES`] distinct names.
+    TooMany,
+}
+
+impl TypesError {
+    /// The violation code of the fault: `required`, `length`, `pattern` or `max_items`.
+    const fn code(self) -> &'static str {
+        match self {
+            Self::Empty | Self::Blank => "required",
+            Self::Name(reason) => reason.code(),
+            Self::TooMany => "max_items",
+        }
+    }
+
+    /// The violation message of the fault; it never holds a name of the request.
+    fn message(self) -> String {
+        match self {
+            Self::Empty | Self::TooMany => "types must hold 1 to 100 event type names".to_owned(),
+            Self::Blank => "types must not hold an empty event type name".to_owned(),
+            Self::Name(reason) => reason.to_string(),
+        }
+    }
+}
+
+/// The one rule for a list of names: each name in order is checked for being empty (`Blank`),
+/// then for being an event type name (`Name`), then counted, and the 101st distinct name is
+/// `TooMany`; the first fault met is the answer. A repeated name counts once; no name at all is
+/// `Empty`.
+pub(crate) fn parse_names<'a, I: Iterator<Item = &'a str>>(
+    names: I,
+) -> Result<BTreeSet<EventType>, TypesError> {
+    let mut types = BTreeSet::new();
+    for name in names {
+        if name.is_empty() {
+            return Err(TypesError::Blank);
+        }
+        types.insert(EventType::new(name.to_owned()).map_err(TypesError::Name)?);
+        if types.len() > Subscription::MAX_TYPES {
+            return Err(TypesError::TooMany);
+        }
+    }
+    if types.is_empty() {
+        Err(TypesError::Empty)
+    } else {
+        Ok(types)
+    }
+}
+
+/// The names of the `types` parameter, split at every comma.
+///
+/// # Errors
+///
+/// The 422 problem with one violation on `types`.
+pub(crate) fn parse_types(raw: &str) -> Result<BTreeSet<EventType>, Problem> {
+    parse_names(raw.split(',')).map_err(types_problem)
+}
+
+/// The 422 problem of a fault of the types: one violation on `types`.
+fn types_problem(error: TypesError) -> Problem {
+    Problem::validation_failed(vec![Violation {
+        property_path: "types".to_owned(),
+        message: error.message(),
+        code: error.code().to_owned(),
+    }])
+}
+
+/// The cursor of a resume: the `Last-Event-ID` header when it is present, else the
+/// `lastEventId` parameter, else none. The other carrier is not read when the header is present.
+///
+/// # Errors
+///
+/// The 400 problem naming the carrier whose value is not a decimal unsigned 64-bit integer.
+pub(crate) fn parse_cursor(
+    headers: &HeaderMap,
+    parameter: Option<&str>,
+) -> Result<Option<Cursor>, Problem> {
+    match (headers.get(CURSOR_HEADER), parameter) {
+        (Some(value), _) => read_cursor(value.to_str().ok(), CURSOR_HEADER).map(Some),
+        (None, Some(text)) => read_cursor(Some(text), CURSOR_PARAMETER).map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Reads the cursor of one carrier; `None` is a value that is not text.
+fn read_cursor(text: Option<&str>, carrier: &str) -> Result<Cursor, Problem> {
+    text.and_then(|text| Cursor::parse(text).ok())
+        .ok_or_else(|| {
+            Problem::new(StatusCode::BAD_REQUEST).with_detail(format!(
+                "{carrier} must be a decimal unsigned 64-bit integer"
+            ))
+        })
 }
 
 /// The wire name of a life stage.

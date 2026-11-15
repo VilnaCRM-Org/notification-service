@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::future::poll_fn;
 use std::ops::RangeInclusive;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -16,6 +17,7 @@ use test_support::static_topic::StaticTopic;
 use test_support::topic::ScriptedTopicReplay;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
+use tokio::task::coop::{consume_budget, has_budget_remaining};
 use tokio::time::timeout;
 use tracing::Level;
 
@@ -34,6 +36,11 @@ const WAIT: Duration = Duration::from_secs(5);
 /// and one per queued frame that is not written. A step that only idles ends the helper instead
 /// of looping for ever, so a mutant fails an assertion and never hangs a test.
 const IDLE_STEPS: usize = 64;
+
+/// The polls [`within_polls`] allows, each followed by a yield to the scheduler. Under paused time
+/// a task that keeps yielding stops the clock, so a `timeout` around a future that only yields
+/// could never fire; a bounded count of polls fails an assertion instead of hanging the test.
+const POLLS: usize = 64;
 
 const HUB: HubSettings = HubSettings {
     max_subscribers: 100,
@@ -336,6 +343,29 @@ fn poll_twice(subscription: &mut Subscription) -> (Poll<Step>, Option<Poll<Step>
         .is_pending()
         .then(|| future.as_mut().poll(&mut context));
     (first, second)
+}
+
+/// Polls `future` with the context of the test task at most [`POLLS`] times, with a yield to the
+/// scheduler after each poll that pended; `None` when it is still pending after the last one.
+async fn within_polls<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = pin!(future);
+    for _ in 0..POLLS {
+        if let Poll::Ready(output) =
+            poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
+        {
+            return Some(output);
+        }
+        tokio::task::yield_now().await;
+    }
+    None
+}
+
+/// Spends the cooperative budget of the test task: until the task yields, every budget point it
+/// polls answers `Pending`.
+async fn spend_budget() {
+    while has_budget_remaining() {
+        consume_budget().await;
+    }
 }
 
 const fn assert_send<T: Send>(_value: &T) {}
@@ -1005,11 +1035,16 @@ async fn three_kafka_pages_in_a_row_without_a_record_or_progress_end_the_step() 
     idle(&mut subscription).await;
     idle(&mut subscription).await;
     assert_eq!(subscription.stalls, 2);
+    assert_eq!(subscription.failure(), None);
     assert!(matches!(
         step(&mut subscription).await,
         Step::End(EndReason::TopicFailed)
     ));
     assert_eq!(replay.calls(), cursors(&[100, 100, 100, 101, 101, 101]));
+    assert_eq!(
+        subscription.failure(),
+        Some("three page reads in a row without a record and without progress")
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -1069,12 +1104,17 @@ async fn an_unavailable_page_ends_the_step_at_once() {
     let node = node(900, Arc::new(replay), REPLAY);
     let mut subscription = node.open(&["a"], Some(100));
     idle(&mut subscription).await;
+    assert_eq!(subscription.failure(), None);
 
     assert!(matches!(
         step(&mut subscription).await,
         Step::End(EndReason::TopicFailed)
     ));
     assert_eq!(node.subscriptions.permits.available_permits(), 4);
+    assert_eq!(
+        subscription.failure(),
+        Some("the topic is unavailable: the broker is away")
+    );
 }
 
 // ----- closed hub ------------------------------------------------------------------------------
@@ -1123,6 +1163,7 @@ async fn a_closed_hub_ends_the_step_before_a_kafka_read() {
         Step::End(EndReason::HubClosed)
     ));
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
+    assert_eq!(subscription.failure(), None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1383,12 +1424,34 @@ async fn next_skips_the_idle_steps_returns_the_first_frame_and_none_at_the_end()
     node.pass_all(901..=1_000);
     let mut subscription = node.open(&["a"], Some(950));
 
-    let frame = timeout(WAIT, subscription.next()).await.unwrap().unwrap();
+    let frame = within_polls(subscription.next()).await.unwrap().unwrap();
     assert_eq!(frame.sequence.value(), 951);
 
     let mut ended = node.open(&["a"], Some(950));
     node.hub.close();
-    assert!(timeout(WAIT, ended.next()).await.unwrap().is_none());
+    assert!(within_polls(ended.next()).await.unwrap().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn next_hands_the_thread_back_at_an_idle_step_once_the_task_budget_is_spent() {
+    let (node, _replay) = quiet_node(900);
+    node.pass_all(901..=1_000);
+    let mut subscription = node.open(&["a"], Some(950));
+    let mut next = pin!(subscription.next());
+
+    spend_budget().await;
+    let spent = next.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+    assert!(
+        spent.is_pending(),
+        "a spent budget pends at the first idle step: {spent:?}"
+    );
+    tokio::task::yield_now().await;
+    let fresh = poll_fn(|context| Poll::Ready(next.as_mut().poll(context))).await;
+
+    let Poll::Ready(Some(frame)) = fresh else {
+        panic!("a fresh budget gives the first frame in one poll: {fresh:?}");
+    };
+    assert_eq!(frame.sequence.value(), 951);
 }
 
 #[tokio::test(start_paused = true)]

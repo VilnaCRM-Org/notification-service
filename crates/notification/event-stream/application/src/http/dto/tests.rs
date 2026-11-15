@@ -1,12 +1,20 @@
+use std::collections::BTreeSet;
+
+use axum::http::header::HeaderName;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use rstest::rstest;
 use serde_json::{Value, json};
+use shared_application::http::{Problem, Violation};
 use shared_domain::PageRequest;
 use utoipa::{PartialSchema as _, ToSchema as _};
 use validator::Validate as _;
 
-use event_stream_domain::{Cursor, Sequence};
+use event_stream_domain::{Cursor, EventType, InvalidEvent, Sequence};
 
-use super::{EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams};
+use super::{
+    EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams, StreamParams, TypesError,
+    parse_cursor, parse_names, parse_types, types_problem,
+};
 use crate::query::EventTypeView;
 use crate::status::{NodeState, NodeStatus, StartReason};
 
@@ -261,4 +269,287 @@ fn the_status_schema_is_named_and_requires_the_twelve_fields() {
         let description = property["description"].as_str().unwrap_or_default();
         assert!(!description.is_empty(), "{name} has no description");
     }
+}
+
+// ---- streaming parameters ----
+
+fn event_types(names: &[&str]) -> BTreeSet<EventType> {
+    names
+        .iter()
+        .map(|name| EventType::new((*name).to_owned()).unwrap())
+        .collect()
+}
+
+/// `count` distinct valid names: `t0`, `t1`, ...
+fn distinct(count: usize) -> Vec<String> {
+    (0..count).map(|index| format!("t{index}")).collect()
+}
+
+#[test]
+fn the_stream_parameters_read_the_camel_case_names_and_need_no_validation() {
+    let parsed: StreamParams =
+        serde_json::from_value(json!({"types": "a,b", "lastEventId": "7"})).unwrap();
+
+    assert_eq!(parsed.types, "a,b");
+    assert_eq!(parsed.last_event_id.as_deref(), Some("7"));
+    assert!(parsed.validate().is_ok());
+}
+
+#[test]
+fn the_stream_parameters_require_types_and_leave_the_cursor_optional() {
+    let without_cursor: StreamParams = serde_json::from_value(json!({"types": ""})).unwrap();
+    let missing = serde_json::from_value::<StreamParams>(json!({"lastEventId": "7"})).unwrap_err();
+
+    assert_eq!(without_cursor.types, "");
+    assert_eq!(without_cursor.last_event_id, None);
+    assert_eq!(missing.to_string(), "missing field `types`");
+}
+
+/// Parses `names` through one instantiation of the generic `parse_names`: the coverage report
+/// scores a generic function by its best instantiation, so every case goes through the same one.
+fn names_of<S: AsRef<str>>(names: &[S]) -> Result<BTreeSet<EventType>, TypesError> {
+    let owned: Vec<String> = names.iter().map(|name| name.as_ref().to_owned()).collect();
+    parse_names(owned.iter().map(String::as_str))
+}
+
+#[test]
+fn no_name_at_all_is_empty() {
+    assert_eq!(names_of::<&str>(&[]), Err(TypesError::Empty));
+}
+
+#[rstest]
+#[case::one(&["user.created"], &["user.created"])]
+#[case::repeated_once(&["b", "a", "b", "a"], &["a", "b"])]
+fn valid_names_are_one_set(#[case] given: &[&str], #[case] expected: &[&str]) {
+    assert_eq!(names_of(given), Ok(event_types(expected)));
+}
+
+#[rstest]
+#[case::blank(&[""], TypesError::Blank)]
+#[case::blank_between(&["a", "", "b"], TypesError::Blank)]
+#[case::blank_before_a_bad_name(&["a", "", "B"], TypesError::Blank)]
+#[case::bad_name_before_a_blank(&["B", ""], TypesError::Name(InvalidEvent::TypePattern))]
+#[case::pattern(&["User.Created"], TypesError::Name(InvalidEvent::TypePattern))]
+#[case::blank_space(&[" "], TypesError::Name(InvalidEvent::TypePattern))]
+fn the_first_faulty_name_decides(#[case] given: &[&str], #[case] expected: TypesError) {
+    assert_eq!(names_of(given), Err(expected));
+}
+
+#[test]
+fn a_name_of_128_characters_is_valid_and_one_of_129_is_a_length_fault() {
+    let longest = "a".repeat(128);
+    let too_long = "a".repeat(129);
+
+    assert_eq!(names_of(&[&longest]), Ok(event_types(&[&longest])));
+    assert_eq!(
+        names_of(&[&too_long]),
+        Err(TypesError::Name(InvalidEvent::TypeLength))
+    );
+}
+
+#[test]
+fn a_hundred_distinct_names_with_repeats_are_accepted() {
+    let mut names = distinct(100);
+    names.extend(distinct(100));
+
+    let parsed = names_of(&names).unwrap();
+
+    assert_eq!(parsed.len(), 100);
+}
+
+#[test]
+fn the_101st_distinct_name_is_too_many_before_any_later_fault() {
+    let mut names = distinct(101);
+    names.push(String::new());
+    names.push("B".to_owned());
+
+    assert_eq!(names_of(&names), Err(TypesError::TooMany));
+}
+
+#[test]
+fn a_faulty_101st_name_is_a_name_fault() {
+    let mut names = distinct(100);
+    names.push("B".to_owned());
+
+    assert_eq!(
+        names_of(&names),
+        Err(TypesError::Name(InvalidEvent::TypePattern))
+    );
+}
+
+fn violation(problem: &Problem) -> Value {
+    assert_eq!(problem.status, 422);
+    assert_eq!(problem.r#type, "/problems/validation-failed");
+    assert_eq!(
+        problem.detail.as_deref(),
+        Some("The request failed validation.")
+    );
+    assert_eq!(problem.violations.len(), 1);
+    serde_json::to_value(&problem.violations[0]).unwrap()
+}
+
+#[rstest]
+#[case::empty(
+    TypesError::Empty,
+    "required",
+    "types must hold 1 to 100 event type names"
+)]
+#[case::blank(
+    TypesError::Blank,
+    "required",
+    "types must not hold an empty event type name"
+)]
+#[case::length(
+    TypesError::Name(InvalidEvent::TypeLength),
+    "length",
+    "An event type must contain between 1 and 128 characters."
+)]
+#[case::pattern(
+    TypesError::Name(InvalidEvent::TypePattern),
+    "pattern",
+    "An event type must match ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$."
+)]
+#[case::too_many(
+    TypesError::TooMany,
+    "max_items",
+    "types must hold 1 to 100 event type names"
+)]
+fn each_fault_is_one_violation_on_types(
+    #[case] error: TypesError,
+    #[case] code: &str,
+    #[case] message: &str,
+) {
+    let problem = types_problem(error);
+
+    assert_eq!(
+        violation(&problem),
+        json!({"propertyPath": "types", "message": message, "code": code})
+    );
+}
+
+#[rstest]
+#[case::empty_parameter("", "required")]
+#[case::empty_entry("a,,b", "required")]
+#[case::trailing_comma("a,", "required")]
+#[case::pattern("User.Created", "pattern")]
+#[case::too_long(&"a".repeat(129), "length")]
+#[case::too_many(&distinct(101).join(","), "max_items")]
+fn the_types_parameter_splits_at_commas_and_answers_422(#[case] raw: &str, #[case] code: &str) {
+    let problem = parse_types(raw).unwrap_err();
+
+    assert_eq!(violation(&problem)["code"], code);
+}
+
+#[test]
+fn the_types_parameter_gives_the_distinct_names() {
+    assert_eq!(
+        parse_types("user.created,order.paid,user.created"),
+        Ok(event_types(&["order.paid", "user.created"]))
+    );
+    assert_eq!(parse_types(&distinct(100).join(",")).unwrap().len(), 100);
+}
+
+#[rstest]
+#[case::pattern("User.Created")]
+#[case::too_long(&"x".repeat(129))]
+#[case::blank_among("first.ok,,Secret.Name")]
+fn a_problem_on_types_never_holds_a_name_of_the_request(#[case] raw: &str) {
+    let problem = parse_types(raw).unwrap_err();
+
+    let text = serde_json::to_string(&problem).unwrap();
+    for name in raw.split(',').filter(|name| !name.is_empty()) {
+        assert!(!text.contains(name), "{text} holds {name}");
+    }
+}
+
+const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+
+fn header(value: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(LAST_EVENT_ID, HeaderValue::from_str(value).unwrap());
+    headers
+}
+
+fn bad_request(problem: &Problem) -> &str {
+    assert_eq!(problem.status, 400);
+    assert_eq!(problem.r#type, "about:blank");
+    assert_eq!(problem.title, "Bad Request");
+    assert_eq!(problem.violations, Vec::<Violation>::new());
+    problem.detail.as_deref().unwrap()
+}
+
+#[test]
+fn without_a_carrier_there_is_no_cursor() {
+    assert_eq!(parse_cursor(&HeaderMap::new(), None), Ok(None));
+}
+
+#[rstest]
+#[case::zero("0", 0)]
+#[case::number("950", 950)]
+#[case::leading_zeros("007", 7)]
+#[case::largest("18446744073709551615", u64::MAX)]
+fn each_carrier_reads_a_decimal_u64(#[case] text: &str, #[case] expected: u64) {
+    let cursor = Some(Cursor::new(expected));
+
+    assert_eq!(parse_cursor(&header(text), None), Ok(cursor));
+    assert_eq!(parse_cursor(&HeaderMap::new(), Some(text)), Ok(cursor));
+}
+
+#[rstest]
+#[case::both_valid(Some("5"))]
+#[case::parameter_invalid(Some("abc"))]
+#[case::parameter_absent(None)]
+fn the_header_wins_over_the_parameter(#[case] parameter: Option<&str>) {
+    assert_eq!(
+        parse_cursor(&header("8"), parameter),
+        Ok(Some(Cursor::new(8)))
+    );
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::plus("+1")]
+#[case::blank_inside("1 2")]
+#[case::fraction("1.5")]
+#[case::empty("")]
+#[case::overflow("18446744073709551616")]
+fn an_invalid_header_is_400_naming_the_header(#[case] text: &str) {
+    let problem = parse_cursor(&header(text), Some("5")).unwrap_err();
+
+    assert_eq!(
+        bad_request(&problem),
+        "Last-Event-ID must be a decimal unsigned 64-bit integer"
+    );
+}
+
+#[test]
+fn a_header_that_is_not_text_is_400_naming_the_header() {
+    let mut headers = HeaderMap::new();
+    headers.insert(LAST_EVENT_ID, HeaderValue::from_bytes(b"\xff1").unwrap());
+
+    let problem = parse_cursor(&headers, None).unwrap_err();
+
+    assert_eq!(
+        bad_request(&problem),
+        "Last-Event-ID must be a decimal unsigned 64-bit integer"
+    );
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::empty("")]
+#[case::overflow("18446744073709551616")]
+fn an_invalid_parameter_is_400_naming_the_parameter(#[case] text: &str) {
+    let problem = parse_cursor(&HeaderMap::new(), Some(text)).unwrap_err();
+
+    assert_eq!(
+        bad_request(&problem),
+        "lastEventId must be a decimal unsigned 64-bit integer"
+    );
+    assert_eq!(
+        StatusCode::from_u16(problem.status).unwrap(),
+        StatusCode::BAD_REQUEST
+    );
 }

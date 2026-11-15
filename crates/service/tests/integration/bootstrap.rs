@@ -87,8 +87,23 @@ async fn connect_makes_no_network_access_and_orders_the_probes() {
     let mut config = config();
     config.database.url = format!("postgres://app:unused@127.0.0.1:{port}/app");
     config.sqs.endpoint_url = Some(format!("http://127.0.0.1:{port}"));
+    config.kafka.bootstrap_servers = format!("127.0.0.1:{port}");
 
     let adapters = Adapters::connect(&config).await.unwrap();
+
+    let servers = format!("bootstrap_servers: \"127.0.0.1:{port}\"");
+    let readers = [
+        format!("{:?}", adapters.topic_probe),
+        format!("{:?}", adapters.topic_tail),
+        format!("{:?}", adapters.topic_replay),
+    ];
+    for (reader, name) in readers
+        .iter()
+        .zip(["KafkaProbe", "KafkaTail", "KafkaReplay"])
+    {
+        assert!(reader.starts_with(name), "{reader}");
+        assert!(reader.contains(&servers), "{reader}");
+    }
 
     let dependencies: Vec<_> = adapters
         .probes

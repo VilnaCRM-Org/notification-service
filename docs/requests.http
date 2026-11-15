@@ -16,6 +16,12 @@ GET {{baseUrl}}/api/event-types?page=1&itemsPerPage=30
 ### Event stream status of the answering instance: 200 in every life stage (state, reason, reader position, window, subscribers; 64-bit values as strings)
 GET {{baseUrl}}/api/events/status
 
+### Event stream (SSE) of the listed event types: 200 text/event-stream that stays open, one frame per event, a comment line ":" after STREAM_KEEP_ALIVE without a frame; 400 for a missing types or an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down
+# Resume after the last id received with the Last-Event-ID header or the lastEventId parameter (the header wins); 0 replays every retained event.
+GET {{baseUrl}}/api/events/stream?types=user.created,order.paid
+Accept: text/event-stream
+Last-Event-ID: 0
+
 ### GraphQL query: one page of the subscribable event types (page and itemsPerPage have defaults 1 and 30)
 POST {{baseUrl}}/api/graphql
 Content-Type: application/json

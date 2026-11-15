@@ -10,13 +10,15 @@ use serde_json::{Value, json};
 use shared_domain::{ErasedBusError, ErasedMessage, QueryBus, QueryHandler as _};
 use test_support::bus::FakeQueryBus;
 use test_support::fixture::stored_event;
+use test_support::static_topic::StaticTopic;
 use tokio::sync::watch;
 
 use super::{EventStreamQuery, EventStreamStatusObject, EventTypeObject};
 use crate::catalog::EventCatalog;
-use crate::http::EventStreamState;
 use crate::http::dto::EventStreamStatusResponse;
 use crate::http::hub::{Hub, HubSettings};
+use crate::http::subscription::{ReplaySettings, Subscriptions};
+use crate::http::{EventStreamState, StreamSettings};
 use crate::query::EventTypeView;
 use crate::query::list_event_types::{ListEventTypes, ListEventTypesHandler};
 use crate::status::StatusSource;
@@ -75,10 +77,25 @@ fn state_with(
     hub: Arc<Hub>,
 ) -> EventStreamState {
     let (_sender, receiver) = watch::channel(tail);
+    let subscriptions = Subscriptions::new(
+        Arc::<Hub>::clone(&hub),
+        Arc::<Window>::clone(&window),
+        Arc::new(StaticTopic::empty()),
+        receiver.clone(),
+        ReplaySettings {
+            max_events: 1_000,
+            max_data_bytes: 1_024,
+            permits: 1,
+        },
+    );
     EventStreamState {
         query_bus,
+        subscriptions: Arc::new(subscriptions),
         status: Arc::new(StatusSource::new(receiver, window, Arc::<Hub>::clone(&hub))),
         hub,
+        settings: StreamSettings {
+            keep_alive: Duration::from_secs(15),
+        },
     }
 }
 

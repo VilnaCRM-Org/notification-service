@@ -20,7 +20,9 @@ use event_stream_domain::{
     Batch, Cursor, EventType, PageLimit, Sequence, StoredEvent, TopicError, TopicRecord,
     TopicReplay,
 };
+use shared_domain::error_chain;
 use tokio::sync::{Semaphore, watch};
+use tokio::task::coop::consume_budget;
 
 use crate::envelope::parse_event;
 use crate::http::frame::Frame;
@@ -110,6 +112,7 @@ impl Subscriptions {
             pending: VecDeque::new(),
             stalls: 0,
             ahead_since: None,
+            failure: None,
         })
     }
 }
@@ -133,6 +136,12 @@ pub enum Step {
     /// The subscription ended.
     End(EndReason),
 }
+
+/// Three Kafka page reads in a row without a record and without progress (the wording of the
+/// failure table of the architecture).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("three page reads in a row without a record and without progress")]
+struct ReplayStalled;
 
 /// A command would raise the types of a connection above [`Subscription::MAX_TYPES`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -160,6 +169,8 @@ pub struct Subscription {
     stalls: u8,
     /// `TailState::observations` when the wait of a cursor ahead began.
     ahead_since: Option<u64>,
+    /// The error chain of the read that ended the replay with [`EndReason::TopicFailed`].
+    failure: Option<String>,
 }
 
 impl Subscription {
@@ -186,15 +197,14 @@ impl Subscription {
         }
     }
 
-    /// Steps until a frame (`Some`) or the end (`None`). Every path that returns
-    /// [`Step::Idle`] without waiting is followed by one that waits (a window page without an
-    /// event yields, a Kafka page awaits its permit and its read, the live path its queue), so
-    /// this loop cannot spin.
+    /// Steps until a frame (`Some`) or the end (`None`). Every [`Step::Idle`] spends one unit of
+    /// the task's cooperative budget, so a chain of steps that awaits nothing still hands the
+    /// thread back to the scheduler once the budget is spent instead of holding it in one poll.
     pub async fn next(&mut self) -> Option<Arc<Frame>> {
         loop {
             match self.step().await {
                 Step::Frame(frame) => return Some(frame),
-                Step::Idle => {}
+                Step::Idle => consume_budget().await,
                 Step::End(_reason) => return None,
             }
         }
@@ -246,6 +256,13 @@ impl Subscription {
     #[must_use]
     pub const fn position(&self) -> Cursor {
         self.floor
+    }
+
+    /// The error chain of the read that ended the replay, once a step returned
+    /// [`EndReason::TopicFailed`]; the transports write it in `replay failed` (NFR-15).
+    #[must_use]
+    pub fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
     }
 
     /// Takes events from the front of the last page until one is wanted; a page that ran empty
@@ -353,7 +370,7 @@ impl Subscription {
         match answer {
             Ok(batch) => self.take_batch(batch, target),
             Err(TopicError::BelowEarliest { earliest }) => self.skip_to(earliest),
-            Err(TopicError::Unavailable(_)) => Step::End(EndReason::TopicFailed),
+            Err(error @ TopicError::Unavailable(_)) => self.fail(&error),
         }
     }
 
@@ -367,7 +384,7 @@ impl Subscription {
             return if self.stalls < Self::MAX_STALLS {
                 Step::Idle
             } else {
-                Step::End(EndReason::TopicFailed)
+                self.fail(&ReplayStalled)
             };
         }
         self.stalls = 0;
@@ -398,6 +415,12 @@ impl Subscription {
             .filter(|event| wanted(&self.types, &event.event_type, event.sequence))
             .map(Arc::new)
             .collect()
+    }
+
+    /// Keeps the error chain of the failed replay and ends the subscription.
+    fn fail(&mut self, error: &(dyn std::error::Error + 'static)) -> Step {
+        self.failure = Some(error_chain(error));
+        Step::End(EndReason::TopicFailed)
     }
 
     /// The floor is below the log start: it continues from the log start, or from the window

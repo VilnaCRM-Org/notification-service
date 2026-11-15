@@ -11,27 +11,44 @@ pub mod hub;
 pub mod subscription;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::FromRef;
+use axum::routing::get;
 use shared_domain::QueryBus;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 use crate::status::StatusSource;
 use hub::Hub;
+use subscription::Subscriptions;
+
+/// The timing of the streaming transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSettings {
+    /// The interval of the SSE keep-alive comment (`STREAM_KEEP_ALIVE`).
+    pub keep_alive: Duration,
+}
 
 /// What the handlers of the event stream need.
 #[derive(Debug, Clone)]
 pub struct EventStreamState {
     /// Answers the queries.
     pub query_bus: Arc<dyn QueryBus>,
+    /// Opens the subscriptions of the streaming routes; its refusals are their 503 answers.
+    pub subscriptions: Arc<Subscriptions>,
     /// Computes the status of this node.
     pub status: Arc<StatusSource>,
     /// The hub of this node's subscribers.
     pub hub: Arc<Hub>,
+    /// The timing of the streaming transports.
+    pub settings: StreamSettings,
 }
 
 /// The routes of the event stream, to be nested under `/api`.
+///
+/// The streaming route is served but is not an operation of the `OpenAPI` document; no route
+/// carries a layer that needs a state value.
 pub fn router<S>() -> OpenApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -40,4 +57,5 @@ where
     OpenApiRouter::new()
         .routes(routes!(handler::list_event_types))
         .routes(routes!(handler::event_stream_status))
+        .route("/events/stream", get(handler::stream))
 }

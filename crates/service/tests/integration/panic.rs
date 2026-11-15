@@ -21,6 +21,7 @@ use test_support::clock::FixedClock;
 use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
 use test_support::repository::InMemoryExampleApiResourceRepository;
+use test_support::static_topic::StaticTopic;
 use tower::ServiceExt as _;
 
 const REQUEST_ID: &str = "panic-test-1";
@@ -63,6 +64,9 @@ async fn a_panic_is_one_json_line_with_the_request_id_and_a_500_problem() {
         event_bus: event_bus(),
         clock: Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),
         uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
+        topic_probe: Arc::new(StaticTopic::empty()),
+        topic_tail: Box::new(StaticTopic::empty()),
+        topic_replay: Arc::new(StaticTopic::empty()),
     };
     let request = Request::get("/api/health")
         .header("x-request-id", REQUEST_ID)

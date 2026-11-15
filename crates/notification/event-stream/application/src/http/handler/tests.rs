@@ -1,27 +1,40 @@
 use std::any::TypeId;
 use std::collections::BTreeSet;
+use std::future::poll_fn;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::Poll;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::response::Parts;
 use axum::http::{Method, Request, StatusCode};
-use event_stream_domain::{Cursor, EventType};
+use event_stream_domain::{
+    Cursor, EventType, Offset, StoredEvent, TopicError, TopicRecord, TopicReplay,
+};
 use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
 use shared_domain::{ErasedBusError, ErasedMessage, QueryBus, QueryHandler as _};
 use test_support::bus::FakeQueryBus;
 use test_support::fixture::stored_event;
+use test_support::log::{LogLine, LogRecorder};
+use test_support::static_topic::StaticTopic;
+use test_support::topic::ScriptedTopicReplay;
 use tokio::sync::watch;
+use tokio::time::timeout;
 use tower::ServiceExt as _;
+use tracing::Level;
 
 use crate::catalog::EventCatalog;
 use crate::http::hub::{Hub, HubSettings};
-use crate::http::{EventStreamState, router};
+use crate::http::subscription::{ReplaySettings, Subscriptions};
+use crate::http::{EventStreamState, StreamSettings, router};
 use crate::query::list_event_types::{ListEventTypes, ListEventTypesHandler};
 use crate::status::StatusSource;
-use crate::tail::{TailState, TopicFault};
+use crate::tail::{EventPublisher as _, TailState, TopicFault};
 use crate::window::Window;
 
 const PROBLEM: &str = "application/problem+json";
@@ -53,7 +66,63 @@ const SETTINGS: HubSettings = HubSettings {
     buffer: 2,
 };
 
-/// A state whose status reads `tail`, `window` and `hub`.
+/// The keep-alive interval of these tests; not the default of 15 s, so a lost setting shows.
+const KEEP_ALIVE: Duration = Duration::from_secs(7);
+
+/// One millisecond less than [`KEEP_ALIVE`].
+const JUST_BEFORE_KEEP_ALIVE: Duration = Duration::from_millis(6_999);
+
+/// The bound of the awaited head of a response, and the quiet time after the last frame of a
+/// stream; shorter than [`KEEP_ALIVE`], so a missing frame is not hidden by a keep-alive comment.
+const WAIT: Duration = Duration::from_secs(5);
+
+/// The last millisecond of [`KEEP_ALIVE`].
+const ONE_MILLISECOND: Duration = Duration::from_millis(1);
+
+/// The polls a read of a body allows, each followed by a yield to the scheduler. Under paused time
+/// a task that keeps yielding stops the clock, so a `timeout` around a read of a body that only
+/// yields could never fire; a bounded count of polls fails an assertion instead of hanging the
+/// test, and the tests move the clock themselves.
+const POLLS: usize = 64;
+
+const REPLAY: ReplaySettings = ReplaySettings {
+    max_events: 1_000_000,
+    max_data_bytes: 65_536,
+    permits: 4,
+};
+
+/// A state whose subscriptions and status read the tail state of `tail`, `window`, `hub` and
+/// `replay`.
+fn state_on(
+    query_bus: Arc<dyn QueryBus>,
+    tail: &watch::Receiver<TailState>,
+    window: Arc<Window>,
+    hub: Arc<Hub>,
+    replay: Arc<dyn TopicReplay>,
+) -> EventStreamState {
+    let subscriptions = Subscriptions::new(
+        Arc::<Hub>::clone(&hub),
+        Arc::<Window>::clone(&window),
+        replay,
+        tail.clone(),
+        REPLAY,
+    );
+    EventStreamState {
+        query_bus,
+        subscriptions: Arc::new(subscriptions),
+        status: Arc::new(StatusSource::new(
+            tail.clone(),
+            window,
+            Arc::<Hub>::clone(&hub),
+        )),
+        hub,
+        settings: StreamSettings {
+            keep_alive: KEEP_ALIVE,
+        },
+    }
+}
+
+/// A state whose status reads `tail`, `window` and `hub`; its replay is an empty topic.
 fn state_with(
     query_bus: Arc<dyn QueryBus>,
     tail: TailState,
@@ -61,11 +130,13 @@ fn state_with(
     hub: Arc<Hub>,
 ) -> EventStreamState {
     let (_sender, receiver) = watch::channel(tail);
-    EventStreamState {
+    state_on(
         query_bus,
-        status: Arc::new(StatusSource::new(receiver, window, Arc::<Hub>::clone(&hub))),
+        &receiver,
+        window,
         hub,
-    }
+        Arc::new(StaticTopic::empty()),
+    )
 }
 
 /// A state of a node that has not started, over `query_bus`.
@@ -110,7 +181,7 @@ impl Reply {
 }
 
 async fn send_request(state: EventStreamState, request: Request<Body>) -> Reply {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    timeout(WAIT, async {
         let response = app(state).oneshot(request).await.unwrap();
         let (parts, body) = response.into_parts();
         let content_type = parts
@@ -435,16 +506,13 @@ async fn a_closed_hub_answers_200_shutting_down_and_not_a_503() {
 #[tokio::test]
 async fn the_status_reads_the_tail_state_at_each_request() {
     let (sender, receiver) = watch::channel(TailState::default());
-    let hub = Hub::new(SETTINGS);
-    let state = EventStreamState {
-        query_bus: idle_bus(),
-        status: Arc::new(StatusSource::new(
-            receiver,
-            Arc::new(Window::new(10, usize::MAX)),
-            Arc::<Hub>::clone(&hub),
-        )),
-        hub,
-    };
+    let state = state_on(
+        idle_bus(),
+        &receiver,
+        Arc::new(Window::new(10, usize::MAX)),
+        Hub::new(SETTINGS),
+        Arc::new(StaticTopic::empty()),
+    );
 
     let before = send(state.clone(), "/events/status").await;
     sender.send_replace(TailState {
@@ -464,6 +532,615 @@ async fn the_status_route_serves_only_get() {
         Request::builder()
             .method(Method::POST)
             .uri("/events/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
+// ---- event stream ----
+
+const HUB: HubSettings = HubSettings {
+    max_subscribers: 8,
+    buffer: 64,
+};
+
+/// The event object of the event `id`, as the envelope parser writes it.
+fn event_json(id: u64, event_type: &str) -> String {
+    format!(
+        r#"{{"id":"00000000-0000-0000-0000-{id:012x}","type":"{event_type}","occurredAt":"2026-11-14T10:00:00Z","data":{{"n":{id}}}}}"#
+    )
+}
+
+fn event(id: u64, event_type: &str) -> StoredEvent {
+    stored_event(id, event_type, &event_json(id, event_type))
+}
+
+/// The SSE frame of the event `id`.
+fn frame(id: u64, event_type: &str) -> String {
+    format!(
+        "id: {id}\nevent: {event_type}\ndata: {}\n\n",
+        event_json(id, event_type)
+    )
+}
+
+/// A node whose hub was started at `position` and whose window floor is `position`.
+struct Node {
+    hub: Arc<Hub>,
+    window: Arc<Window>,
+    _tail: watch::Sender<TailState>,
+    state: EventStreamState,
+}
+
+fn node_on(position: u64, replay: Arc<dyn TopicReplay>, settings: HubSettings) -> Node {
+    let hub = Hub::new(settings);
+    hub.start(Cursor::new(position));
+    let window = Arc::new(Window::new(100, usize::MAX));
+    window.restart(Cursor::new(position));
+    let (tail, receiver) = watch::channel(TailState {
+        started: true,
+        ..TailState::default()
+    });
+    let state = state_on(
+        idle_bus(),
+        &receiver,
+        Arc::<Window>::clone(&window),
+        Arc::<Hub>::clone(&hub),
+        replay,
+    );
+    Node {
+        hub,
+        window,
+        _tail: tail,
+        state,
+    }
+}
+
+/// A ready node at `position` whose replay is an empty topic.
+fn ready(position: u64) -> Node {
+    node_on(position, Arc::new(StaticTopic::empty()), HUB)
+}
+
+impl Node {
+    /// What the tail does with a valid event: the window first, then the hub.
+    fn pass(&self, event: &StoredEvent) {
+        self.window.push(Arc::new(event.clone()));
+        self.hub.publish(event);
+    }
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+fn get_after(uri: &str, last_event_id: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header("last-event-id", last_event_id)
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// Sends the request and returns the head and the body, which may stay open.
+async fn open(state: EventStreamState, request: Request<Body>) -> (Parts, Body) {
+    timeout(WAIT, app(state).oneshot(request))
+        .await
+        .expect("the head answers in time")
+        .unwrap()
+        .into_parts()
+}
+
+/// Polls `future` with the context of the test task at most [`POLLS`] times, with a yield to the
+/// scheduler after each poll that pended; `None` when it is still pending after the last one.
+async fn within_polls<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = pin!(future);
+    for _ in 0..POLLS {
+        if let Poll::Ready(output) =
+            poll_fn(|context| Poll::Ready(future.as_mut().poll(context))).await
+        {
+            return Some(output);
+        }
+        tokio::task::yield_now().await;
+    }
+    None
+}
+
+/// The next chunk of the body as text, `None` when the body ended; panics when the body is still
+/// pending after [`POLLS`] polls. The clock does not move.
+async fn chunk(body: &mut Body) -> Option<String> {
+    let frame = within_polls(body.frame())
+        .await
+        .expect("a chunk within the polls")?;
+    let data = frame.unwrap().into_data().unwrap();
+    Some(String::from_utf8(data.to_vec()).unwrap())
+}
+
+/// True when the body writes nothing and stays open while the clock moves on by `quiet`: polled
+/// before and after the clock moved, it is still pending after [`POLLS`] polls.
+async fn silent(body: &mut Body, quiet: Duration) -> bool {
+    let mut frame = pin!(body.frame());
+    let before = poll_fn(|context| Poll::Ready(frame.as_mut().poll(context))).await;
+    tokio::time::advance(quiet).await;
+    before.is_pending() && within_polls(frame).await.is_none()
+}
+
+fn header_text(head: &Parts, name: &str) -> String {
+    head.headers[name].to_str().unwrap().to_owned()
+}
+
+fn lines_of(recorder: &LogRecorder, message: &str) -> Vec<LogLine> {
+    recorder
+        .lines()
+        .into_iter()
+        .filter(|line| line.message == message)
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_node_opens_an_event_stream_with_the_head_of_fr_5_and_keeps_it_open() {
+    let node = ready(1_000);
+
+    let (head, mut body) = open(node.state.clone(), get("/events/stream?types=user.created")).await;
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(
+        header_text(&head, CONTENT_TYPE.as_str()),
+        "text/event-stream"
+    );
+    assert_eq!(header_text(&head, CACHE_CONTROL.as_str()), "no-cache");
+    assert_eq!(header_text(&head, "x-accel-buffering"), "no");
+    assert_eq!(node.hub.subscriber_count(), 1);
+    assert!(silent(&mut body, JUST_BEFORE_KEEP_ALIVE).await);
+    assert_eq!(node.hub.subscriber_count(), 1);
+    drop(body);
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_the_subscribed_type_arrives_as_one_frame_per_event_in_id_order() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+
+    node.pass(&event(1_001, "user.created"));
+    node.pass(&event(1_002, "order.paid"));
+    node.pass(&event(1_003, "user.created"));
+
+    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
+    assert_eq!(chunk(&mut body).await, Some(frame(1_003, "user.created")));
+    assert!(silent(&mut body, WAIT).await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_listed_type_arrives_and_a_repeated_name_counts_once() {
+    let node = ready(1_000);
+    let (head, mut body) = open(
+        node.state.clone(),
+        get("/events/stream?types=order.paid,user.created,order.paid"),
+    )
+    .await;
+
+    node.pass(&event(1_001, "user.created"));
+    node.pass(&event(1_002, "order.paid"));
+    node.pass(&event(1_003, "user.deleted"));
+    node.pass(&event(1_004, "user.created"));
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
+    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "order.paid")));
+    assert_eq!(chunk(&mut body).await, Some(frame(1_004, "user.created")));
+    assert!(silent(&mut body, WAIT).await);
+}
+
+/// A record whose envelope is written over several lines and whose data holds a line break inside
+/// a string.
+fn multi_line_record() -> TopicRecord {
+    let value = "{\n  \"id\": \"8F14E45F-CEEA-467F-A8F4-3D1B5C4E1A2B\",\n  \"type\": \"user.created\",\n  \
+                 \"occurredAt\": \"2026-11-14T10:00:00Z\",\n  \"data\": {\"text\": \"line one\\nline two\"}\n}";
+    TopicRecord {
+        offset: Offset::new(0),
+        value: Some(value.as_bytes().to_vec()),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_event_whose_data_holds_a_line_break_is_one_data_line_the_client_parses_unchanged() {
+    let topic = StaticTopic::new(vec![multi_line_record()], Cursor::START, Cursor::new(1));
+    let node = node_on(1, Arc::new(topic), HUB);
+
+    let (_head, mut body) = open(
+        node.state.clone(),
+        get("/events/stream?types=user.created&lastEventId=0"),
+    )
+    .await;
+
+    let text = chunk(&mut body).await.unwrap();
+    let lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(lines.len(), 5, "{text:?}");
+    assert_eq!(lines[0], "id: 1");
+    assert_eq!(lines[1], "event: user.created");
+    assert_eq!(lines[3..], ["", ""]);
+    let data = lines[2].strip_prefix("data: ").unwrap();
+    assert_eq!(
+        data,
+        r#"{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"user.created","occurredAt":"2026-11-14T10:00:00Z","data":{"text":"line one\nline two"}}"#
+    );
+    let parsed: Value = serde_json::from_str(data).unwrap();
+    assert_eq!(parsed["data"]["text"], "line one\nline two");
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_a_frame_for_the_keep_alive_interval_the_stream_writes_the_comment_line() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+
+    assert!(silent(&mut body, JUST_BEFORE_KEEP_ALIVE).await);
+    tokio::time::advance(ONE_MILLISECOND).await;
+    assert_eq!(chunk(&mut body).await, Some(":\n\n".to_owned()));
+    assert!(silent(&mut body, Duration::from_secs(3)).await);
+
+    node.pass(&event(1_001, "user.created"));
+    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
+    assert!(silent(&mut body, JUST_BEFORE_KEEP_ALIVE).await);
+    tokio::time::advance(ONE_MILLISECOND).await;
+    assert_eq!(chunk(&mut body).await, Some(":\n\n".to_owned()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_header_cursor_wins_over_the_parameter_and_resumes_from_the_window() {
+    let node = ready(0);
+    for id in 1..=10 {
+        node.pass(&event(id, "user.created"));
+    }
+
+    let (head, mut body) = open(
+        node.state.clone(),
+        get_after("/events/stream?types=user.created&lastEventId=5", "8"),
+    )
+    .await;
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(chunk(&mut body).await, Some(frame(9, "user.created")));
+    assert_eq!(chunk(&mut body).await, Some(frame(10, "user.created")));
+    assert!(silent(&mut body, WAIT).await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_parameter_cursor_resumes_when_no_header_is_sent() {
+    let node = ready(0);
+    for id in 1..=4 {
+        node.pass(&event(id, "user.created"));
+    }
+
+    let (_head, mut body) = open(
+        node.state.clone(),
+        get("/events/stream?types=user.created&lastEventId=2"),
+    )
+    .await;
+
+    assert_eq!(chunk(&mut body).await, Some(frame(3, "user.created")));
+    assert_eq!(chunk(&mut body).await, Some(frame(4, "user.created")));
+    assert!(silent(&mut body, WAIT).await);
+}
+
+fn unavailable() -> Result<event_stream_domain::Batch, TopicError> {
+    Err(TopicError::Unavailable("the broker is away".into()))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_replay_that_cannot_read_kafka_ends_the_response_and_logs_replay_failed() {
+    let (recorder, _guard) = LogRecorder::install();
+    let replay = ScriptedTopicReplay::new();
+    replay.push_page(unavailable());
+    let node = node_on(900, Arc::new(replay.clone()), HUB);
+
+    let (head, mut body) = open(
+        node.state.clone(),
+        get_after("/events/stream?types=user.created", "100"),
+    )
+    .await;
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(chunk(&mut body).await, None);
+    assert_eq!(replay.calls(), [Cursor::new(100)]);
+    assert_eq!(
+        lines_of(&recorder, "replay failed"),
+        [LogLine {
+            level: Level::WARN,
+            target: "event_stream_application::http::handler".to_owned(),
+            message: "replay failed".to_owned(),
+            fields: vec![
+                ("transport".to_owned(), "sse".to_owned()),
+                (
+                    "error".to_owned(),
+                    "the topic is unavailable: the broker is away".to_owned()
+                ),
+            ],
+        }]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn at_shutdown_the_response_ends_after_the_queued_frames_without_a_log_entry() {
+    let (recorder, _guard) = LogRecorder::install();
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+    node.pass(&event(1_001, "user.created"));
+    node.pass(&event(1_002, "user.created"));
+
+    node.hub.close();
+
+    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
+    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "user.created")));
+    assert_eq!(chunk(&mut body).await, None);
+    assert_eq!(lines_of(&recorder, "replay failed"), Vec::<LogLine>::new());
+}
+
+#[rstest]
+#[case::missing("types", "")]
+#[case::missing_with_cursor("types", "lastEventId=3")]
+#[case::duplicate("types", "types=a&types=b")]
+#[tokio::test(start_paused = true)]
+async fn a_types_parameter_that_cannot_be_read_is_400_naming_it(
+    #[case] named: &str,
+    #[case] query: &str,
+) {
+    let node = ready(1_000);
+
+    let reply = send(node.state.clone(), &format!("/events/stream?{query}")).await;
+
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    assert_eq!(reply.content_type, PROBLEM);
+    let body = reply.json();
+    assert_eq!(body["type"], "about:blank");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("Failed to deserialize query string: "),
+        "{detail}"
+    );
+    assert!(detail.contains(&format!("`{named}`")), "{detail}");
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+/// `count` distinct valid names joined with commas.
+fn distinct_names(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("t{index}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[rstest]
+#[case::empty("types=", "required")]
+#[case::empty_entry("types=a,,b", "required")]
+#[case::pattern("types=User.Created", "pattern")]
+#[case::length(&format!("types={}", "a".repeat(129)), "length")]
+#[case::max_items(&format!("types={}", distinct_names(101)), "max_items")]
+#[case::before_a_bad_cursor("types=&lastEventId=abc", "required")]
+#[tokio::test(start_paused = true)]
+async fn invalid_types_are_422_with_one_violation_on_types(
+    #[case] query: &str,
+    #[case] code: &str,
+) {
+    let node = ready(1_000);
+
+    let reply = send(node.state.clone(), &format!("/events/stream?{query}")).await;
+
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.content_type, PROBLEM);
+    let body = reply.json();
+    assert_eq!(body["type"], "/problems/validation-failed");
+    let violations = body["violations"].as_array().unwrap();
+    assert_eq!(violations.len(), 1);
+    assert_eq!(violations[0]["propertyPath"], "types");
+    assert_eq!(violations[0]["code"], code);
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hundred_distinct_names_with_repeats_open_a_stream() {
+    let node = ready(1_000);
+    let names = format!("{0},{0}", distinct_names(100));
+
+    let (head, _body) = open(
+        node.state.clone(),
+        get(&format!("/events/stream?types={names}")),
+    )
+    .await;
+
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(node.hub.type_count(), 100);
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+#[tokio::test(start_paused = true)]
+async fn an_invalid_cursor_is_400_naming_its_carrier(#[case] value: &str) {
+    let node = ready(1_000);
+
+    let by_header = send_request(
+        node.state.clone(),
+        get_after("/events/stream?types=a&lastEventId=5", value),
+    )
+    .await;
+    let by_parameter = send(
+        node.state.clone(),
+        &format!("/events/stream?types=a&lastEventId={value}"),
+    )
+    .await;
+
+    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
+        assert_eq!(reply.content_type, PROBLEM);
+        assert_eq!(
+            reply.json()["detail"],
+            format!("{carrier} must be a decimal unsigned 64-bit integer")
+        );
+    }
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+/// What happened to the hub of a refusing node.
+#[derive(Debug, Clone, Copy)]
+enum Life {
+    /// Never started: the node is starting.
+    Unstarted,
+    /// Started at position 0.
+    Started,
+    /// Closed without a start.
+    ClosedUnstarted,
+    /// Started, then closed.
+    ClosedStarted,
+}
+
+/// A node whose hub has the cap `max_subscribers` and went through `life`.
+fn refusing(max_subscribers: usize, life: Life) -> Node {
+    let hub = Hub::new(HubSettings {
+        max_subscribers,
+        buffer: 4,
+    });
+    if matches!(life, Life::Started | Life::ClosedStarted) {
+        hub.start(Cursor::START);
+    }
+    if matches!(life, Life::ClosedUnstarted | Life::ClosedStarted) {
+        hub.close();
+    }
+    let window = Arc::new(Window::new(100, usize::MAX));
+    let (tail, receiver) = watch::channel(TailState::default());
+    let state = state_on(
+        idle_bus(),
+        &receiver,
+        Arc::<Window>::clone(&window),
+        Arc::<Hub>::clone(&hub),
+        Arc::new(StaticTopic::empty()),
+    );
+    Node {
+        hub,
+        window,
+        _tail: tail,
+        state,
+    }
+}
+
+#[rstest]
+#[case::starting(8, Life::Unstarted, "the node is starting")]
+#[case::shutting_down(8, Life::ClosedStarted, "the node is shutting down")]
+#[case::at_capacity(0, Life::Started, "the node is at its subscriber capacity")]
+#[case::shutting_down_before_starting(0, Life::ClosedUnstarted, "the node is shutting down")]
+#[case::starting_before_the_cap(0, Life::Unstarted, "the node is starting")]
+#[case::shutting_down_before_the_cap(0, Life::ClosedStarted, "the node is shutting down")]
+#[tokio::test(start_paused = true)]
+async fn a_node_that_cannot_take_the_subscription_answers_the_503_of_fr_25(
+    #[case] max_subscribers: usize,
+    #[case] life: Life,
+    #[case] detail: &str,
+) {
+    let node = refusing(max_subscribers, life);
+
+    let reply = send(node.state.clone(), "/events/stream?types=user.created").await;
+
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(reply.content_type, PROBLEM);
+    assert_eq!(
+        reply.json(),
+        json!({"type": "about:blank", "title": "Service Unavailable", "status": 503, "detail": detail})
+    );
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_node_at_its_cap_counts_the_open_streams() {
+    let node = node_on(
+        1_000,
+        Arc::new(StaticTopic::empty()),
+        HubSettings {
+            max_subscribers: 1,
+            buffer: 4,
+        },
+    );
+    let (first, body) = open(node.state.clone(), get("/events/stream?types=a")).await;
+
+    let refused = send(node.state.clone(), "/events/stream?types=a").await;
+    drop(body);
+    let (again, _body) = open(node.state.clone(), get("/events/stream?types=a")).await;
+
+    assert_eq!(first.status, StatusCode::OK);
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        refused.json()["detail"],
+        "the node is at its subscriber capacity"
+    );
+    assert_eq!(again.status, StatusCode::OK);
+}
+
+#[rstest]
+#[case::missing_types("lastEventId=1", StatusCode::BAD_REQUEST)]
+#[case::bad_types("types=A", StatusCode::UNPROCESSABLE_ENTITY)]
+#[case::bad_cursor("types=a&lastEventId=x", StatusCode::BAD_REQUEST)]
+#[tokio::test(start_paused = true)]
+async fn validation_comes_before_the_503_of_a_starting_node(
+    #[case] query: &str,
+    #[case] status: StatusCode,
+) {
+    let node = refusing(8, Life::Unstarted);
+
+    let reply = send(node.state.clone(), &format!("/events/stream?{query}")).await;
+
+    assert_eq!(reply.status, status);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_problem_and_no_log_entry_holds_a_name_of_the_request() {
+    let (recorder, _guard) = LogRecorder::install();
+    let starting = refusing(8, Life::Unstarted);
+    let replay = ScriptedTopicReplay::new();
+    replay.push_page(unavailable());
+    let failing = node_on(900, Arc::new(replay), HUB);
+
+    let invalid = send(starting.state.clone(), "/events/stream?types=Secret.Name").await;
+    let refused = send(starting.state.clone(), "/events/stream?types=hidden.name").await;
+    let (_head, mut body) = open(
+        failing.state.clone(),
+        get_after("/events/stream?types=private.name", "1"),
+    )
+    .await;
+    assert_eq!(chunk(&mut body).await, None);
+
+    assert_eq!(invalid.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    let lines = recorder.lines();
+    assert_eq!(
+        lines
+            .iter()
+            .map(|line| line.message.as_str())
+            .collect::<Vec<_>>(),
+        ["subscription rejected", "replay failed"]
+    );
+    let texts = [
+        String::from_utf8(invalid.body).unwrap(),
+        String::from_utf8(refused.body).unwrap(),
+        format!("{lines:?}"),
+    ];
+    for text in texts {
+        for name in ["Secret.Name", "hidden.name", "private.name"] {
+            assert!(!text.contains(name), "{text} holds {name}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_stream_route_serves_only_get() {
+    let reply = send_request(
+        three(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/events/stream?types=a")
             .body(Body::empty())
             .unwrap(),
     )
@@ -585,8 +1262,14 @@ fn the_document_carries_the_event_type_schema() {
 
 // ---- extractor check ----
 
-/// The extractor types a handler of this module may take.
-const ALLOWED_EXTRACTORS: [&str; 2] = ["State<EventStreamState>", "ValidatedQuery<"];
+/// The extractor types a handler of this module may take. `HeaderMap` and the result of the
+/// upgrade extractor are infallible: the recorded exception of the streaming routes.
+const ALLOWED_EXTRACTORS: [&str; 4] = [
+    "State<EventStreamState>",
+    "ValidatedQuery<",
+    "HeaderMap",
+    "Result<WebSocketUpgrade, WebSocketUpgradeRejection>",
+];
 
 /// Splits `text` at every `separator` that is not nested in brackets.
 fn split_top_level(text: &str, separator: &str) -> Vec<String> {
@@ -675,8 +1358,10 @@ fn handlers_use_only_the_problem_aware_extractors() {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(names, ["list_event_types", "event_stream_status"]);
+    assert_eq!(names, ["list_event_types", "event_stream_status", "stream"]);
     assert!(source.contains("ValidatedQuery<ListEventTypesParams>"));
+    assert!(source.contains("headers: HeaderMap,"));
+    assert!(source.contains("ValidatedQuery<StreamParams>"));
 }
 
 #[rstest]
@@ -698,7 +1383,21 @@ fn the_extractor_check_reports_a_planted_violation(#[case] parameter: &str) {
 #[test]
 fn the_extractor_check_accepts_the_allowed_extractors() {
     let source = "pub async fn ok(State(state): State<EventStreamState>, \
-        ValidatedQuery(q): ValidatedQuery<Q>) -> Result<(), Problem> {}";
+        ValidatedQuery(q): ValidatedQuery<Q>) -> Result<(), Problem> {} \
+        pub async fn up(State(state): State<EventStreamState>, headers: HeaderMap, \
+        upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>) -> Response {}";
 
     assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+}
+
+#[rstest]
+#[case::bare_upgrade("upgrade: WebSocketUpgrade")]
+#[case::other_result("upgrade: Result<WebSocketUpgrade, Problem>")]
+#[case::header_extractor("TypedHeader(h): TypedHeader<LastEventId>")]
+fn the_extractor_check_reports_a_fallible_streaming_extractor(#[case] parameter: &str) {
+    let source = format!(
+        "pub async fn ok(State(state): State<EventStreamState>, {parameter}) -> Response {{}}"
+    );
+
+    assert_eq!(disallowed_parameters(&source), [format!("ok: {parameter}")]);
 }
