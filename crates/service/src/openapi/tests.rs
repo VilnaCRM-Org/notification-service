@@ -13,7 +13,7 @@ fn json_document() -> Value {
     "get",
     "api_health_get",
     "HealthCheck",
-    ("Checks the health of the service.", "Returns 204 when the database, the cache and the message broker respond. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
+    ("Checks the health of the service.", "Returns 204 when the database, the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
 )]
 #[case(
     "/api/event-types",

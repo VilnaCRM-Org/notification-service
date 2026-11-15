@@ -9,6 +9,8 @@ pub enum Dependency {
     Cache,
     /// The message broker.
     MessageBroker,
+    /// The tail of the event topic of this node (its readiness, not a broker read).
+    EventStream,
 }
 
 impl Dependency {
@@ -19,6 +21,7 @@ impl Dependency {
             Self::Database => "database",
             Self::Cache => "cache",
             Self::MessageBroker => "message_broker",
+            Self::EventStream => "event_stream",
         }
     }
 
@@ -29,6 +32,7 @@ impl Dependency {
             Self::Database => "Database is not available",
             Self::Cache => "Cache is not working",
             Self::MessageBroker => "Message broker is not available",
+            Self::EventStream => "Event stream is not ready",
         }
     }
 }

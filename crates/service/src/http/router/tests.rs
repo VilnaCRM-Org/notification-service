@@ -4,16 +4,14 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
-use health_check_domain::{Dependency, HealthProbe};
+use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use test_support::clock::FixedClock;
-use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
-use test_support::repository::InMemoryExampleApiResourceRepository;
 use test_support::static_topic::StaticTopic;
 
-use crate::bootstrap::{Adapters, event_bus, router};
+use crate::bootstrap::tests::wiring::adapters_on;
+use crate::bootstrap::{Adapters, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
@@ -43,21 +41,8 @@ fn config(app_env: &str) -> Config {
 }
 
 fn adapters() -> Adapters {
-    let probes: Vec<Arc<dyn HealthProbe>> = vec![
-        Arc::new(StubProbe::healthy(Dependency::Database)),
-        Arc::new(StubProbe::healthy(Dependency::Cache)),
-        Arc::new(StubProbe::healthy(Dependency::MessageBroker)),
-    ];
-    Adapters {
-        repository: Arc::new(InMemoryExampleApiResourceRepository::new()),
-        probes,
-        event_bus: event_bus(),
-        clock: Arc::new(FixedClock::at(std::time::SystemTime::UNIX_EPOCH)),
-        uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
-        topic_probe: Arc::new(StaticTopic::empty()),
-        topic_tail: Box::new(StaticTopic::empty()),
-        topic_replay: Arc::new(StaticTopic::empty()),
-    }
+    let topic = StaticTopic::empty();
+    adapters_on(&topic, Box::new(topic.clone()))
 }
 
 async fn send_to(app: &Router, request: Request<Body>) -> Answer {
@@ -143,11 +128,13 @@ async fn every_route_carries_the_request_id_and_the_security_headers() {
             StatusCode::OK,
             EXPLORER_CONTENT_SECURITY_POLICY,
         ),
+        // The tail of a router without its background work never runs, so the probe of the event
+        // stream fails and the health answer is the 500 problem.
         (
             Method::GET,
             "/api/health".into(),
             None,
-            StatusCode::NO_CONTENT,
+            StatusCode::INTERNAL_SERVER_ERROR,
             DEFAULT_CONTENT_SECURITY_POLICY,
         ),
         (

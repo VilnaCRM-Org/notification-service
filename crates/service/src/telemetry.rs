@@ -4,6 +4,10 @@ use shared_domain::BoxError;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 
+/// The directive added to every level filter: the Kafka client writes errors only, the service's
+/// own entries report every state of the event tail (NFR-15).
+const KAFKA_CLIENT_DIRECTIVE: &str = "krafka=error";
+
 /// Writes the `panic` entry. The hook runs on the panicking thread, so the entry is written
 /// inside the request span and carries the request id.
 fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
@@ -16,7 +20,8 @@ fn log_panic(info: &std::panic::PanicHookInfo<'_>) {
 /// outermost first, as `spans`: an entry of a nested span inside a request still carries the
 /// request span and its request id.
 ///
-/// The level filter takes `tracing_subscriber::EnvFilter` directives.
+/// The level filter takes `tracing_subscriber::EnvFilter` directives; the directive
+/// `krafka=error` is added to them.
 ///
 /// # Errors
 ///
@@ -25,7 +30,7 @@ pub fn init<W>(directives: &str, writer: W) -> Result<(), BoxError>
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
-    let filter = EnvFilter::try_new(directives)?;
+    let filter = EnvFilter::try_new(directives)?.add_directive(KAFKA_CLIENT_DIRECTIVE.parse()?);
     tracing_subscriber::fmt()
         .json()
         .flatten_event(true)
@@ -37,3 +42,6 @@ where
     std::panic::set_hook(Box::new(log_panic));
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

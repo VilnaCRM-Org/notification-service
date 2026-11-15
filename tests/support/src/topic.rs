@@ -105,6 +105,28 @@ impl TopicProbe for ScriptedTopicProbe {
     }
 }
 
+/// A [`TopicProbe`] whose every call panics: the round of a tail on it panics, as a bug would.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PanickingTopicProbe;
+
+impl PanickingTopicProbe {
+    #[expect(clippy::panic, reason = "the panicking probe exists to panic")]
+    fn panic() -> ! {
+        panic!("the round panics")
+    }
+}
+
+#[async_trait]
+impl TopicProbe for PanickingTopicProbe {
+    async fn partition_count(&self) -> Result<Option<u32>, TopicError> {
+        Self::panic()
+    }
+
+    async fn watermarks(&self) -> Result<Watermarks, TopicError> {
+        Self::panic()
+    }
+}
+
 /// A call made to a [`ScriptedTopicTail`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TailCall {

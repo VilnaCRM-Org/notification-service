@@ -65,3 +65,12 @@ docs/make-targets.md
 docs/architecture.md
 crates/service/tests/integration/check_config.rs
 crates/notification/
+crates/internal/health-check/application/src/http.rs
+crates/internal/health-check/application/src/http/tests.rs
+crates/service/src/lib.rs
+crates/service/src/command/serve.rs
+crates/service/src/telemetry.rs
+crates/shared/application/src/http/problem.rs
+crates/service/tests/integration/support.rs
+docs/operations.md
+docs/getting-started.md

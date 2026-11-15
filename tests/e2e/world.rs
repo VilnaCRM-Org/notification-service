@@ -1,5 +1,7 @@
 //! The world of a scenario: injected faults, the configured event types, the last response, the
-//! created ids and the scenario database. A new application instance is built for every request.
+//! created ids and the scenario database. A new application instance is built for every request;
+//! its tail reads the topic `notifications` of the broker of the stack, and the request is sent
+//! once the node is ready.
 
 use std::collections::BTreeSet;
 use std::str::FromStr as _;
@@ -13,7 +15,7 @@ use clap::Parser as _;
 use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use service::bootstrap::{Adapters, router};
+use service::bootstrap::{Adapters, application};
 use service::cli::{Cli, Command};
 use service::config::Config;
 use shared_infrastructure::persistence::MIGRATOR;
@@ -27,6 +29,22 @@ static DATABASES: AtomicUsize = AtomicUsize::new(0);
 
 /// The token that stands for the remembered id in paths, doc strings and string arguments.
 const ID_TOKEN: &str = "{id}";
+
+/// The topic of the broker of the stack.
+const STACK_TOPIC: &str = "notifications";
+
+/// How long a request waits for its node to become ready, and for its node to shut down.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The bootstrap servers of the broker of the stack.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the end-to-end suite runs against the broker that the environment of the stack names"
+)]
+fn stack_broker() -> String {
+    std::env::var("KAFKA_BOOTSTRAP_SERVERS")
+        .expect("KAFKA_BOOTSTRAP_SERVERS is not set; run the suite through `make e2e-tests`")
+}
 
 /// What the last request answered.
 #[derive(Debug)]
@@ -74,7 +92,44 @@ fn config_with(flags: &[&str]) -> Config {
     config.sqs.operation_timeout = Duration::from_secs(30);
     config.health_probe_timeout = Duration::from_secs(40);
     config.request_timeout = Duration::from_secs(60);
+    config.kafka.bootstrap_servers = stack_broker();
+    config.kafka.topic = STACK_TOPIC.to_owned();
     config
+}
+
+/// Sends `request` to `router` and reads the whole answer.
+async fn dispatch(router: &axum::Router, request: Request<Body>) -> Reply {
+    let response = router.clone().oneshot(request).await.expect("infallible");
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    Reply {
+        status,
+        headers,
+        body: String::from_utf8_lossy(&bytes).into_owned(),
+    }
+}
+
+/// Polls `GET /api/events/status` through `router` until the node reports `ready` (bounded).
+async fn wait_until_ready(router: &axum::Router) {
+    tokio::time::timeout(READY_TIMEOUT, async {
+        loop {
+            let status = Request::get("/api/events/status")
+                .body(Body::empty())
+                .expect("valid request");
+            if dispatch(router, status).await.json()["state"] == "ready" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the node becomes ready");
 }
 
 /// Connection options of the server of `DATABASE_URL`.
@@ -183,7 +238,8 @@ impl AppWorld {
         }
     }
 
-    /// Builds a new application instance and sends one request to it.
+    /// Builds a new application instance, runs its tail until the node is ready, sends one request
+    /// to it and shuts its background work down.
     pub(crate) async fn send(
         &mut self,
         method: &str,
@@ -208,24 +264,13 @@ impl AppWorld {
         let request = request
             .body(Body::from(self.substitute(body)))
             .expect("valid request");
-        let response = router(adapters, &config)
-            .expect("assembled router")
-            .oneshot(request)
+        let application = application(adapters, &config).expect("assembled application");
+        let running = application.background.spawn();
+        wait_until_ready(&application.router).await;
+        let reply = dispatch(&application.router, request).await;
+        tokio::time::timeout(READY_TIMEOUT, running.shutdown())
             .await
-            .expect("infallible");
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        let reply = Reply {
-            status,
-            headers,
-            body: String::from_utf8_lossy(&bytes).into_owned(),
-        };
+            .expect("the node shuts down");
         self.record(&reply);
         self.reply = Some(reply);
     }

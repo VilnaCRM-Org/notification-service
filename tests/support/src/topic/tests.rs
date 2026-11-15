@@ -6,7 +6,10 @@ use event_stream_domain::{
     Batch, Cursor, Offset, TopicError, TopicProbe, TopicRecord, TopicReplay, TopicTail, Watermarks,
 };
 
-use super::{ProbeCall, ScriptedTopicProbe, ScriptedTopicReplay, ScriptedTopicTail, TailCall};
+use super::{
+    PanickingTopicProbe, ProbeCall, ScriptedTopicProbe, ScriptedTopicReplay, ScriptedTopicTail,
+    TailCall,
+};
 use crate::block_on;
 
 /// Polls `future` three times and checks that it never completes.
@@ -184,4 +187,16 @@ fn the_replay_records_the_position_and_pends_once_its_script_is_empty() {
 
     assert_pends(replay.page(Cursor::new(11)));
     assert_eq!(replay.calls(), vec![Cursor::new(11)]);
+}
+
+#[test]
+#[should_panic(expected = "the round panics")]
+fn the_panicking_probe_panics_on_partition_count() {
+    drop(block_on(PanickingTopicProbe.partition_count()));
+}
+
+#[test]
+#[should_panic(expected = "the round panics")]
+fn the_panicking_probe_panics_on_watermarks() {
+    drop(block_on(PanickingTopicProbe.watermarks()));
 }

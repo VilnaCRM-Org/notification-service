@@ -3,38 +3,25 @@ Feature: Event stream status
   As an operator
   I want to read the status of the event stream over REST and GraphQL
 
-  Scenario: A service without a running reader reports that it is starting
+  Scenario: A ready node reports its state and a reachable broker
     When GET request is sent to "/api/events/status"
     Then the response status code should be 200
     And the response header "content-type" should contain "application/json"
-    And the JSON response should be:
-      """
-      {
-        "state": "starting",
-        "reason": "catching-up",
-        "brokerReachable": false,
-        "position": null,
-        "endOffset": null,
-        "lag": null,
-        "windowFirst": null,
-        "windowLast": null,
-        "subscribers": 0,
-        "rejectedRecords": "0",
-        "retentionLosses": "0",
-        "replayCapped": "0"
-      }
-      """
+    And the JSON field "state" should equal "ready"
+    And the response body should contain '"reason":null'
+    And the response body should contain '"brokerReachable":true'
+    And the response body should contain '"subscribers":0'
 
   Scenario: The GraphQL query returns the values of the status route
     When the GraphQL operation is sent:
       """
-      { eventStreamStatus { state reason brokerReachable position endOffset lag windowFirst windowLast subscribers rejectedRecords retentionLosses replayCapped } }
+      { eventStreamStatus { state reason brokerReachable subscribers } }
       """
     Then the response status code should be 200
     And the GraphQL response should have no errors
     And the JSON response should be:
       """
-      {"data": {"eventStreamStatus": {"state": "starting", "reason": "catching-up", "brokerReachable": false, "position": null, "endOffset": null, "lag": null, "windowFirst": null, "windowLast": null, "subscribers": 0, "rejectedRecords": "0", "retentionLosses": "0", "replayCapped": "0"}}}
+      {"data": {"eventStreamStatus": {"state": "ready", "reason": null, "brokerReachable": true, "subscribers": 0}}}
       """
 
   Scenario: The GraphQL catalog query returns the page of the REST operation

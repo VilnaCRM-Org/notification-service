@@ -54,7 +54,7 @@ curl http://localhost:8081/ping
 curl -i http://localhost:8081/api/health
 ```
 
-`/ping` answers `pong` (liveness). `/api/health` answers 204 when the database, the cache and the message broker respond, and a 500 problem document that lists every failing dependency otherwise.
+`/ping` answers `pong` (liveness). `/api/health` answers 204 when the database, the cache and the message broker respond and the event stream of the node is ready, and a 500 problem document that lists every failing dependency otherwise.
 
 | URL | Content |
 | --- | --- |

@@ -26,7 +26,7 @@ where
     OpenApiRouter::new().routes(routes!(health))
 }
 
-/// Answers 204 when every dependency responds.
+/// Answers 204 when every dependency responds and the event stream is ready.
 ///
 /// # Errors
 ///
@@ -37,7 +37,7 @@ where
     operation_id = "api_health_get",
     tag = "HealthCheck",
     summary = "Checks the health of the service.",
-    description = "Returns 204 when the database, the cache and the message broker respond. Returns a 500 problem document that lists every failing dependency otherwise.",
+    description = "Returns 204 when the database, the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.",
     responses(
         (status = 204, description = "Health check passed with no content to return."),
         (

@@ -129,14 +129,19 @@ pub(crate) fn stack_variable(name: &str) -> String {
         .unwrap()
 }
 
-/// The variables that let `serve` start against the compose services: the AWS ones of the test
-/// stack and the given database URL, with long budgets so that a request that must succeed does
-/// not depend on how fast a loaded machine opens its first connection (request > probe >=
-/// acquire and operation, as the configuration requires).
+/// The variables that let `serve` start against the compose services: the AWS ones, the Kafka
+/// broker of the test stack (its topic `notifications` is the default) and the given database
+/// URL, with long budgets so that a request that must succeed does not depend on how fast a loaded
+/// machine opens its first connection (request > probe >= acquire and operation, as the
+/// configuration requires).
 pub(crate) fn stack_with(database_url: &str) -> Vec<(&'static str, String)> {
     vec![
         ("DATABASE_URL", database_url.to_owned()),
         ("AWS_REGION", stack_variable("AWS_REGION")),
+        (
+            "KAFKA_BOOTSTRAP_SERVERS",
+            stack_variable("KAFKA_BOOTSTRAP_SERVERS"),
+        ),
         (
             "AWS_ENDPOINT_URL_SQS",
             stack_variable("AWS_ENDPOINT_URL_SQS"),
@@ -192,6 +197,13 @@ pub(crate) struct Server {
 
 /// How long a test waits for the next line of a service before it fails.
 const LINE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The request id of the requests that wait for readiness, so that a test can tell their log
+/// entries from those of the requests it checks.
+pub(crate) const READINESS: &str = "readiness-wait";
+
+/// How long a test waits for a service to become ready.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads the lines of `stdout` on a thread; the channel closes when the process closes it.
 fn lines_of(stdout: BufReader<std::process::ChildStdout>) -> Receiver<String> {
@@ -278,10 +290,6 @@ impl Server {
     }
 
     /// Sends one request and reads the whole answer (the connection is closed after it).
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "integration tests open the sockets their subject talks to"
-    )]
     pub(crate) fn request(
         &self,
         method: &str,
@@ -289,30 +297,25 @@ impl Server {
         headers: &[(&str, &str)],
         body: &str,
     ) -> Answer {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        let extra = headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}"))
-            .collect::<Vec<_>>()
-            .join("\r\n");
-        let extra = if extra.is_empty() {
-            extra
-        } else {
-            format!("{extra}\r\n")
-        };
-        let length = body.len();
-        let head = format!(
-            "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra}content-length: {length}\r\n\r\n{body}"
-        );
-        stream.write_all(head.as_bytes()).unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        Answer::parse(&raw)
+        request_to(self.port, method, path, headers, body)
     }
 
     /// Sends a `GET`.
     pub(crate) fn get(&self, path: &str) -> Answer {
         self.request("GET", path, &[], "")
+    }
+
+    /// Polls `GET /api/events/status` (request id [`READINESS`]) until the node reports `ready`,
+    /// for at most 10 s: the probe of the event stream passes from then on. The blocking poll runs
+    /// on the blocking pool, so the runtime of the calling test stays free; the future holds the
+    /// port only, not the server, whose receiver of log lines is not `Sync`.
+    pub(crate) fn wait_until_ready(&self) -> impl Future<Output = ()> + Send + use<> {
+        let port = self.port;
+        async move {
+            tokio::task::spawn_blocking(move || poll_until_ready(port))
+                .await
+                .unwrap_or_else(|failed| std::panic::resume_unwind(failed.into_panic()));
+        }
     }
 
     /// Opens a connection and sends a request head without its final blank line: the request is
@@ -380,6 +383,65 @@ impl Server {
             lines,
             stderr,
         }
+    }
+}
+
+/// Sends one request to the service on `port` and reads the whole answer (the connection is
+/// closed after it). Every write and every read waits at most [`LINE_TIMEOUT`], so a service that
+/// accepts the connection and never answers fails the test instead of hanging it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "integration tests open the sockets their subject talks to"
+)]
+fn request_to(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Answer {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_write_timeout(Some(LINE_TIMEOUT)).unwrap();
+    stream.set_read_timeout(Some(LINE_TIMEOUT)).unwrap();
+    let extra = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let extra = if extra.is_empty() {
+        extra
+    } else {
+        format!("{extra}\r\n")
+    };
+    let length = body.len();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra}content-length: {length}\r\n\r\n{body}"
+    );
+    stream
+        .write_all(head.as_bytes())
+        .unwrap_or_else(|error| panic!("{method} {path} was not sent: {error}"));
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .unwrap_or_else(|error| panic!("{method} {path} was not answered: {error}"));
+    Answer::parse(&raw)
+}
+
+/// Polls `GET /api/events/status` of the service on `port` (request id [`READINESS`]) until the
+/// node reports `ready`, for at most [`READY_TIMEOUT`]; each request is bounded by [`request_to`].
+fn poll_until_ready(port: u16) {
+    let started = tokio::time::Instant::now();
+    loop {
+        let answer = request_to(
+            port,
+            "GET",
+            "/api/events/status",
+            &[("x-request-id", READINESS)],
+            "",
+        );
+        if answer.body.contains(r#""state":"ready""#) {
+            return;
+        }
+        assert!(
+            started.elapsed() < READY_TIMEOUT,
+            "the node did not become ready: {}",
+            answer.body
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

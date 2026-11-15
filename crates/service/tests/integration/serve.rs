@@ -8,25 +8,43 @@ use sqlx::{AssertSqlSafe, PgPool};
 use tokio::time::Instant;
 
 use crate::support::{
-    DEAD_DATABASE_URL, Scratch, Server, VALID_ENVIRONMENT, database_url, serve, stack_with,
+    DEAD_DATABASE_URL, READINESS, Scratch, Server, VALID_ENVIRONMENT, database_url, serve,
+    stack_with,
 };
 
 const REQUEST_ID: &str = "serve-test-1";
 
-/// The configuration of a service that starts but whose dependencies do not answer.
-const DEAD_DEPENDENCIES: [(&str, &str); 3] = [
+/// The configuration of a service that starts but whose dependencies do not answer: the database,
+/// SQS and the Kafka broker on port 1, where nothing listens.
+const DEAD_DEPENDENCIES: [(&str, &str); 4] = [
     ("DATABASE_URL", DEAD_DATABASE_URL),
     ("AWS_REGION", "us-east-1"),
     ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
+    ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
 ];
 
 /// Messages written outside a request.
-const OUTSIDE_REQUESTS: [&str; 3] = ["listening", "shutdown signal received", "stopped"];
+const OUTSIDE_REQUESTS: [&str; 4] = [
+    "listening",
+    "event tail ready",
+    "shutdown signal received",
+    "stopped",
+];
 
+/// A service whose dependencies do not answer, the Kafka broker included (port 1, whatever runs on
+/// the default `localhost:9092` of the test machine); returns once its tail logged the unreachable
+/// topic, so that every later entry comes after that one.
 fn dead_server(scratch: &Scratch, extra: &[(&str, &str)]) -> Server {
     let mut variables = DEAD_DEPENDENCIES.to_vec();
     variables.extend_from_slice(extra);
-    serve(scratch, &variables)
+    let mut server = serve(scratch, &variables);
+    server.read_until("event topic unreachable");
+    server
+}
+
+/// Whether the entry belongs to a request that waited for readiness.
+fn waits_for_readiness(line: &Value) -> bool {
+    line["span"]["request_id"] == READINESS
 }
 
 fn as_pairs<'a>(owned: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
@@ -49,6 +67,7 @@ async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) 
     let url = database_url(&pool).await;
     let owned = stack_with(&url);
     let server = serve(&scratch, &as_pairs(&owned));
+    server.wait_until_ready().await;
     let headers = [
         ("x-request-id", REQUEST_ID),
         ("content-type", "application/json"),
@@ -92,6 +111,7 @@ async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) 
         .lines
         .iter()
         .filter(|line| !OUTSIDE_REQUESTS.contains(&line["message"].as_str().unwrap()))
+        .filter(|line| !waits_for_readiness(line))
         .collect();
     assert!(
         inside
@@ -99,7 +119,11 @@ async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) 
             .all(|line| line["span"]["request_id"] == REQUEST_ID),
         "{inside:?}"
     );
-    assert_eq!(messages_of(&finished.lines, "request completed").len(), 4);
+    let completed = messages_of(&finished.lines, "request completed")
+        .into_iter()
+        .filter(|line| !waits_for_readiness(line))
+        .count();
+    assert_eq!(completed, 4);
     assert_eq!(messages_of(&finished.lines, "domain event").len(), 1);
 }
 
@@ -124,10 +148,17 @@ fn wait_until_accepted(server: &Server) {
     assert_eq!(server.get("/ping").status, 200);
 }
 
+/// How long an idle service with the broker down fails its rounds before the signal: about ten
+/// rounds with `KAFKA_RETRY_DELAY` 100 ms.
+const FAILED_ROUNDS: Duration = Duration::from_secs(1);
+
 #[test]
-fn an_idle_service_stops_on_sigterm_within_two_seconds() {
+fn an_idle_service_with_the_broker_down_stops_on_sigterm_within_two_seconds() {
     let scratch = Scratch::new();
-    let server = dead_server(&scratch, &[]);
+    let server = dead_server(&scratch, &[("KAFKA_RETRY_DELAY", "100ms")]);
+    // A process has no paused time, and that the fault is logged once and nothing comes from
+    // krafka is only shown over rounds that fail; the wait is bounded by its fixed length.
+    std::thread::sleep(FAILED_ROUNDS);
     let started = Instant::now();
 
     let finished = server.terminate();
@@ -140,11 +171,32 @@ fn an_idle_service_stops_on_sigterm_within_two_seconds() {
     );
     assert_eq!(
         finished.messages(),
-        ["listening", "shutdown signal received", "stopped"]
+        [
+            "listening",
+            "event topic unreachable",
+            "shutdown signal received",
+            "stopped"
+        ]
     );
-    assert_eq!(finished.lines[1]["signal"], "SIGTERM");
-    assert_eq!(finished.lines[1]["level"], "INFO");
+    assert_eq!(finished.lines[1]["level"], "WARN");
+    assert!(
+        finished.lines[1]["error"]
+            .as_str()
+            .is_some_and(|error| error.starts_with("the topic is unavailable")),
+        "{}",
+        finished.lines[1]
+    );
+    assert_eq!(finished.lines[2]["signal"], "SIGTERM");
     assert_eq!(finished.lines[2]["level"], "INFO");
+    assert_eq!(finished.lines[3]["level"], "INFO");
+    assert!(
+        finished.lines.iter().all(|line| !line["target"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("krafka")),
+        "{:?}",
+        finished.lines
+    );
     assert_eq!(finished.stderr, "");
 }
 
@@ -157,10 +209,10 @@ fn sigint_stops_the_service_like_sigterm() {
     let finished = server.finish();
 
     assert_eq!(finished.code, Some(0));
-    assert_eq!(finished.lines[1]["signal"], "SIGINT");
-    assert_eq!(finished.lines[2]["message"], "stopped");
-    assert_eq!(finished.lines[1]["level"], "INFO");
+    assert_eq!(finished.lines[2]["signal"], "SIGINT");
+    assert_eq!(finished.lines[3]["message"], "stopped");
     assert_eq!(finished.lines[2]["level"], "INFO");
+    assert_eq!(finished.lines[3]["level"], "INFO");
 }
 
 #[test]
@@ -296,6 +348,11 @@ fn unreachable_dependencies_do_not_stop_ping_and_health_names_them() {
     assert!(probe_took < Duration::from_secs(4), "{probe_took:?}");
     assert!(health.body.contains("Database"), "{}", health.body);
     assert!(health.body.contains("Message broker"), "{}", health.body);
+    assert!(
+        health.body.contains("Event stream is not ready"),
+        "{}",
+        health.body
+    );
     assert!(!health.body.contains("Cache"), "{}", health.body);
     assert_eq!(finished.code, Some(0));
 }
@@ -351,6 +408,7 @@ async fn entries_inside_nested_spans_carry_the_request_id(pool: PgPool) {
     let mut owned = stack_with(&url);
     owned.push(("LOG_LEVEL", "debug".to_owned()));
     let server = serve(&scratch, &as_pairs(&owned));
+    server.wait_until_ready().await;
 
     let health = server.request("GET", "/api/health", &[("x-request-id", REQUEST_ID)], "");
     let finished = server.terminate();
@@ -367,14 +425,22 @@ async fn entries_inside_nested_spans_carry_the_request_id(pool: PgPool) {
         .lines
         .iter()
         .position(|line| line["message"] == "shutdown signal received");
-    let inside = &finished.lines[listening.unwrap().saturating_add(1)..signal.unwrap()];
+    let inside: Vec<&Value> = finished.lines[listening.unwrap().saturating_add(1)..signal.unwrap()]
+        .iter()
+        .filter(|line| {
+            !line["message"]
+                .as_str()
+                .is_some_and(|message| OUTSIDE_REQUESTS.contains(&message))
+        })
+        .filter(|line| !waits_for_readiness(line))
+        .collect();
     assert!(
         inside
             .iter()
             .any(|line| line["span"]["name"] != "http.request"),
         "no entry was written inside a nested span: {inside:?}"
     );
-    for line in inside {
+    for line in &inside {
         assert_eq!(line["spans"][0]["name"], "http.request", "{line}");
         assert_eq!(line["spans"][0]["request_id"], REQUEST_ID, "{line}");
     }
@@ -409,6 +475,7 @@ async fn health_recovers_without_a_restart_when_the_database_comes_back(pool: Pg
         format!("{}s", acquire_timeout.as_secs()),
     ));
     let server = serve(&scratch, &as_pairs(&owned));
+    server.wait_until_ready().await;
 
     let outage = server.get("/api/health");
     sqlx::query(AssertSqlSafe(format!(r#"CREATE DATABASE "{missing}""#)))

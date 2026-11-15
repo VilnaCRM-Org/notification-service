@@ -1,15 +1,16 @@
-//! The production wiring in process: `Adapters::connect` and `bootstrap::router` against the
-//! compose services, dispatched without a socket.
+//! The production wiring in process: `Adapters::connect`, `bootstrap::router` and
+//! `bootstrap::application` against the compose services, dispatched without a socket.
 
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use clap::Parser as _;
 use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use service::bootstrap::{Adapters, router};
+use service::bootstrap::{Adapters, application, router};
 use service::cli::{Cli, Command};
 use service::config::Config;
 use tower::ServiceExt as _;
@@ -32,18 +33,53 @@ fn config() -> Config {
     config
 }
 
-/// Builds a new application instance from the production wiring and sends one request to it.
-async fn send(config: &Config, request: Request<Body>) -> (StatusCode, Value) {
-    let adapters = Adapters::connect(config).await.unwrap();
-    let response = router(adapters, config)
-        .unwrap()
-        .oneshot(request)
-        .await
-        .unwrap();
+/// How long a test waits for the node to become ready.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sends one request to `router` and reads the whole answer.
+async fn dispatch(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
+    let response = router.clone().oneshot(request).await.unwrap();
     let status = response.status();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, body)
+}
+
+/// Builds a new application instance from the production wiring and sends one request to it.
+async fn send(config: &Config, request: Request<Body>) -> (StatusCode, Value) {
+    let adapters = Adapters::connect(config).await.unwrap();
+    dispatch(&router(adapters, config).unwrap(), request).await
+}
+
+/// Polls `GET /api/events/status` until the node reports `ready`, for at most 10 s.
+async fn wait_until_ready(router: &Router) {
+    tokio::time::timeout(READY_TIMEOUT, async {
+        loop {
+            let status = Request::get("/api/events/status")
+                .body(Body::empty())
+                .unwrap();
+            if dispatch(router, status).await.1["state"] == "ready" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the node becomes ready");
+}
+
+/// Builds a new application instance from the production wiring, runs its tail on the broker of
+/// the stack until the node is ready, sends one request and shuts the background work down.
+async fn send_when_ready(config: &Config, request: Request<Body>) -> (StatusCode, Value) {
+    let adapters = Adapters::connect(config).await.unwrap();
+    let application = application(adapters, config).unwrap();
+    let running = application.background.spawn();
+    wait_until_ready(&application.router).await;
+    let answer = dispatch(&application.router, request).await;
+    tokio::time::timeout(READY_TIMEOUT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+    answer
 }
 
 #[sqlx::test(migrator = "shared_infrastructure::persistence::MIGRATOR")]
@@ -53,7 +89,25 @@ async fn health_is_204_through_the_real_probes(pool: sqlx::PgPool) {
 
     let health = Request::get("/api/health").body(Body::empty()).unwrap();
 
-    assert_eq!(send(&config, health).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(
+        send_when_ready(&config, health).await.0,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[sqlx::test(migrator = "shared_infrastructure::persistence::MIGRATOR")]
+async fn health_names_the_event_stream_of_a_router_without_its_tail(pool: sqlx::PgPool) {
+    let mut config = config();
+    config.database.url = database_url(&pool).await;
+
+    let health = Request::get("/api/health").body(Body::empty()).unwrap();
+    let (status, problem) = send(&config, health).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        problem["failures"],
+        serde_json::json!([{"dependency": "event_stream", "message": "Event stream is not ready"}])
+    );
 }
 
 #[sqlx::test(migrator = "shared_infrastructure::persistence::MIGRATOR")]

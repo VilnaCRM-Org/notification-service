@@ -10,6 +10,7 @@ use super::Dependency;
     "message_broker",
     "Message broker is not available"
 )]
+#[case::event_stream(Dependency::EventStream, "event_stream", "Event stream is not ready")]
 fn a_dependency_has_an_identifier_and_a_failure_message(
     #[case] dependency: Dependency,
     #[case] identifier: &str,

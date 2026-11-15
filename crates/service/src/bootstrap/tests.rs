@@ -1,12 +1,14 @@
-use std::sync::Arc;
+pub(crate) mod wiring;
+
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::http::{HeaderMap, Request, Response, StatusCode, header};
 use event_stream_application::{EventCatalog, ListEventTypesHandler};
-use event_stream_domain::Cursor;
-use health_check_domain::{Dependency, HealthProbe};
+use event_stream_domain::{Batch, Cursor, Offset, TopicError, TopicRecord, Watermarks};
+use health_check_domain::Dependency;
 use health_check_infrastructure::CacheProbe;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
@@ -16,22 +18,33 @@ use some_module_application::{CreateExampleApiResourceHandler, GetExampleApiReso
 use some_module_domain::ExampleApiResourceRepository;
 use test_support::bus::RecordingEventBus;
 use test_support::cache::StubCache;
-use test_support::clock::FixedClock;
+use test_support::clock::{FixedClock, SettableClock};
 use test_support::id::SequenceUuidGenerator;
-use test_support::log::LogRecorder;
+use test_support::log::{LogLine, LogRecorder};
 use test_support::probe::StubProbe;
 use test_support::repository::InMemoryExampleApiResourceRepository;
 use test_support::static_topic::StaticTopic;
 use test_support::topic::{
     ProbeCall, ScriptedTopicProbe, ScriptedTopicReplay, ScriptedTopicTail, TailCall,
 };
+use tokio::task::JoinHandle;
 use tower::ServiceExt as _;
 
-use super::{Adapters, BootstrapError, event_bus, register_commands, register_queries, router};
+use self::wiring::{adapters_on, paced_on, record};
+use super::{
+    Adapters, BootstrapError, application, event_bus, register_commands, register_queries, router,
+};
+use crate::background::Running;
 use crate::cli::ServeArgs;
 use crate::config::Config;
 
 const FIRST_ID: &str = "00000000-0000-7000-8000-000000000001";
+
+/// The bound of every awaited call of a test that is not a single request.
+const LIMIT: Duration = Duration::from_secs(10);
+
+/// The event type the subscriptions of the tests ask for.
+const TYPE: &str = "user.created";
 
 struct Answer {
     status: StatusCode,
@@ -55,25 +68,18 @@ fn config(app_env: &str) -> Config {
     Config::from_args(args).unwrap()
 }
 
-fn healthy_probes() -> Vec<Arc<dyn HealthProbe>> {
-    vec![
-        Arc::new(StubProbe::healthy(Dependency::Database)),
-        Arc::new(StubProbe::healthy(Dependency::Cache)),
-        Arc::new(StubProbe::healthy(Dependency::MessageBroker)),
-    ]
+/// The adapters of a node on an empty `StaticTopic`; its tail reads the bare topic, so these
+/// adapters serve a router whose loop never runs.
+fn adapters() -> Adapters {
+    let topic = StaticTopic::empty();
+    adapters_on(&topic, Box::new(topic.clone()))
 }
 
-fn adapters() -> Adapters {
-    Adapters {
-        repository: Arc::new(InMemoryExampleApiResourceRepository::new()),
-        probes: healthy_probes(),
-        event_bus: event_bus(),
-        clock: Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),
-        uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
-        topic_probe: Arc::new(StaticTopic::empty()),
-        topic_tail: Box::new(StaticTopic::empty()),
-        topic_replay: Arc::new(StaticTopic::empty()),
-    }
+/// The adapters of a node on an empty `StaticTopic` whose tail awaits the fetch wait of the test
+/// configuration after each empty batch, so its running loop does not spin.
+fn paced() -> Adapters {
+    let topic = StaticTopic::empty();
+    paced_on(&topic, config("test").kafka.fetch_wait).0
 }
 
 fn app(adapters: Adapters) -> Router {
@@ -93,6 +99,146 @@ async fn send(app: &Router, request: Request<Body>) -> Answer {
     })
     .await
     .expect("the request answers in time")
+}
+
+/// The router of the application of `adapters` with its background work running, once the status
+/// route reports `ready` (bounded, 10 s). The polls are spaced by a timer, so paused time advances
+/// between them and the bound ends a node that never becomes ready.
+async fn ready(adapters: Adapters) -> (Router, Running) {
+    ready_with(adapters, &config("test")).await
+}
+
+/// [`ready`] with `config`.
+async fn ready_with(adapters: Adapters, config: &Config) -> (Router, Running) {
+    let application = application(adapters, config).unwrap();
+    let running = application.background.spawn();
+    let router = application.router;
+    tokio::time::timeout(LIMIT, async {
+        while !send(&router, get("/api/events/status"))
+            .await
+            .body
+            .contains(r#""state":"ready""#)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the node becomes ready");
+    (router, running)
+}
+
+/// Ends the background work within [`LIMIT`].
+async fn shut_down(running: Running) {
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+}
+
+/// The answer to `request` with its body unread: the body of a subscription does not end.
+async fn open(app: &Router, request: Request<Body>) -> Response<Body> {
+    tokio::time::timeout(LIMIT, app.clone().oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap()
+}
+
+/// The status and the headers of the answer to `request`; its body is dropped unread.
+async fn head(app: &Router, request: Request<Body>) -> (StatusCode, HeaderMap) {
+    let response = open(app, request).await;
+    (response.status(), response.headers().clone())
+}
+
+/// The subscription request of [`TYPE`] followed by `rest` in its query.
+fn stream(rest: &str) -> Request<Body> {
+    get(&format!("/api/events/stream?types={TYPE}{rest}"))
+}
+
+/// The SSE body of `response`, read by a task of its own into the returned text until the task
+/// is aborted or the body ends.
+fn read_events(response: Response<Body>) -> (Arc<Mutex<String>>, JoinHandle<()>) {
+    let read = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&read);
+    let mut body = response.into_body();
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(frame)) = body.frame().await {
+            if let Ok(data) = frame.into_data() {
+                sink.lock()
+                    .unwrap()
+                    .push_str(std::str::from_utf8(&data).unwrap());
+            }
+        }
+    });
+    (read, reader)
+}
+
+/// Lets every task run until all of them wait; paused time advances to each timer on the way.
+async fn settle() {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+}
+
+/// Waits until `condition` holds, within [`LIMIT`]; paused time advances while every task waits.
+async fn wait_until(condition: impl Fn() -> bool + Sync) {
+    tokio::time::timeout(LIMIT, async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the condition holds in time");
+}
+
+/// The time the settable clocks of the tests start at.
+fn start_time() -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(1_700_000_000))
+        .unwrap()
+}
+
+const fn marks(earliest: u64, end: u64) -> Watermarks {
+    Watermarks {
+        earliest: Cursor::new(earliest),
+        end: Cursor::new(end),
+    }
+}
+
+fn unavailable() -> TopicError {
+    TopicError::Unavailable("the broker refused the connection".into())
+}
+
+/// A batch of the events with ids 1 to 3 of [`TYPE`] at offsets 0 to 2.
+fn three_events() -> Batch {
+    Batch {
+        records: (0..3)
+            .zip(1..=3)
+            .map(|(offset, id)| TopicRecord {
+                offset: Offset::new(offset),
+                value: Some(record(id, TYPE, 0)),
+            })
+            .collect(),
+        next: Cursor::new(3),
+    }
+}
+
+/// The adapters of a node on the scripted topic readers, with the settable `clock`.
+fn scripted(
+    probe: &ScriptedTopicProbe,
+    tail: &ScriptedTopicTail,
+    clock: &SettableClock,
+) -> Adapters {
+    let mut adapters = adapters();
+    adapters.topic_probe = Arc::new(probe.clone());
+    adapters.topic_tail = Box::new(tail.clone());
+    adapters.clock = Arc::new(clock.clone());
+    adapters
+}
+
+/// The `health probe failed` entries of the recorder.
+fn probe_failures(recorder: &LogRecorder) -> Vec<LogLine> {
+    recorder
+        .lines()
+        .into_iter()
+        .filter(|line| line.message == "health probe failed")
+        .collect()
 }
 
 fn get(path: &str) -> Request<Body> {
@@ -120,9 +266,9 @@ fn graphql(query: &str) -> Request<Body> {
     )
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_handler_subscriber_and_probe_is_registered() {
-    let app = app(adapters());
+    let (app, running) = ready(paced()).await;
 
     let created = send(&app, create()).await;
     assert_eq!(created.status, StatusCode::CREATED);
@@ -149,6 +295,298 @@ async fn every_handler_subscriber_and_probe_is_registered() {
 
     let health = send(&app, get("/api/health")).await;
     assert_eq!(health.status, StatusCode::NO_CONTENT);
+    tokio::time::timeout(Duration::from_secs(5), running.shutdown())
+        .await
+        .expect("the shutdown ends");
+}
+
+#[tokio::test]
+async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
+    let (recorder, _guard) = LogRecorder::install();
+    let mut adapters = adapters();
+    adapters.probes = vec![
+        Arc::new(StubProbe::failing(Dependency::Database)),
+        Arc::new(StubProbe::failing(Dependency::Cache)),
+        Arc::new(StubProbe::failing(Dependency::MessageBroker)),
+    ];
+
+    let answer = send(&app(adapters), get("/api/health")).await;
+
+    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        answer.json()["failures"],
+        serde_json::json!([
+            {"dependency": "database", "message": "Database is not available"},
+            {"dependency": "cache", "message": "Cache is not working"},
+            {"dependency": "message_broker", "message": "Message broker is not available"},
+            {"dependency": "event_stream", "message": "Event stream is not ready"}
+        ])
+    );
+    let failed = probe_failures(&recorder);
+    let dependencies: Vec<_> = failed.iter().map(|line| line.field("dependency")).collect();
+    assert_eq!(
+        dependencies,
+        [
+            Some("database"),
+            Some("cache"),
+            Some("message_broker"),
+            Some("event_stream")
+        ]
+    );
+    assert_eq!(
+        failed[3].field("cause"),
+        Some("probe failed: the node is starting")
+    );
+}
+
+#[tokio::test]
+async fn the_configured_retry_delay_reaches_the_background() {
+    let mut args = ServeArgs {
+        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            retry_delay: Some("2500ms".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
+        ..ServeArgs::default()
+    };
+    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
+
+    let application = application(adapters(), &Config::from_args(args).unwrap()).unwrap();
+
+    assert_eq!(
+        application.background.retry_delay,
+        Duration::from_millis(2_500)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_ready_application_accepts_a_subscription_that_its_router_alone_refuses() {
+    let (app, running) = ready(paced()).await;
+    let starting = router(adapters(), &config("test")).unwrap();
+
+    let accepted = head(&app, stream("")).await;
+    let refused = send(&starting, stream("")).await;
+    let status = send(&app, get("/api/events/status")).await;
+    shut_down(running).await;
+    let closed = send(&app, stream("")).await;
+
+    assert_eq!(accepted.0, StatusCode::OK);
+    assert_eq!(accepted.1[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(refused.json()["detail"], "the node is starting");
+    assert_eq!(status.json()["state"], "ready");
+    assert_eq!(closed.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(closed.json()["detail"], "the node is shutting down");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_started_node_whose_watermark_reads_fail_past_the_bound_is_unready_and_still_subscribable()
+ {
+    let (recorder, _guard) = LogRecorder::install();
+    let clock = SettableClock::at(start_time());
+    let probe = ScriptedTopicProbe::new();
+    probe.push_partition_count(Ok(Some(1)));
+    probe.push_watermarks(Ok(marks(0, 0)));
+    probe.push_watermarks(Err(unavailable()));
+    let tail = ScriptedTopicTail::new();
+    tail.push_seek(Ok(()));
+    tail.push_fetch(Ok(Batch {
+        records: Vec::new(),
+        next: Cursor::START,
+    }));
+    let stale_after = config("test").streams.stale_after;
+    let (app, running) = ready(scripted(&probe, &tail, &clock)).await;
+    wait_until(|| tail.calls().len() == 3).await;
+
+    let observed = send(&app, get("/api/health")).await;
+    clock.set(start_time().checked_add(stale_after).unwrap());
+    let at_the_bound = send(&app, get("/api/health")).await;
+    let past = stale_after.checked_add(Duration::from_millis(1)).unwrap();
+    clock.set(start_time().checked_add(past).unwrap());
+    let unreachable = send(&app, get("/api/health")).await;
+    let subscription = head(&app, stream("")).await;
+    let status = send(&app, get("/api/events/status")).await;
+    shut_down(running).await;
+
+    assert_eq!(observed.status, StatusCode::NO_CONTENT, "{}", observed.body);
+    assert_eq!(at_the_bound.status, StatusCode::NO_CONTENT);
+    assert_eq!(unreachable.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        unreachable.json()["failures"],
+        serde_json::json!([{"dependency": "event_stream", "message": "Event stream is not ready"}])
+    );
+    let failed = probe_failures(&recorder);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].field("dependency"), Some("event_stream"));
+    assert_eq!(
+        failed[0].field("cause"),
+        Some("probe failed: the topic is unreachable")
+    );
+    assert_eq!(subscription.0, StatusCode::OK);
+    assert_eq!(subscription.1[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(status.json()["state"], "ready");
+    assert_eq!(status.json()["brokerReachable"], false);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_started_node_whose_tail_stays_behind_past_the_bound_is_unready_and_still_subscribable() {
+    let (recorder, _guard) = LogRecorder::install();
+    let clock = SettableClock::at(start_time());
+    let probe = ScriptedTopicProbe::new();
+    probe.push_partition_count(Ok(Some(1)));
+    probe.push_watermarks(Ok(marks(0, 0)));
+    probe.push_watermarks(Ok(marks(0, 5)));
+    probe.push_watermarks(Ok(marks(0, 5)));
+    let tail = ScriptedTopicTail::new();
+    tail.push_seek(Ok(()));
+    tail.push_fetch(Err(unavailable()));
+    tail.push_seek(Ok(()));
+    tail.push_fetch(Ok(Batch {
+        records: Vec::new(),
+        next: Cursor::START,
+    }));
+    tail.push_seek(Ok(()));
+    let stale_after = config("test").streams.stale_after;
+    let (app, running) = ready(scripted(&probe, &tail, &clock)).await;
+
+    // The tail caught up at the start time; the round after the retry pause observes the topic at
+    // the moved time while its position stays below the end.
+    let past = stale_after.checked_add(Duration::from_millis(1)).unwrap();
+    clock.set(start_time().checked_add(past).unwrap());
+    wait_until(|| tail.calls().len() == 6).await;
+    let behind = send(&app, get("/api/health")).await;
+    let subscription = head(&app, stream("")).await;
+    let status = send(&app, get("/api/events/status")).await;
+    shut_down(running).await;
+
+    assert_eq!(
+        tail.calls(),
+        [
+            TailCall::Seek(Cursor::START),
+            TailCall::Fetch,
+            TailCall::Seek(Cursor::START),
+            TailCall::Fetch,
+            TailCall::Seek(Cursor::START),
+            TailCall::Fetch
+        ]
+    );
+    assert_eq!(behind.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        behind.json()["failures"],
+        serde_json::json!([{"dependency": "event_stream", "message": "Event stream is not ready"}])
+    );
+    let failed = probe_failures(&recorder);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        failed[0].field("cause"),
+        Some("probe failed: the event tail is behind")
+    );
+    assert_eq!(subscription.0, StatusCode::OK);
+    assert_eq!(subscription.1[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(status.json()["state"], "ready");
+    assert_eq!(status.json()["position"], "0");
+    assert_eq!(status.json()["endOffset"], "5");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cursor_below_the_window_replays_through_the_replay_port_under_the_replay_permits() {
+    let probe = ScriptedTopicProbe::new();
+    probe.push_partition_count(Ok(Some(1)));
+    probe.push_watermarks(Ok(marks(0, 3)));
+    let tail = ScriptedTopicTail::new();
+    tail.push_seek(Ok(()));
+    tail.push_fetch(Ok(three_events()));
+    let replay = ScriptedTopicReplay::new();
+    let mut adapters = scripted(&probe, &tail, &SettableClock::at(start_time()));
+    adapters.topic_replay = Arc::new(replay.clone());
+    let mut config = config("test");
+    config.streams.window_max_events = 1;
+    config.streams.replay_permits = 1;
+    let (app, running) = ready_with(adapters, &config).await;
+
+    let first = open(&app, stream("&lastEventId=0")).await;
+    let (first_read, first_reader) = read_events(first);
+    settle().await;
+    let holding = replay.calls();
+    let second = open(&app, stream("&lastEventId=0")).await;
+    let (second_read, second_reader) = read_events(second);
+    settle().await;
+    let waiting = replay.calls();
+    replay.push_page(Ok(three_events()));
+    first_reader.abort();
+    settle().await;
+    let read = second_read.lock().unwrap().clone();
+    second_reader.abort();
+    shut_down(running).await;
+
+    assert_eq!(holding, [Cursor::START]);
+    assert_eq!(
+        waiting,
+        [Cursor::START],
+        "the second replay waits for the only permit"
+    );
+    assert_eq!(replay.calls(), [Cursor::START, Cursor::START]);
+    assert!(!first_read.lock().unwrap().contains("id: "));
+    let at = |id: &str| read.find(&format!("id: {id}\nevent: {TYPE}\n"));
+    assert!(at("1").is_some(), "{read}");
+    assert!(at("1") < at("2") && at("2") < at("3"), "{read}");
+}
+
+/// The cost of the window of an event of [`TYPE`] whose record is `value`: its JSON object (the
+/// record itself), its type and 128 bytes (FR-13).
+fn window_cost(value: &[u8]) -> usize {
+    value
+        .len()
+        .checked_add(TYPE.len())
+        .and_then(|bytes| bytes.checked_add(128))
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_window_keeps_the_newest_events_that_fit_its_byte_bound() {
+    let padded = |n: u64| record(n, TYPE, 1_000);
+    let probe = ScriptedTopicProbe::new();
+    probe.push_partition_count(Ok(Some(1)));
+    probe.push_watermarks(Ok(marks(0, 3)));
+    let tail = ScriptedTopicTail::new();
+    tail.push_seek(Ok(()));
+    tail.push_fetch(Ok(Batch {
+        records: (0..3)
+            .zip(1..=3)
+            .map(|(offset, n)| TopicRecord {
+                offset: Offset::new(offset),
+                value: Some(padded(n)),
+            })
+            .collect(),
+        next: Cursor::new(3),
+    }));
+    let replay = ScriptedTopicReplay::new();
+    let mut adapters = scripted(&probe, &tail, &SettableClock::at(start_time()));
+    adapters.topic_replay = Arc::new(replay.clone());
+    let mut config = config("test");
+    config.streams.window_max_events = 100;
+    config.streams.window_max_bytes = window_cost(&padded(1)).checked_mul(2).unwrap();
+    let (app, running) = ready_with(adapters, &config).await;
+
+    let held = open(&app, stream("&lastEventId=1")).await;
+    let (held_read, held_reader) = read_events(held);
+    wait_until(|| held_read.lock().unwrap().contains("id: 3\n")).await;
+    let after_held = replay.calls();
+    let evicted = open(&app, stream("&lastEventId=0")).await;
+    let (evicted_read, evicted_reader) = read_events(evicted);
+    settle().await;
+    let after_evicted = replay.calls();
+    let read = held_read.lock().unwrap().clone();
+    held_reader.abort();
+    evicted_reader.abort();
+    shut_down(running).await;
+
+    assert_eq!(after_held, Vec::<Cursor>::new(), "the window held id 2");
+    assert_eq!(after_evicted, [Cursor::START], "the window evicted id 1");
+    let at = |id: &str| read.find(&format!("id: {id}\nevent: {TYPE}\n"));
+    assert!(at("2").is_some() && at("2") < at("3"), "{read}");
+    assert!(!read.contains("id: 1\n"), "{read}");
+    assert!(!evicted_read.lock().unwrap().contains("id: "));
 }
 
 #[tokio::test]

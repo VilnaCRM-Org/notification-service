@@ -1,5 +1,5 @@
-//! The composition root: configuration, command line, wiring of the layer crates, router assembly
-//! and the process entry point `run`.
+//! The composition root: configuration, command line, wiring of the layer crates, router assembly,
+//! the supervised background work of the event stream and the process entry point `run`.
 
 use std::process::ExitCode;
 
@@ -7,10 +7,12 @@ use clap::Parser as _;
 
 use crate::cli::Cli;
 
+pub mod background;
 pub mod bootstrap;
 pub mod cli;
 pub mod command;
 pub mod config;
+pub mod event_stream_probe;
 pub mod graphql;
 pub mod http;
 pub mod openapi;

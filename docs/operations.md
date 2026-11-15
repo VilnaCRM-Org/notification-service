@@ -115,13 +115,26 @@ Checks:
 3. From the service's network run the AWS CLI against the same endpoint, for example `aws sqs list-queues --max-items 1 --endpoint-url "$AWS_ENDPOINT_URL_SQS"`.
 4. In AWS check the role policy for `sqs:ListQueues`.
 
+### `Event stream is not ready`
+
+Wire identifier: `dependency` is `event_stream`. The probe reads no broker: it reads the state the tail of this node publishes after every round and passes while the node is started and its last successful watermark read and its last catch-up to the end of the topic are each at most `EVENT_TAIL_STALE_AFTER` (default 10 seconds) old.
+
+The `cause` of the `health probe failed` line names the first reason that holds:
+
+- `the topic is unreachable`, `the topic does not exist` or `the topic must have exactly one partition`: the start-up fault of the tail (see the entries `event topic unreachable` and `event topic invalid`);
+- `the node is starting`: the tail has not reached its start goal yet;
+- `the topic is unreachable`: the watermark reads of a started node have failed for longer than `EVENT_TAIL_STALE_AFTER`;
+- `the event tail is behind`: the position of a started node has stayed below the end of the topic for longer than `EVENT_TAIL_STALE_AFTER`.
+
+A started node whose probe fails still accepts subscriptions. Check `GET /api/events/status` (`state`, `reason`, `brokerReachable`, `lag`) and the reachability of `KAFKA_BOOTSTRAP_SERVERS` from the service's network.
+
 ### Several failures at once
 
-When more than one probe fails, `detail` lists all messages in registration order (database, cache, message broker) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
+When more than one probe fails, `detail` lists all messages in registration order (database, cache, message broker, event stream) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
 
 ### Starting without dependencies
 
-`serve` does not wait for dependencies. With the database and the SQS endpoint down, `/ping` answers at once and `/api/health` answers with the problem document within about 2 seconds, naming both. This is the intended behaviour, not a failure of the service.
+`serve` does not wait for dependencies. With the database, the SQS endpoint and the Kafka broker down, `/ping` answers at once and `/api/health` answers with the problem document within about 2 seconds, naming the three, and the log shows `event topic unreachable` once. This is the intended behaviour, not a failure of the service.
 
 ## Logs and request ids
 
@@ -150,13 +163,14 @@ Fixed messages:
 | `event publication failed` | ERROR | `event_name`, `event_id`, `error` | one per failing subscriber, `error` is the whole error chain joined by a colon and a space; the request still succeeds |
 | `domain event` | INFO, target `audit` | `event_name`, `event_id`, `aggregate_id`, `occurred_at` | the audit subscriber |
 | `shutdown signal received` | INFO | `signal` | start of the shutdown sequence |
+| `background task failed` | ERROR | `task` (`tail`) | the tail loop died; the shutdown sequence runs and `serve` then logs `serve failed` and exits with status 1 |
 | `grace period elapsed, forcing shutdown` | WARN | `grace_period` | `serve` then exits with status 1 |
 | `stopped` | INFO | none | `serve` then exits with status 0 |
 | `serve failed` | ERROR | `error` | bind or runtime failure; `serve` then exits with status 1 |
 
 Lines written outside a request (start-up, shutdown) carry no request span; the AWS SDK writes a few start-up entries at `debug` level inside spans of its own.
 
-The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,sqlx=warn,audit=info`. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and `DATABASE_URL` are never logged.
+The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,sqlx=warn,audit=info`. The directive `krafka=error` is always added: the Kafka client writes errors only, and the entries of the event tail report its states. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and `DATABASE_URL` are never logged.
 
 ### Request ids
 
@@ -171,8 +185,12 @@ A client that reports a problem should quote the `x-request-id` of the response;
 ## Shutdown sequence
 
 1. At t = 0 the process receives SIGTERM or SIGINT and logs `shutdown signal received`. The listener closes: new connections are refused within about 10 milliseconds. In-flight requests continue.
-2. When the last in-flight request has completed, the process logs `stopped` and exits with status 0. An idle service exits within 2 seconds.
-3. At t = `SHUTDOWN_GRACE_PERIOD` (default 10 seconds) with a connection still open, the process logs `grace period elapsed, forcing shutdown` at `WARN`, drops the remaining connections and exits with status 1 within 2 seconds.
+2. The tail loop stops at once; a broker call in flight is cut.
+3. The hub closes: every SSE response ends after its queued events, every WebSocket gets its queued frames and the close code 1001, and a subscription request answers the 503 problem `the node is shutting down`. The process waits at most 2 seconds for the streams to end; a WebSocket client that takes no data is then left behind and cut without its close frame when the process exits.
+4. When the last in-flight request has completed, the process logs `stopped` and exits with status 0. An idle service exits within 2 seconds, also with the broker down.
+5. At t = `SHUTDOWN_GRACE_PERIOD` (default 10 seconds) with a connection still open, the process logs `grace period elapsed, forcing shutdown` at `WARN`, drops the remaining connections and exits with status 1 within 2 seconds.
+
+A tail loop that dies (`background task failed`) runs the same sequence from step 2 and ends with `serve failed` and exit status 1.
 
 An exit status 1 after a deployment therefore means that at least one request was cut off by the end of the grace period. Check the access log for requests that did not log `request completed`, and consider raising `SHUTDOWN_GRACE_PERIOD` or lowering `HTTP_REQUEST_TIMEOUT` (default 10 seconds). A bind failure or runtime failure also exits with status 1 and logs `serve failed`. Status 2 is always an invalid configuration.
 

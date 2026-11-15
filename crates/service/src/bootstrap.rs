@@ -1,16 +1,17 @@
 //! The composition root: the only place where adapters meet use cases (AD-04).
 //!
-//! [`Adapters`] holds every driven port; [`router`] registers the handlers and builds the
-//! application from it, so a test replaces any port by assigning a field or calling
-//! [`Adapters::with_probe`].
+//! [`Adapters`] holds every driven port; [`application`] registers the handlers and builds the
+//! router and the background work of the event stream from it, so a test replaces any port by
+//! assigning a field or calling [`Adapters::with_probe`].
 
 use std::sync::Arc;
 
 use axum::Router;
 use event_stream_application::http::EventStreamState;
+use event_stream_application::tail::TailEvents;
 use event_stream_application::{
-    EventCatalog, Hub, HubSettings, ListEventTypesHandler, ReplaySettings, StatusSource,
-    StreamSettings, Subscriptions, TailState, Window,
+    EventCatalog, EventPublisher, Hub, HubSettings, ListEventTypesHandler, ReplaySettings,
+    StatusSource, StreamSettings, Subscriptions, TailPorts, TailSettings, TailState, Window,
 };
 use event_stream_domain::{TopicProbe, TopicReplay, TopicTail};
 use event_stream_infrastructure::KafkaTopic;
@@ -37,7 +38,9 @@ use some_module_infrastructure::PgExampleApiResourceRepository;
 
 use tokio::sync::watch;
 
+use crate::background::Background;
 use crate::config::{Config, StreamConfig};
+use crate::event_stream_probe::EventStreamProbe;
 use crate::graphql::schema;
 use crate::http::AppState;
 use crate::http::router::assemble;
@@ -146,17 +149,59 @@ fn register_queries(
     Ok(bus.register(get)?.register(list)?.register(event_types)?)
 }
 
-/// The state of the event stream routes; the subscriptions replay through `replay`.
-///
-/// Until the tail is wired (story 3.8) the status and the subscriptions read a hub that is never
-/// started and a tail state that stays `TailState::default()`, so the status reports `starting`
-/// with `catching-up`, the streaming routes answer the 503 problem `the node is starting` and no
-/// broker is contacted.
-fn event_stream_state(
+/// The event stream of a node: the state of its routes, the receiver of its tail state and the
+/// background work that feeds them.
+struct EventStream {
+    state: EventStreamState,
+    tail_state: watch::Receiver<TailState>,
+    background: Background,
+}
+
+/// The tail on `ports`, which feeds `window` and `hub`, and the receiver of its state.
+fn tail_events(
+    streams: &StreamConfig,
+    ports: TailPorts,
+    window: &Arc<Window>,
+    hub: &Arc<Hub>,
+) -> (TailEvents, watch::Receiver<TailState>) {
+    let publisher: Arc<dyn EventPublisher> = Arc::<Hub>::clone(hub);
+    let settings = TailSettings {
+        max_data_bytes: streams.max_data_bytes,
+        start_events: streams.start_events,
+    };
+    TailEvents::new(ports, Arc::clone(window), publisher, settings)
+}
+
+/// The subscriptions of the streaming routes; their replays read `replay`.
+fn subscriptions(
+    streams: &StreamConfig,
+    hub: &Arc<Hub>,
+    window: &Arc<Window>,
+    replay: Arc<dyn TopicReplay>,
+    tail_state: &watch::Receiver<TailState>,
+) -> Arc<Subscriptions> {
+    let settings = ReplaySettings {
+        max_events: streams.replay_max_events,
+        max_data_bytes: streams.max_data_bytes,
+        permits: streams.replay_permits,
+    };
+    Arc::new(Subscriptions::new(
+        Arc::<Hub>::clone(hub),
+        Arc::clone(window),
+        replay,
+        tail_state.clone(),
+        settings,
+    ))
+}
+
+/// Wires the window, the hub, the tail on `ports`, the subscriptions on `replay`, the status and
+/// the background work of the event stream.
+fn event_stream(
     query_bus: Arc<dyn QueryBus>,
     streams: &StreamConfig,
+    ports: TailPorts,
     replay: Arc<dyn TopicReplay>,
-) -> EventStreamState {
+) -> EventStream {
     let window = Arc::new(Window::new(
         streams.window_max_events,
         streams.window_max_bytes,
@@ -165,45 +210,56 @@ fn event_stream_state(
         max_subscribers: streams.max_subscribers,
         buffer: streams.buffer,
     });
-    let (_tail_sender, tail_state) = watch::channel(TailState::default());
-    let subscriptions = Arc::new(Subscriptions::new(
-        Arc::<Hub>::clone(&hub),
-        Arc::<Window>::clone(&window),
-        replay,
-        tail_state.clone(),
-        ReplaySettings {
-            max_events: streams.replay_max_events,
-            max_data_bytes: streams.max_data_bytes,
-            permits: streams.replay_permits,
-        },
-    ));
+    let (tail, tail_state) = tail_events(streams, ports, &window, &hub);
+    let subscriptions = subscriptions(streams, &hub, &window, replay, &tail_state);
     let status = Arc::new(StatusSource::new(
-        tail_state,
+        tail_state.clone(),
         window,
         Arc::<Hub>::clone(&hub),
     ));
-    EventStreamState {
+    let state = EventStreamState {
         query_bus,
         subscriptions,
         status,
-        hub,
+        hub: Arc::clone(&hub),
         settings: StreamSettings {
             keep_alive: streams.keep_alive,
+        },
+    };
+    EventStream {
+        state,
+        tail_state,
+        background: Background {
+            tail,
+            hub,
+            retry_delay: streams.retry_delay,
         },
     }
 }
 
-/// Registers every handler, builds the command and query buses, the state, the `GraphQL` schema
-/// and the router with its middleware.
+/// The router of a node and the background work that serves its event stream.
+#[derive(Debug)]
+pub struct Application {
+    /// Every route with its middleware.
+    pub router: Router,
+    /// The tail loop and the hub; nothing runs until [`Background::spawn`].
+    pub background: Background,
+}
+
+/// Builds the router and the background work of the event stream from `adapters`.
+///
+/// It registers every handler, builds the command and query buses, the event stream, the state,
+/// the `GraphQL` schema and the router with its middleware. Nothing here touches the network. The
+/// health probes are those of `adapters` followed by the probe of the event stream.
 ///
 /// # Errors
 ///
 /// Returns [`BootstrapError::DuplicateHandler`] when a message has two handlers.
-pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapError> {
+pub fn application(adapters: Adapters, config: &Config) -> Result<Application, BootstrapError> {
     let create = CreateExampleApiResourceHandler::new(
         Arc::clone(&adapters.repository),
         adapters.event_bus,
-        adapters.clock,
+        Arc::clone(&adapters.clock),
         Arc::clone(&adapters.uuid_generator),
     );
     let command_bus = register_commands(InMemoryCommandBus::new(), create)?;
@@ -211,14 +267,51 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
     let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository, catalog)?;
     let commands: Arc<dyn CommandBus> = Arc::new(command_bus);
     let queries: Arc<dyn QueryBus> = Arc::new(query_bus);
-    let event_stream =
-        event_stream_state(Arc::clone(&queries), &config.streams, adapters.topic_replay);
+    let ports = TailPorts {
+        probe: adapters.topic_probe,
+        tail: adapters.topic_tail,
+        clock: Arc::clone(&adapters.clock),
+    };
+    let stream = event_stream(
+        Arc::clone(&queries),
+        &config.streams,
+        ports,
+        adapters.topic_replay,
+    );
     let some_module = SomeModuleState {
         command_bus: commands,
         query_bus: queries,
         uuid_generator: adapters.uuid_generator,
     };
-    let service = HealthService::new(adapters.probes, config.health_probe_timeout);
+    let readiness = EventStreamProbe::new(
+        stream.tail_state,
+        adapters.clock,
+        config.streams.stale_after,
+    );
+    let router = assemble_router(
+        some_module,
+        stream.state,
+        adapters.probes,
+        readiness,
+        config,
+    );
+    Ok(Application {
+        router,
+        background: stream.background,
+    })
+}
+
+/// The health service over `probes` and the probe of the event stream, the `GraphQL` schema and
+/// the router with its middleware.
+fn assemble_router(
+    some_module: SomeModuleState,
+    event_stream: EventStreamState,
+    mut probes: Vec<Arc<dyn HealthProbe>>,
+    readiness: EventStreamProbe,
+    config: &Config,
+) -> Router {
+    probes.push(Arc::new(readiness));
+    let service = HealthService::new(probes, config.health_probe_timeout);
     let health_check = HealthCheckState {
         service: Arc::new(service),
     };
@@ -231,8 +324,20 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
         some_module,
         event_stream,
     };
-    Ok(assemble(state, schema, config))
+    assemble(state, schema, config)
+}
+
+/// The router of [`application`] without its background work.
+///
+/// The tail of such a router never runs, so its streaming routes answer the 503 problem `the node
+/// is starting` and the probe `event_stream` fails, while every other route works.
+///
+/// # Errors
+///
+/// Returns [`BootstrapError::DuplicateHandler`] when a message has two handlers.
+pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapError> {
+    application(adapters, config).map(|application| application.router)
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
