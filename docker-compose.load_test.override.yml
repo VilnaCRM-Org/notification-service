@@ -12,3 +12,6 @@ services:
   localstack:
     ports: !reset []
     restart: 'no'
+  kafka:
+    ports: !reset []
+    restart: 'no'

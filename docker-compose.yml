@@ -16,6 +16,8 @@ services:
         condition: service_completed_successfully
       localstack:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-prod}
       APP_PORT: '8081'
@@ -26,6 +28,7 @@ services:
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_ENDPOINT_URL_SQS: http://localstack:4566
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - '${APP_PORT:-8081}:8081'
     healthcheck:
@@ -92,6 +95,45 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  kafka:
+    image: apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40
+    environment:
+      # One KRaft node that is broker and controller. PLAINTEXT serves the compose network (the app), INTERNAL
+      # the broker's own tools and health check, EXTERNAL the host through docker-compose.kafka-host.yml.
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093,EXTERNAL://:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,INTERNAL://localhost:9094,EXTERNAL://localhost:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      # The image writes its log to /tmp otherwise; the volume keeps the topic and its records across restarts.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      # Creates the topic the service reads and is healthy only when it exists with exactly one partition.
+      test:
+        - CMD-SHELL
+        - >-
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists
+          --topic notifications --partitions 1 --replication-factor 1 > /dev/null
+          && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic notifications
+          | grep -Eq 'PartitionCount:[[:space:]]*1[[:space:]]'
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 60s
+      start_interval: 5s
+    restart: unless-stopped
+
 volumes:
   db_data:
   localstack_data:
+  kafka_data:
