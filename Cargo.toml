@@ -63,6 +63,7 @@ clap = { version = "4.6.7", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 humantime = "2.4.0"
+krafka = { version = "=0.32.0", default-features = false, features = ["rustls-aws-lc-rs"] }
 moka = { version = "0.12.16", features = ["future"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

@@ -8,6 +8,9 @@ workspace "Service architecture" "C4 model of the service: system context, conta
         messageBroker = softwareSystem "Message broker" "Amazon SQS, or LocalStack in development." {
             tags "External"
         }
+        kafka = softwareSystem "Kafka" "The VilnaCRM event bus; the notifications topic." {
+            tags "External"
+        }
         system = softwareSystem "Service" "A VilnaCRM service built from the Rust service template." {
             database = container "Database" "Stores the data of every bounded context." "PostgreSQL 16" {
                 tags "Database"
@@ -60,7 +63,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Notification/EventStream/Infrastructure" {
-                        eventStreamInfrastructure = component "event-stream-infrastructure" "The Kafka connection settings of the event stream; no adapter yet." "Rust crate" {
+                        eventStreamInfrastructure = component "event-stream-infrastructure" "The Kafka adapter of the topic ports: metadata, watermarks, tail and replay readers, and the Kafka connection settings." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -110,6 +113,8 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 eventStreamApplication -> eventStreamDomain "Pages the catalog of event types"
                 eventStreamApplication -> sharedDomain "Answers through the query bus ports"
                 eventStreamApplication -> sharedApplication "Uses extractors and problem documents"
+                eventStreamInfrastructure -> eventStreamDomain "Implements the topic ports"
+                eventStreamInfrastructure -> sharedDomain "Uses the shared error type"
                 someModuleInfrastructure -> someModuleDomain "Implements the repository port"
                 someModuleInfrastructure -> sharedDomain "Uses shared value objects"
                 sharedInfrastructure -> database "Opens the connection pool and applies migrations" "SQL over TCP"
@@ -119,6 +124,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
         }
         apiClient -> system.service "Calls the REST and GraphQL API" "HTTP, JSON"
         system.service.healthCheckInfrastructure -> messageBroker "Calls ListQueues" "HTTPS, AWS SDK"
+        system.service.eventStreamInfrastructure -> kafka "Reads the notifications topic from" "Kafka protocol, krafka"
     }
     views {
         systemContext system "SystemContext" "The service, its callers and the systems it depends on." {
