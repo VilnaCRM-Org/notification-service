@@ -41,7 +41,15 @@ external = [
     "uuid",
     "validator",
 ]
-dev_external = ["http-body-util", "proptest", "rstest", "serde_json", "tokio", "tokio-tungstenite", "tower"]
+dev_external = [
+    "http-body-util",
+    "proptest",
+    "rstest",
+    "serde_json",
+    "tokio",
+    "tokio-tungstenite",
+    "tower",
+]
 forbidden_transitive = ["aws-config", "aws-sdk-sqs", "moka", "sqlx"]
 
 [[layer]]
