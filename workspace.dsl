@@ -50,7 +50,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 }
                 group "Notification/EventStream" {
                     group "Notification/EventStream/Domain" {
-                        eventStreamDomain = component "event-stream-domain" "EventType value object and the domain errors of the event stream." "Rust crate" {
+                        eventStreamDomain = component "event-stream-domain" "Event, cursor and offset value objects, the domain errors and the topic ports of the event stream." "Rust crate" {
                             tags "Domain"
                         }
                     }
@@ -60,7 +60,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Notification/EventStream/Infrastructure" {
-                        eventStreamInfrastructure = component "event-stream-infrastructure" "Adapters of the event stream; none yet." "Rust crate" {
+                        eventStreamInfrastructure = component "event-stream-infrastructure" "The Kafka connection settings of the event stream; no adapter yet." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -93,6 +93,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 compositionRoot -> someModuleDomain "Holds the repository behind the repository port"
                 compositionRoot -> eventStreamApplication "Mounts the event catalog route and registers its handler"
                 compositionRoot -> eventStreamDomain "Parses EVENT_TYPES into event types"
+                compositionRoot -> eventStreamInfrastructure "Parses the Kafka settings"
                 sharedApplication -> sharedDomain "Uses bus errors"
                 sharedInfrastructure -> sharedDomain "Implements bus, cache, clock and UUID ports"
                 healthCheckDomain -> sharedDomain "Uses the shared error type"
@@ -105,6 +106,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 someModuleApplication -> someModuleDomain "Uses the aggregate and the repository port"
                 someModuleApplication -> sharedDomain "Dispatches through the bus ports"
                 someModuleApplication -> sharedApplication "Uses extractors and problem documents"
+                eventStreamDomain -> sharedDomain "Uses the shared error type in the topic ports"
                 eventStreamApplication -> eventStreamDomain "Pages the catalog of event types"
                 eventStreamApplication -> sharedDomain "Answers through the query bus ports"
                 eventStreamApplication -> sharedApplication "Uses extractors and problem documents"

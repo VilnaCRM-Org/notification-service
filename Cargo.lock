@@ -1546,9 +1546,12 @@ dependencies = [
 name = "event-stream-domain"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "proptest",
  "rstest",
+ "shared-domain",
  "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -3309,6 +3312,7 @@ dependencies = [
  "dotenvy",
  "event-stream-application",
  "event-stream-domain",
+ "event-stream-infrastructure",
  "health-check-application",
  "health-check-domain",
  "health-check-infrastructure",

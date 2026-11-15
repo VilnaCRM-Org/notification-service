@@ -5,7 +5,16 @@
 //! kernel, never another bounded context.
 
 pub mod error;
+pub mod event;
+pub mod port;
 pub mod value_object;
 
-pub use error::InvalidEvent;
+pub use error::{InvalidCursor, InvalidEvent};
+pub use event::StoredEvent;
+pub use port::topic::{Batch, TopicError, TopicProbe, TopicRecord, TopicReplay, TopicTail};
+pub use value_object::cursor::Cursor;
 pub use value_object::event_type::EventType;
+pub use value_object::offset::Offset;
+pub use value_object::page_limit::PageLimit;
+pub use value_object::sequence::Sequence;
+pub use value_object::watermarks::Watermarks;

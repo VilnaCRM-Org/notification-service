@@ -9,7 +9,10 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+shared-domain.workspace = true
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
