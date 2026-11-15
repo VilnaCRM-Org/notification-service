@@ -13,6 +13,9 @@ use super::*;
 
 const APP: &str = "https://app.example.com";
 const OTHER: &str = "https://other.example.com";
+/// The `Sec-WebSocket-Key` of the test handshakes: sixteen zero bytes in base64, a valid key that
+/// no secrets scanner takes for a credential.
+const HANDSHAKE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
 
 struct Answer {
     status: StatusCode,
@@ -56,7 +59,7 @@ async fn send(app: &Router, request: Request<Body>) -> Answer {
 }
 
 fn handshake(origin: Option<&str>) -> Request<Body> {
-    let mut builder = Request::get("/x").header(SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==");
+    let mut builder = Request::get("/x").header(SEC_WEBSOCKET_KEY, HANDSHAKE_KEY);
     if let Some(origin) = origin {
         builder = builder.header(ORIGIN, origin);
     }

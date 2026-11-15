@@ -549,6 +549,9 @@ fn the_extractor_check_accepts_the_allowed_extractors() {
 }
 
 const ORIGIN: &str = "https://app.example.com";
+/// The `Sec-WebSocket-Key` of the test handshakes: sixteen zero bytes in base64, a valid key that
+/// no secrets scanner takes for a credential.
+const HANDSHAKE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
 
 fn config_with_origins(origins: crate::config::AllowedOrigins) -> Config {
     let mut config = config("test");
@@ -768,7 +771,7 @@ async fn a_websocket_handshake_from_a_refused_origin_is_the_403_problem() {
     let app = router(adapters(), &config("test")).unwrap();
     let request = Request::get("/api/event-types")
         .header(header::ORIGIN, ORIGIN)
-        .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
         .body(Body::empty())
         .unwrap();
 
@@ -786,7 +789,7 @@ async fn the_cors_layer_wraps_the_refusal_of_a_websocket_handshake() {
     let app = router(adapters(), &config_with_origins(origins)).unwrap();
     let request = Request::get("/api/event-types")
         .header(header::ORIGIN, "https://other.example.com")
-        .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ==")
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
         .body(Body::empty())
         .unwrap();
 
