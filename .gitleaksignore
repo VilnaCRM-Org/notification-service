@@ -3,3 +3,12 @@
 #   # <date of acceptance>: <reason>. Review by <review date, at most three months later>.
 #   <commit>:<file>:<rule>:<line>      (history finding) or <file>:<rule>:<line> (working file)
 # A real secret is never accepted: revoke and rotate it, then remove it from the history.
+
+# 2026-11-15: RFC 6455 sample nonce used as a Sec-WebSocket-Key in a handshake test of commit 924c561; not a credential; replaced in c83776e. Review by 2027-02-15.
+924c56165aff59d1a3bbdcf4c381b4d5e156fe09:crates/service/src/http/origin/tests.rs:generic-api-key:59
+
+# 2026-11-15: RFC 6455 sample nonce used as a Sec-WebSocket-Key in a handshake test of commit 924c561; not a credential; replaced in c83776e. Review by 2027-02-15.
+924c56165aff59d1a3bbdcf4c381b4d5e156fe09:crates/service/src/http/router/tests.rs:generic-api-key:771
+
+# 2026-11-15: RFC 6455 sample nonce used as a Sec-WebSocket-Key in a handshake test of commit 924c561; not a credential; replaced in c83776e. Review by 2027-02-15.
+924c56165aff59d1a3bbdcf4c381b4d5e156fe09:crates/service/src/http/router/tests.rs:generic-api-key:789
