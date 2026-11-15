@@ -5,11 +5,12 @@
 )]
 
 use async_graphql::{EmptySubscription, MergedObject, SDLExportOptions, Schema, SchemaBuilder};
+use event_stream_application::graphql::EventStreamQuery;
 use some_module_application::graphql::{ExampleApiResourceMutation, ExampleApiResourceQuery};
 
 /// Query root.
 #[derive(Debug, MergedObject, Default)]
-pub struct Query(ExampleApiResourceQuery);
+pub struct Query(ExampleApiResourceQuery, EventStreamQuery);
 
 /// Mutation root.
 #[derive(Debug, MergedObject, Default)]

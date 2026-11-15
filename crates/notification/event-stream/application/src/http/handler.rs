@@ -5,7 +5,7 @@ use axum::extract::State;
 use shared_application::http::{Problem, ValidatedQuery};
 
 use super::EventStreamState;
-use super::dto::{EventTypeResponse, ListEventTypesParams};
+use super::dto::{EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams};
 use crate::query::EventTypeView;
 
 /// Reads one page of the catalog for the parameters.
@@ -44,6 +44,25 @@ pub async fn list_event_types(
     Ok(Json(
         views.into_iter().map(EventTypeResponse::from).collect(),
     ))
+}
+
+/// Retrieves the status of the event stream on the answering instance.
+#[utoipa::path(
+    get,
+    path = "/events/status",
+    operation_id = "api_events_status_get",
+    tag = "EventStream",
+    summary = "Retrieves the event stream status.",
+    description = "Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.",
+    responses(
+        (status = 200, description = "EventStreamStatus resource", body = EventStreamStatusResponse),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+    )
+)]
+pub async fn event_stream_status(
+    State(state): State<EventStreamState>,
+) -> Json<EventStreamStatusResponse> {
+    Json(state.status.snapshot().into())
 }
 
 #[cfg(test)]

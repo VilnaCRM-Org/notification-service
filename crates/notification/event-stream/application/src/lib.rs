@@ -1,15 +1,16 @@
 //! Bounded context `event-stream`, application layer: the catalog of subscribable event types, its
 //! query and handler, the memory window of recent events, the types of the tail, the node status,
-//! the application errors and the API-facing adapter (`http`, with the frames of the streaming
-//! transports and the hub of this node).
+//! the application errors and the API-facing adapters (`http`, with the frames of the streaming
+//! transports and the hub of this node, and `graphql`, with the catalog and status queries).
 //!
 //! This crate depends on the domain layer of its own context and of the shared kernel, never on the
 //! infrastructure layer. Module rule: the use-case modules (`catalog`, `query`, `window`, `tail`,
-//! `status`, `error`) do not import `axum`, `utoipa` or `async_graphql`; only `http` (and a
-//! `graphql` module) may.
+//! `status`, `error`) do not import `axum`, `utoipa` or `async_graphql`; only `http` and `graphql`
+//! may.
 
 pub mod catalog;
 pub mod error;
+pub mod graphql;
 pub mod http;
 pub mod query;
 pub mod status;

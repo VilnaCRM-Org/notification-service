@@ -23,6 +23,13 @@ fn json_document() -> Value {
     ("Retrieves the collection of EventType resources.", "Returns one page of the subscribable event types, in byte order of their names.", "200 400 422 default")
 )]
 #[case(
+    "/api/events/status",
+    "get",
+    "api_events_status_get",
+    "EventStream",
+    ("Retrieves the event stream status.", "Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.", "200 default")
+)]
+#[case(
     "/api/example_api_resources",
     "get",
     "api_example_api_resources_get",
@@ -77,7 +84,7 @@ fn documents_every_operation(
 }
 
 #[test]
-fn documents_exactly_the_five_operations() {
+fn documents_exactly_the_six_operations() {
     let json = json_document();
     let mut operations = Vec::new();
     for (path, item) in json["paths"].as_object().unwrap() {
@@ -90,6 +97,7 @@ fn documents_exactly_the_five_operations() {
         operations,
         [
             "get /api/event-types",
+            "get /api/events/status",
             "get /api/example_api_resources",
             "post /api/example_api_resources",
             "get /api/example_api_resources/{id}",
@@ -170,7 +178,7 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
 }
 
 #[test]
-fn defines_exactly_the_six_schemas() {
+fn defines_exactly_the_seven_schemas() {
     let json = json_document();
     let schemas = json["components"]["schemas"].as_object().unwrap();
 
@@ -180,6 +188,7 @@ fn defines_exactly_the_six_schemas() {
         [
             "CreateExampleApiResourceRequest",
             "DependencyFailure",
+            "EventStreamStatus",
             "EventType",
             "ExampleApiResource",
             "Problem",
@@ -207,6 +216,42 @@ fn the_event_type_schema_carries_the_grammar_of_the_names() {
         json["paths"]["/api/event-types"]["get"]["responses"]["200"]["content"]["application/json"]
             ["schema"],
         json!({"type": "array", "items": {"$ref": "#/components/schemas/EventType"}})
+    );
+}
+
+#[test]
+fn the_status_schema_carries_the_twelve_fields_and_the_status_route_returns_it() {
+    let json = json_document();
+
+    let schema = &json["components"]["schemas"]["EventStreamStatus"];
+    let mut fields: Vec<&str> = schema["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "brokerReachable",
+            "endOffset",
+            "lag",
+            "position",
+            "reason",
+            "rejectedRecords",
+            "replayCapped",
+            "retentionLosses",
+            "state",
+            "subscribers",
+            "windowFirst",
+            "windowLast"
+        ]
+    );
+    assert_eq!(
+        json["paths"]["/api/events/status"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"],
+        json!({"$ref": "#/components/schemas/EventStreamStatus"})
     );
 }
 

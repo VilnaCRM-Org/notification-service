@@ -6,6 +6,40 @@ input CreateExampleApiResourceInput {
   name: String!
 }
 
+"The status of the event stream on the answering instance; 64-bit values are decimal strings."
+type EventStreamStatus {
+  "Whether the last read of the topic watermarks succeeded."
+  brokerReachable: Boolean!
+  "End of the topic at the last successful watermark read."
+  endOffset: String
+  "Events between the position and the end of the topic."
+  lag: String
+  "Id of the last event read from the topic; null before the first read."
+  position: String
+  "Why the stream is not ready yet, only while starting."
+  reason: String
+  "Invalid records skipped by the reader."
+  rejectedRecords: String!
+  "Replays that reached their cap."
+  replayCapped: String!
+  "Jumps to the start of the topic because retention removed unread events."
+  retentionLosses: String!
+  "Life stage: starting, ready or shutting-down."
+  state: String!
+  "Number of open subscriptions served here."
+  subscribers: Int!
+  "Floor of the memory window."
+  windowFirst: String
+  "Id of the newest event held in the memory window."
+  windowLast: String
+}
+
+"A subscribable event type."
+type EventType {
+  "Name of the event type."
+  name: String!
+}
+
 "Template example resource."
 type ExampleApiResource {
   "Description."
@@ -24,6 +58,10 @@ type Mutation {
 
 "Query root."
 type Query {
+  "Retrieves the status of the event stream on the answering instance."
+  eventStreamStatus: EventStreamStatus!
+  "Retrieves one page of the subscribable event types, in byte order of their names."
+  eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!
   "Retrieves an example API resource by id."
   exampleApiResource(id: ID!): ExampleApiResource
   "Retrieves one page of example API resources, newest first."

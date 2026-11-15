@@ -68,6 +68,26 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /api/events/status:
+    get:
+      tags:
+      - EventStream
+      summary: Retrieves the event stream status.
+      description: Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.
+      operationId: api_events_status_get
+      responses:
+        '200':
+          description: EventStreamStatus resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventStreamStatus'
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/example_api_resources:
     get:
       tags:
@@ -275,6 +295,82 @@ components:
         message:
           type: string
           description: Failure message of the probe.
+    EventStreamStatus:
+      type: object
+      description: |-
+        The status of the event stream on the answering instance: its reader, its memory window and
+        its subscribers. The 64-bit counters and positions are decimal strings; an unknown value is
+        `null`.
+      required:
+      - state
+      - brokerReachable
+      - subscribers
+      - rejectedRecords
+      - retentionLosses
+      - replayCapped
+      properties:
+        brokerReachable:
+          type: boolean
+          description: Whether the last read of the topic watermarks succeeded.
+        endOffset:
+          type:
+          - string
+          - 'null'
+          description: End of the topic at the last successful watermark read; `null` before it.
+          example: '42'
+        lag:
+          type:
+          - string
+          - 'null'
+          description: Events between the position and the end of the topic; `null` while either is unknown.
+          example: '0'
+        position:
+          type:
+          - string
+          - 'null'
+          description: Id of the last event read from the topic; `null` before the first read.
+          example: '42'
+        reason:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Why the service is not ready yet, only while starting: `broker-unreachable`,
+            `topic-not-found`, `partition-count` or `catching-up`.
+          example: catching-up
+        rejectedRecords:
+          type: string
+          description: Invalid records skipped by the reader.
+          example: '0'
+        replayCapped:
+          type: string
+          description: Replays that reached their cap.
+          example: '0'
+        retentionLosses:
+          type: string
+          description: Jumps to the start of the topic because retention removed unread events.
+          example: '0'
+        state:
+          type: string
+          description: 'Life stage: `starting`, `ready` or `shutting-down`.'
+          example: ready
+        subscribers:
+          type: integer
+          description: Number of open subscriptions served here.
+          example: 0
+          minimum: 0
+        windowFirst:
+          type:
+          - string
+          - 'null'
+          description: 'Floor of the memory window: events after it can be resumed from memory.'
+          example: '0'
+        windowLast:
+          type:
+          - string
+          - 'null'
+          description: Id of the newest event held in the memory window.
+          example: '42'
     EventType:
       type: object
       description: A subscribable event type.

@@ -13,11 +13,18 @@ use shared_domain::QueryBus;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::status::StatusSource;
+use hub::Hub;
+
 /// What the handlers of the event stream need.
 #[derive(Debug, Clone)]
 pub struct EventStreamState {
     /// Answers the queries.
     pub query_bus: Arc<dyn QueryBus>,
+    /// Computes the status of this node.
+    pub status: Arc<StatusSource>,
+    /// The hub of this node's subscribers.
+    pub hub: Arc<Hub>,
 }
 
 /// The routes of the event stream, to be nested under `/api`.
@@ -26,5 +33,7 @@ where
     S: Clone + Send + Sync + 'static,
     EventStreamState: FromRef<S>,
 {
-    OpenApiRouter::new().routes(routes!(handler::list_event_types))
+    OpenApiRouter::new()
+        .routes(routes!(handler::list_event_types))
+        .routes(routes!(handler::event_stream_status))
 }

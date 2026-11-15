@@ -8,7 +8,9 @@ use std::sync::Arc;
 
 use axum::Router;
 use event_stream_application::http::EventStreamState;
-use event_stream_application::{EventCatalog, ListEventTypesHandler};
+use event_stream_application::{
+    EventCatalog, Hub, HubSettings, ListEventTypesHandler, StatusSource, TailState, Window,
+};
 use health_check_application::HealthCheckState;
 use health_check_application::HealthService;
 use health_check_domain::HealthProbe;
@@ -30,7 +32,9 @@ use some_module_application::{
 use some_module_domain::ExampleApiResourceRepository;
 use some_module_infrastructure::PgExampleApiResourceRepository;
 
-use crate::config::Config;
+use tokio::sync::watch;
+
+use crate::config::{Config, StreamConfig};
 use crate::graphql::schema;
 use crate::http::AppState;
 use crate::http::router::assemble;
@@ -129,6 +133,33 @@ fn register_queries(
     Ok(bus.register(get)?.register(list)?.register(event_types)?)
 }
 
+/// The state of the event stream routes.
+///
+/// Until the tail is wired (story 3.8) the status reads a hub that is never started and a tail
+/// state that stays `TailState::default()`, so it reports `starting` with `catching-up` and no
+/// broker is contacted.
+fn event_stream_state(query_bus: Arc<dyn QueryBus>, streams: &StreamConfig) -> EventStreamState {
+    let window = Arc::new(Window::new(
+        streams.window_max_events,
+        streams.window_max_bytes,
+    ));
+    let hub = Hub::new(HubSettings {
+        max_subscribers: streams.max_subscribers,
+        buffer: streams.buffer,
+    });
+    let (_tail_sender, tail_state) = watch::channel(TailState::default());
+    let status = Arc::new(StatusSource::new(
+        tail_state,
+        window,
+        Arc::<Hub>::clone(&hub),
+    ));
+    EventStreamState {
+        query_bus,
+        status,
+        hub,
+    }
+}
+
 /// Registers every handler, builds the command and query buses, the state, the `GraphQL` schema
 /// and the router with its middleware.
 ///
@@ -147,9 +178,7 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
     let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository, catalog)?;
     let commands: Arc<dyn CommandBus> = Arc::new(command_bus);
     let queries: Arc<dyn QueryBus> = Arc::new(query_bus);
-    let event_stream = EventStreamState {
-        query_bus: Arc::clone(&queries),
-    };
+    let event_stream = event_stream_state(Arc::clone(&queries), &config.streams);
     let some_module = SomeModuleState {
         command_bus: commands,
         query_bus: queries,
@@ -159,7 +188,10 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
     let health_check = HealthCheckState {
         service: Arc::new(service),
     };
-    let schema = schema::builder().data(some_module.clone()).finish();
+    let schema = schema::builder()
+        .data(some_module.clone())
+        .data(event_stream.clone())
+        .finish();
     let state = AppState {
         health_check,
         some_module,

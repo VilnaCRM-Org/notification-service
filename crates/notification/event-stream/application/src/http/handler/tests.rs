@@ -6,17 +6,23 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{Method, Request, StatusCode};
-use event_stream_domain::EventType;
+use event_stream_domain::{Cursor, EventType};
 use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
 use shared_domain::{ErasedBusError, ErasedMessage, QueryBus, QueryHandler as _};
 use test_support::bus::FakeQueryBus;
+use test_support::fixture::stored_event;
+use tokio::sync::watch;
 use tower::ServiceExt as _;
 
 use crate::catalog::EventCatalog;
+use crate::http::hub::{Hub, HubSettings};
 use crate::http::{EventStreamState, router};
 use crate::query::list_event_types::{ListEventTypes, ListEventTypesHandler};
+use crate::status::StatusSource;
+use crate::tail::{TailState, TopicFault};
+use crate::window::Window;
 
 const PROBLEM: &str = "application/problem+json";
 
@@ -42,16 +48,44 @@ impl QueryBus for HandlerQueryBus {
     }
 }
 
+const SETTINGS: HubSettings = HubSettings {
+    max_subscribers: 4,
+    buffer: 2,
+};
+
+/// A state whose status reads `tail`, `window` and `hub`.
+fn state_with(
+    query_bus: Arc<dyn QueryBus>,
+    tail: TailState,
+    window: Arc<Window>,
+    hub: Arc<Hub>,
+) -> EventStreamState {
+    let (_sender, receiver) = watch::channel(tail);
+    EventStreamState {
+        query_bus,
+        status: Arc::new(StatusSource::new(receiver, window, Arc::<Hub>::clone(&hub))),
+        hub,
+    }
+}
+
+/// A state of a node that has not started, over `query_bus`.
+fn starting(query_bus: Arc<dyn QueryBus>) -> EventStreamState {
+    state_with(
+        query_bus,
+        TailState::default(),
+        Arc::new(Window::new(10, usize::MAX)),
+        Hub::new(SETTINGS),
+    )
+}
+
 fn state(names: &[&str]) -> EventStreamState {
     let types = names
         .iter()
         .map(|name| EventType::new((*name).to_owned()).unwrap())
         .collect::<BTreeSet<_>>();
-    EventStreamState {
-        query_bus: Arc::new(HandlerQueryBus(ListEventTypesHandler::new(Arc::new(
-            EventCatalog::new(types),
-        )))),
-    }
+    starting(Arc::new(HandlerQueryBus(ListEventTypesHandler::new(
+        Arc::new(EventCatalog::new(types)),
+    ))))
 }
 
 fn three() -> EventStreamState {
@@ -207,9 +241,7 @@ async fn a_value_that_is_not_a_32_bit_integer_is_400_with_the_parser_text(
     #[case] parser_text: &str,
 ) {
     let queries = Arc::new(FakeQueryBus::unregistered());
-    let state = EventStreamState {
-        query_bus: Arc::<FakeQueryBus>::clone(&queries),
-    };
+    let state = starting(Arc::<FakeQueryBus>::clone(&queries));
 
     let reply = send(state, &format!("/event-types?{query}")).await;
 
@@ -230,9 +262,7 @@ async fn the_handler_asks_the_list_query_once() {
         assert_eq!((query.page, query.items_per_page), (3, 7));
         Ok(Vec::new())
     }));
-    let state = EventStreamState {
-        query_bus: Arc::<FakeQueryBus>::clone(&queries),
-    };
+    let state = starting(Arc::<FakeQueryBus>::clone(&queries));
 
     let reply = send(state, "/event-types?page=3&itemsPerPage=7").await;
 
@@ -257,6 +287,193 @@ async fn the_router_serves_only_the_registered_method_and_path() {
     assert_eq!(unknown.status, StatusCode::NOT_FOUND);
 }
 
+// ---- status ----
+
+const STATUS_FIELDS: [&str; 12] = [
+    "brokerReachable",
+    "endOffset",
+    "lag",
+    "position",
+    "reason",
+    "rejectedRecords",
+    "replayCapped",
+    "retentionLosses",
+    "state",
+    "subscribers",
+    "windowFirst",
+    "windowLast",
+];
+
+fn idle_bus() -> Arc<dyn QueryBus> {
+    Arc::new(FakeQueryBus::unregistered())
+}
+
+fn field_names(body: &Value) -> Vec<String> {
+    let mut names: Vec<String> = body.as_object().unwrap().keys().cloned().collect();
+    names.sort_unstable();
+    names
+}
+
+#[tokio::test]
+async fn a_starting_node_answers_200_with_the_nulls_of_an_unknown_position() {
+    let queries = Arc::new(FakeQueryBus::unregistered());
+
+    let reply = send(
+        starting(Arc::<FakeQueryBus>::clone(&queries)),
+        "/events/status",
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.content_type, "application/json");
+    assert_eq!(
+        reply.json(),
+        json!({
+            "state": "starting",
+            "reason": "catching-up",
+            "brokerReachable": false,
+            "position": null,
+            "endOffset": null,
+            "lag": null,
+            "windowFirst": null,
+            "windowLast": null,
+            "subscribers": 0,
+            "rejectedRecords": "0",
+            "retentionLosses": "0",
+            "replayCapped": "0"
+        })
+    );
+    assert_eq!(queries.asked(), Vec::<&str>::new());
+}
+
+#[tokio::test]
+async fn a_ready_node_answers_its_position_window_and_subscribers() {
+    let window = Arc::new(Window::new(10, usize::MAX));
+    window.restart(Cursor::new(30));
+    window.push(Arc::new(stored_event(35, "user.created", "{}")));
+    let hub = Hub::new(SETTINGS);
+    hub.start(Cursor::new(35));
+    let types = BTreeSet::from([EventType::new("user.created".to_owned()).unwrap()]);
+    let _first = hub.register(&types).unwrap();
+    let _second = hub.register(&types).unwrap();
+    let tail = TailState {
+        started: true,
+        broker_reachable: true,
+        position: Some(Cursor::new(u64::MAX)),
+        end: Some(Cursor::new(u64::MAX)),
+        rejected: 3,
+        retention_losses: 2,
+        ..TailState::default()
+    };
+
+    let reply = send(state_with(idle_bus(), tail, window, hub), "/events/status").await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.json(),
+        json!({
+            "state": "ready",
+            "reason": null,
+            "brokerReachable": true,
+            "position": "18446744073709551615",
+            "endOffset": "18446744073709551615",
+            "lag": "0",
+            "windowFirst": "30",
+            "windowLast": "35",
+            "subscribers": 2,
+            "rejectedRecords": "3",
+            "retentionLosses": "2",
+            "replayCapped": "0"
+        })
+    );
+}
+
+#[rstest]
+#[case::unreachable(Some(TopicFault::Unreachable), "broker-unreachable")]
+#[case::missing(Some(TopicFault::Missing), "topic-not-found")]
+#[case::partitions(Some(TopicFault::Partitions(2)), "partition-count")]
+#[case::catching_up(None, "catching-up")]
+#[tokio::test]
+async fn a_starting_node_names_its_reason(#[case] fault: Option<TopicFault>, #[case] reason: &str) {
+    let tail = TailState {
+        fault,
+        ..TailState::default()
+    };
+    let state = state_with(
+        idle_bus(),
+        tail,
+        Arc::new(Window::new(10, usize::MAX)),
+        Hub::new(SETTINGS),
+    );
+
+    let reply = send(state, "/events/status").await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["state"], "starting");
+    assert_eq!(body["reason"], reason);
+    assert_eq!(field_names(&body), STATUS_FIELDS);
+}
+
+#[tokio::test]
+async fn a_closed_hub_answers_200_shutting_down_and_not_a_503() {
+    let hub = Hub::new(SETTINGS);
+    hub.close();
+    let tail = TailState {
+        started: true,
+        ..TailState::default()
+    };
+    let state = state_with(idle_bus(), tail, Arc::new(Window::new(10, usize::MAX)), hub);
+
+    let reply = send(state, "/events/status").await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    let body = reply.json();
+    assert_eq!(body["state"], "shutting-down");
+    assert_eq!(body["reason"], Value::Null);
+    assert_eq!(field_names(&body), STATUS_FIELDS);
+}
+
+#[tokio::test]
+async fn the_status_reads_the_tail_state_at_each_request() {
+    let (sender, receiver) = watch::channel(TailState::default());
+    let hub = Hub::new(SETTINGS);
+    let state = EventStreamState {
+        query_bus: idle_bus(),
+        status: Arc::new(StatusSource::new(
+            receiver,
+            Arc::new(Window::new(10, usize::MAX)),
+            Arc::<Hub>::clone(&hub),
+        )),
+        hub,
+    };
+
+    let before = send(state.clone(), "/events/status").await;
+    sender.send_replace(TailState {
+        started: true,
+        ..TailState::default()
+    });
+    let after = send(state, "/events/status").await;
+
+    assert_eq!(before.json()["state"], "starting");
+    assert_eq!(after.json()["state"], "ready");
+}
+
+#[tokio::test]
+async fn the_status_route_serves_only_get() {
+    let reply = send_request(
+        three(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/events/status")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(reply.status, StatusCode::METHOD_NOT_ALLOWED);
+}
+
 // ---- documentation ----
 
 fn document() -> Value {
@@ -271,18 +488,50 @@ fn problem_response(description: &str) -> Value {
 }
 
 #[test]
-fn the_document_has_the_catalog_operation_only() {
+fn the_document_has_the_catalog_and_the_status_operations_only() {
     let document = document();
 
     let paths = document["paths"].as_object().unwrap();
-    assert_eq!(paths.keys().collect::<Vec<_>>(), ["/event-types"]);
-    assert_eq!(
-        paths["/event-types"]
-            .as_object()
+    let mut names: Vec<&str> = paths.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["/event-types", "/events/status"]);
+    for path in names {
+        assert_eq!(
+            paths[path].as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["get"],
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn the_status_operation_matches_the_contract() {
+    let document = document();
+
+    let operation = &document["paths"]["/events/status"]["get"];
+    assert_eq!(operation["operationId"], "api_events_status_get");
+    assert_eq!(operation["tags"], json!(["EventStream"]));
+    assert_eq!(operation["summary"], "Retrieves the event stream status.");
+    assert!(
+        operation["description"]
+            .as_str()
             .unwrap()
-            .keys()
-            .collect::<Vec<_>>(),
-        ["get"]
+            .contains("answers in every life stage")
+    );
+    assert!(operation.get("parameters").is_none());
+    let responses = &operation["responses"];
+    assert_eq!(
+        responses["200"]["description"],
+        "EventStreamStatus resource"
+    );
+    assert_eq!(
+        responses["200"]["content"]["application/json"]["schema"],
+        json!({"$ref": "#/components/schemas/EventStreamStatus"})
+    );
+    assert_eq!(responses["default"], problem_response("Problem response."));
+    assert_eq!(
+        responses.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["200", "default"]
     );
 }
 
@@ -331,7 +580,7 @@ fn the_document_carries_the_event_type_schema() {
     let document = document();
 
     let schemas = &document["components"]["schemas"];
-    for name in ["EventType", "Problem"] {
+    for name in ["EventStreamStatus", "EventType", "Problem"] {
         assert!(schemas.get(name).is_some(), "{name} is missing");
     }
 }
@@ -428,7 +677,7 @@ fn handlers_use_only_the_problem_aware_extractors() {
         .into_iter()
         .map(|(name, _)| name)
         .collect();
-    assert_eq!(names, ["list_event_types"]);
+    assert_eq!(names, ["list_event_types", "event_stream_status"]);
     assert!(source.contains("ValidatedQuery<ListEventTypesParams>"));
 }
 

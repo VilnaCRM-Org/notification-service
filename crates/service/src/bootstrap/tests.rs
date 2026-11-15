@@ -390,6 +390,63 @@ async fn an_unset_event_catalog_answers_an_empty_array() {
     assert_eq!(answer.body, "[]");
 }
 
+#[tokio::test]
+async fn the_status_of_a_node_without_a_tail_is_starting_and_catching_up() {
+    let app = app(adapters());
+
+    let answer = send(&app, get("/api/events/status")).await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.json(),
+        serde_json::json!({
+            "state": "starting",
+            "reason": "catching-up",
+            "brokerReachable": false,
+            "position": null,
+            "endOffset": null,
+            "lag": null,
+            "windowFirst": null,
+            "windowLast": null,
+            "subscribers": 0,
+            "rejectedRecords": "0",
+            "retentionLosses": "0",
+            "replayCapped": "0"
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_graphql_schema_carries_the_event_stream_state() {
+    let mut args = ServeArgs {
+        aws_region: Some("us-east-1".to_owned()),
+        event_types: Some("user.created,order.paid,user.deleted".to_owned()),
+        ..ServeArgs::default()
+    };
+    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
+    let app = router(adapters(), &Config::from_args(args).unwrap()).unwrap();
+
+    let answer = send(
+        &app,
+        graphql(
+            "{ eventTypes(page: 2, itemsPerPage: 1) { name } \
+             eventStreamStatus { state reason subscribers } }",
+        ),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.json(),
+        serde_json::json!({
+            "data": {
+                "eventTypes": [{"name": "user.created"}],
+                "eventStreamStatus": {"state": "starting", "reason": "catching-up", "subscribers": 0}
+            }
+        })
+    );
+}
+
 #[test]
 fn the_database_error_keeps_its_message_and_source() {
     let source = sqlx::Error::Configuration("bad url".into());
