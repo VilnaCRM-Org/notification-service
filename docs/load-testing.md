@@ -13,9 +13,9 @@ Each scenario runs up to four profiles. The settings of every profile are declar
 | `stress` | ramp up, plateau, ramp down | peak 150 | 150 | 3 seconds rise, 10 seconds plateau, 3 seconds fall | on demand (`make stress-load-tests`) |
 | `spike` | ramp up, ramp down | peak 200 | 200 | 5 seconds rise, 5 seconds fall | on demand (`make spike-load-tests`) |
 
-`make load-tests` runs all four profiles one after the other, with the pause `delayBetweenScenarios` (60 seconds) between them. Only the smoke profile runs in a pipeline. The smoke profile of the one shipped scenario takes about 15 seconds once the environment is up.
+`make load-tests` runs all four profiles one after the other, with the pause `delayBetweenScenarios` (60 seconds) between them. Only the smoke profile runs in a pipeline. The table gives the profiles of the `health` scenario; the `subscriptions` scenario has its own (see [The subscriptions scenario](#the-subscriptions-scenario)). The runners take the scenarios in sorted order, `health` then `subscriptions`; their smoke profiles take about 15 and 20 seconds once the environment is up.
 
-A run fails when the p99 of the request duration of a profile exceeds its budget, or when the success rate of its checks is not above 99%. The runners fail with `Error: No load test scenarios found.` when `tests/Load/scripts` holds no scenario.
+A run fails when the p99 of the request duration of a profile exceeds its budget, or when the success rate of its checks is not above 99%; the `subscriptions` scenario also fails when the p99 of its delivery latency exceeds its `deliveryThreshold`. The runners fail with `Error: No load test scenarios found.` when `tests/Load/scripts` holds no scenario.
 
 ## Budgets
 
@@ -51,6 +51,36 @@ Procedure:
 3. Change `threshold` of the smoke profile in `tests/Load/config.json.dist` in a pull request with the label `approved-config-change`.
 4. The average, stress and spike profiles run in no pipeline. They stay at their ceilings until a maintainer measures them on comparable hardware (the default AWS instance has 4 vCPU) and applies the same rule.
 
+## The subscriptions scenario
+
+`tests/Load/scripts/subscriptions.js` loads the event stream: it holds SSE and WebSocket subscribers of the event type `load.test` while a publisher of the load-test stack writes events of that type to the topic, and it measures how long an event takes from the publisher to a subscriber.
+
+**The publisher.** The service has no publishing route and no Rust code publishes. The service `load-test-publisher` of `docker-compose.load_test.override.yml` uses the image of the broker: it waits until `/opt/kafka/bin/kafka-topics.sh --describe --topic notifications` succeeds, then pipes one envelope every 100 milliseconds (about 10 events per second, fixed in the stack and not driven by the profile) into one `/opt/kafka/bin/kafka-console-producer.sh` with `linger.ms=0` and `acks=all`. Each envelope has a new `id`, the type `load.test`, the current time as `occurredAt` and the data `{"sentAtMs":<epoch milliseconds>}`. Only the isolated load-test project runs it, never the development stack.
+
+**One iteration.** `setup` asks `GET /api/events/status` once a second until `state` is `ready` and `windowLast` is not `null` (the node holds at least one event of the publisher), so the start of the stack and the JVM starts of the publisher stay out of the measured iterations; it fails the run after 25 attempts. Each iteration then:
+
+1. requests the catalog `GET /api/event-types` and checks status 200; this request alone carries the profile's `test_type` tag, so it alone is measured against the p99 budget `threshold`;
+2. holds one WebSocket subscriber (`k6/websockets`, `/api/events/ws?types=load.test`) and one SSE subscriber (`http.asyncRequest` on `/api/events/stream?types=load.test` with the time-out `hold`) for `hold` seconds, then closes the WebSocket while the SSE request ends by its own time-out;
+3. checks that the WebSocket opened (the open event follows the server's 101 answer only), that it received at least one event, and that the held SSE response received at least one event (its body holds a frame `event: load.test`);
+4. records, for every WebSocket frame, `Date.now() - data.data.sentAtMs` (`data` is the event object of the frame) in the trend `event_delivery_latency`.
+
+A profile starts `rps` iterations per second and each one lasts `hold` seconds, so once it has ramped up it holds `rps` x `hold` subscribers of each kind: 10 x 5 = 50 SSE and 50 WebSocket subscribers in the smoke profile (`GET /api/events/status` reports `subscribers` 100 then). `vus` leaves room above that number. The SSE request carries the tag `test_type:held_subscription` instead of the profile's, so its held duration never enters the p99 budget of the catalog.
+
+**Which form of the SSE check the scenario uses, and why.** An SSE response never ends by itself, so the held request always ends by its K6 time-out. Before the scenario was written, one `http.asyncRequest` with `timeout: '3s'` was sent against the SSE route of a running service while events were written to its topic, with the pinned image `grafana/k6:2.3.0` (2026-11-15): K6 answered status 0, the error `request timeout` (code 1050) and the body received before the time-out (4 676 bytes, 28 frames). Because the pinned K6 returns that body, the scenario uses the direct form: the held SSE response must have received at least one event. The fallback form, which counts `subscribers` in `GET /api/events/status` while the SSE requests are held and measures delivery on the WebSocket only, is not used; it becomes the check if a later K6 stops returning the body of a request ended by its own time-out. Delivery latency is measured on the WebSocket in both forms.
+
+**What the output shows.** Every held SSE request ends with K6's warning `Request Failed error="request timeout"` and counts in `http_req_failed` (about half of the scenario's requests). Both are expected and fail nothing: the success of the SSE subscriber is its check on the body.
+
+**Configuration.** `endpoints.subscriptions` in `tests/Load/config.json.dist` declares the four profiles in the shapes of the table under [Profiles](#profiles), each with two fields that only this scenario reads: `deliveryThreshold`, the p99 budget of `event_delivery_latency` in milliseconds (a positive number; any other value is rejected with `Invalid deliveryThreshold value` before the run starts), and `hold`, the seconds each iteration holds its two subscribers.
+
+| Profile | `rps` | `vus` | Duration (seconds) | `hold` (seconds) | Subscribers of each kind once ramped up | Catalog budget `threshold` (p99, milliseconds) | `deliveryThreshold` (p99, milliseconds) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `smoke` | 10 | 60 | 10 | 5 | 50 | 500 | 2000 |
+| `average` | 20 | 120 | 3 rise, 10 plateau, 3 fall | 5 | 100 | 200 | 2000 |
+| `stress` | 100 | 600 | 3 rise, 10 plateau, 3 fall | 5 | 500 | 1000 | 2000 |
+| `spike` | 150 | 800 | 5 rise, 5 fall | 5 | about 560 at the peak | 5000 | 2000 |
+
+Both numbers are budgets, not measurements: no hosted-runner measurement of this scenario exists yet. The catalog budgets are the ceilings of the budget rule, which apply until a hosted-runner measurement derives a budget. The delivery budget of 2 000 milliseconds is the ceiling the requirement sets for the smoke profile, used for every profile because the event rate of the publisher does not change with the profile. The delivery interval includes the console producer, the broker, the service's read of the topic and the WebSocket write, so it can neither prove nor disprove the fan-out design target of the service. Unlike the four `health` budgets, the values of this entry are not protected configuration; like them, they are never raised to make a failing run pass, and a change of a budget records its measurement in the table below.
+
 ## Measured values
 
 One row per measurement. Add a row for every new measurement; do not overwrite old rows. Only a hosted-runner row derives a budget; a local row records what the profile measured on that machine. An empty cell means that nothing has been measured yet.
@@ -79,6 +109,7 @@ One row per measurement. Add a row for every new measurement; do not overwrite o
 | `health` | `average` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work, production image, `BUILD_IMAGE=0`, `make load-tests` | 2026-11-11 | 35.63 | not derived; the rule uses the hosted-runner value | 200 |
 | `health` | `stress` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work, production image, `BUILD_IMAGE=0`, `make load-tests` | 2026-11-11 | 399.22 | not derived; the rule uses the hosted-runner value | 1000 |
 | `health` | `spike` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work, production image, `BUILD_IMAGE=0`, `make load-tests` | 2026-11-11 | 394.73 | not derived; the rule uses the hosted-runner value | 5000 |
+| `subscriptions` | `smoke` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work; **not the production image** (it could not be built on that machine) but a debug build of the service, a topic of its own on the development broker fed by the loop of `load-test-publisher`, and `tests/Load/execute-load-test.sh` called with `API_HOST` and `API_PORT`; two runs (404 and 400 checks, 100%; `subscribers` 100 while the subscribers were held) | 2026-11-15 | catalog 3.19 and 3.65; delivery 8 and 8 | not derived; the rule uses the hosted-runner value | catalog 500, delivery 2000 |
 
 ## Running the tests
 
@@ -101,7 +132,7 @@ The scenario script `execute-load-test.sh` in `tests/Load` is the single entry p
 A scenario is one script and one configuration entry; no runner needs an edit.
 
 1. Create `tests/Load/scripts/<scenario>.js`. Copy `tests/Load/scripts/health.js` and change the request and the checks. The script builds its options from the configuration through the helpers in `tests/Load/utils`.
-2. Add `endpoints.<scenario>` to `tests/Load/config.json.dist` with the four profiles (`smoke`, `average`, `stress`, `spike`), each with `threshold`, `rps`, `vus` and `duration`, in the shapes of the table above.
+2. Add `endpoints.<scenario>` to `tests/Load/config.json.dist` with the four profiles (`smoke`, `average`, `stress`, `spike`), each with `threshold`, `rps`, `vus` and `duration`, in the shapes of the table above. A field that only your script reads, such as `deliveryThreshold` and `hold` of the `subscriptions` scenario, goes into the same profile objects.
 3. Start with ceilings you can defend, then derive the budgets with the budget rule once a measurement exists.
 4. Run `make execute-load-tests-script scenario=<scenario> runAverage=false runStress=false runSpike=false` (the smoke profile only), then `make smoke-load-tests`, which now includes the scenario.
 5. Run `make lint-load-tests`. The JavaScript runs in K6, not in Node: only the K6 globals (`__ENV`, `__VU`, `__ITER`, `open`) exist, and `console` is forbidden.
@@ -113,7 +144,7 @@ The assistant skill `load-testing` shows the same steps with the example resourc
 
 ## The isolated environment
 
-Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no database or LocalStack port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). The development service on port 8081 is a debug build and keeps running next to it.
+Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no database, LocalStack or broker port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). It also runs `load-test-publisher`, which writes the events of the `subscriptions` scenario to its broker from the start of the project to its removal. The development service on port 8081 is a debug build and keeps running next to it.
 
 `scripts/with-load-test-stack.sh` builds the production image (unless `BUILD_IMAGE=0`), starts the project and waits until it is healthy, prepares the database, runs the given command with `API_HOST=localhost` and `API_PORT=$LOAD_TEST_APP_PORT`, and always removes the project with its volumes, also when the command fails. When the command fails (a crossed K6 threshold, a failed Schemathesis check), it prints a line with the exit status and the logs of the project, the service's included, to standard error before it removes the project, and exits with the status of the command. It exits with status 2 and prints the logs when the environment does not become healthy.
 
