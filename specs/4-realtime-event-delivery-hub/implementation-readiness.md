@@ -116,7 +116,7 @@ None is blocking.
 | R7 | low | Story 5.1 holds removal parts A and B, two commits, and is large; `make ci` passes only with the documentation of story 5.2. | `postgres-removal.md` shows the parts are green in `make ci` only together; story 5.2 carries the `make ci` criterion. |
 | R8 | low | No capacity, latency or throughput figure exists. NFR-1 is a design target. | Stated as such in `prd.md`, `architecture.md` and `research.md`, as D18 requires. |
 | R9 | low | Two of the three review lenses ran (semantics, implementability); the third, contract and traceability, did not, because the Fable usage limit was nearly reached. | The contract checks ran by script (section 10). Story 6.1 and the plugin's review stages review the change again. |
-| R10 | low | The required status check "Persistence query metadata" must be removed from the branch rules of `main` by the maintainer. | A hand-off in story 5.1. It needs no repository change. |
+| R10 | low | If "Persistence query metadata" is a required check of the branch rules of `main` (never verified), the maintainer must remove it. | A hand-off in story 5.1. It needs no repository change. |
 
 ## 9. Corrections after the semantics review
 

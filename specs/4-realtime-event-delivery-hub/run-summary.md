@@ -44,6 +44,7 @@ This file replaces the run summary of the first plan.
 - Semantics review: one round, sixteen findings (S1 to S16). All were applied to the three main files so that they follow the binding design brief (cursor clamp, no skip of an undecodable batch, readiness by `EVENT_TAIL_STALE_AFTER`, fixed `KAFKA_RETRY_DELAY`, replay cap and stall count, the variables of brief section 9, the first plan's order of the 503 answers, the hub's close and position rules, the adapter's long-poll wait, the same-round re-seek, the log entries and counters, the test gaps). `implementation-readiness.md` section 9 lists them.
 - Implementability review: one round, eighteen findings (I1 to I18: four blockers, nine major, five minor), applied after the semantics findings and keeping them. The main changes: the protected changes of the feature and the shortened `required_directories` became one maintainer pull request (story 3.1); the GraphQL catalog moved to story 2.4; the end-to-end world waits for readiness (story 3.8); `make ci` of the removal is judged after the documentation (story 5.2); `Adapters` holds trait objects; the domain manifest and `workspace.dsl` edges follow first use; `uuid::Uuid` with a 36-character check; the `event_type` fixture survives the removal; the frame wrapper is written by hand; the end-of-log behaviour of `StaticTopic` and a pacing adapter; a K6 fallback for the SSE check; `/opt/kafka/bin` paths. I6 was resolved differently, because S12 had already deleted the middleware it was about. `implementation-readiness.md` section 10 lists all 34 findings.
 - Contract checks after the review round: `verify-bundle.sh` printed nothing; the staging dry run exited 0 with six WOULD lines and its info line; a script confirmed the story structure and that every Depends on line names only earlier stories.
+- Alignment with the code: the bundle was aligned with the implemented stories 1.1 to 2.4 on 2026-11-15 (the deviations their implementers and verifiers recorded, written into `architecture.md` and `epics.md`).
 
 ## Changed story list
 
@@ -105,7 +106,7 @@ The rust-implementer agent never edits a protected path or the profile, and the 
         "tests/CLI/bats",
    ```
 
-   The feature branch then merges `main`, so its merge base holds the five changes; checks: `make.architecture`, `make.validate_configuration` with `CONFIG_CHANGE_APPROVED=true base_ref=main`.
+   The feature branch then merges `main`, so its merge base holds the six changed lines (three added lines and one changed line in `architecture.toml`, two deleted lines in `protected-config.toml`); checks: `make.architecture`, `make.validate_configuration` with `CONFIG_CHANGE_APPROVED=true base_ref=main`.
 2. **Story 5.1, part A (code)**, operator session in pull request #5, also `approved-breaking-change`:
    - `scripts/check-docs.sh`;
    - `tests/CLI/bats/check_docs.bats:558`;
@@ -124,7 +125,8 @@ The rust-implementer agent never edits a protected path or the profile, and the 
    - `.claude/settings.json:31`, `:68`, `:93`;
    - the profile `.claude/rust-sdlc.yml`, regenerated as its own commit.
 4. **Story 5.2** changes no protected file but runs in the same operator session, because the plugin stages escalate once story 5.1 is on the branch; it carries the `make ci` criterion with `CONFIG_CHANGE_APPROVED=true BREAKING_CHANGE_APPROVED=true`.
-5. **Outside the repository:** the maintainer removes the required status check "Persistence query metadata" from the branch rules of `main` (story 5.1 hand-off).
+5. **Outside the repository:** if "Persistence query metadata" is a required check of the branch rules of `main` (never verified), the maintainer removes it (story 5.1 hand-off).
+6. **Secrets scan on the branch history:** the CI check "Secrets scan" fails on the history of the branch, because commit `924c56165aff59d1a3bbdcf4c381b4d5e156fe09` holds the RFC 6455 sample nonce as a `Sec-WebSocket-Key` in three test lines (`crates/service/src/http/origin/tests.rs:59`, `crates/service/src/http/router/tests.rs:771` and `:789`); commit `c83776e` replaced the value. The maintainer either accepts the three fingerprints in `.gitleaksignore` (protected, label `approved-config-change`; it can ride in the pull request of story 3.1) or allows a rewrite of the branch history. The diff of story 3.1 above does not change for this.
 
 ## Assumptions
 
@@ -223,7 +225,7 @@ Every `> Assumption:` line of the other six files, in file order.
 21. repo-facts section 7 did not re-run whether the pinned K6 returns the body of a request ended by its own timeout; an SSE response never ends by itself, so the story probes it first and falls back to the subscriber count of the status route.
 22. the decision record "PostgreSQL is removed" is written in story 5.2 with the removal, because it supersedes `docs/adr/0005` only once the removal is done; story 4.4 writes the other seven records.
 23. parts A and B are one story with two commits, and parts A, B and the documentation of story 5.2 are green in `make ci` only together (stage 3 needs the targets, stage 7 the Bats files, stage 2 `docs-check` the updated documents, which cite the deleted targets, command, paths and variables until story 5.2); each commit passes the hooks on its own (part A keeps clippy, `cargo deny` unused and shear green in one commit).
-24. the maintainer removes the required status check "Persistence query metadata" from the branch rules of `main`; the story records it as a hand-off and does not wait on that check.
+24. if "Persistence query metadata" is a required check of the branch rules of `main` (never verified), the maintainer removes it; the story records it as a hand-off and does not wait on that check.
 
 ## Next step
 

@@ -323,7 +323,8 @@ pub struct ListEventTypes { pub page: u32, pub items_per_page: u32 }
 impl Query for ListEventTypes { type Output = Vec<EventTypeView>; type Error = EventStreamError; const NAME: &'static str = "ListEventTypes"; }
 pub struct ListEventTypesHandler { catalog: Arc<EventCatalog> }
 impl ListEventTypesHandler { pub const fn new(catalog: Arc<EventCatalog>) -> Self; }
-// handle: PageRequest::new(page, items_per_page)? then catalog.page(request), mapped to views.
+// handle (#[async_trait] impl QueryHandler) calls the private synchronous `list`: PageRequest::new(page, items_per_page)?
+// then catalog.page(request), mapped to views. Nothing is awaited (an async fn without an await fails clippy unused_async).
 
 // error.rs
 #[derive(Debug, thiserror::Error)]
@@ -370,7 +371,7 @@ pub fn parse_event(offset: Offset, value: Option<&[u8]>, max_bytes: usize) -> Re
 /// The most recent valid events of this node, in id order, bounded by a count and by bytes (FR-13).
 #[derive(Debug)]
 pub struct Window { /* std::sync::RwLock<Inner { events: VecDeque<Arc<StoredEvent>>, bytes: usize, start: Cursor }>, max_events: usize, max_bytes: usize */ }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum WindowRead { Evicted, Page { events: Vec<Arc<StoredEvent>>, settled: Cursor } }
 impl Window {
     pub const SCAN: usize = 10_000;
@@ -389,7 +390,7 @@ impl Window {
 }
 ```
 
-`read` rules: `after < start` gives `Evicted`. An empty `types` gives an empty page with `settled = up_to`. Otherwise `partition_point` finds the first sequence above `after`; at most `SCAN` entries with a sequence at or below `up_to` are examined, and an entry is collected when its type is in `types` with a since below its sequence, until `limit.reached(..)`. `settled` is the last collected sequence when the limit cut, the last examined sequence when the scan bound cut, else `up_to`. The lock is a `std::sync::RwLock`, held for one call, never across an await; a poisoned lock is taken over with `PoisonError::into_inner`.
+`read` rules: `after < start` gives `Evicted`. An empty `types` gives an empty page with `settled = up_to`. Otherwise `partition_point` finds the first sequence above `after`; at most `SCAN` entries with a sequence at or below `up_to` are examined, and an entry is collected when its type is in `types` with a since below its sequence, until `limit.reached(..)`, which is checked after each collected event with the summed json bytes, so a page can pass the byte bound by one event. `settled` is the last collected sequence when the limit cut, the last examined sequence when the scan bound cut (only when an entry beyond the first `SCAN` entries, at or below `up_to`, exists; with exactly `SCAN` entries examined `settled` is `up_to`), else `up_to`. The lock is a `std::sync::RwLock`, held for one call, never across an await; a poisoned lock is taken over with `PoisonError::into_inner`.
 
 The bounds are `EVENT_WINDOW_MAX_EVENTS` and `EVENT_WINDOW_MAX_BYTES` (design brief 5.2); at least one event is kept so that a single large event does not empty the window. The cost is `StoredEvent::cost`: the json bytes, the type bytes and 128 bytes for the `Arc`, the deque slot and the struct.
 
@@ -489,7 +490,7 @@ The hub of the first plan is kept, with `advance` added and the cursor taken fro
 
 ```rust
 #[derive(Debug, Clone, Copy)]
-pub struct HubSettings { pub max_subscribers: usize, pub buffer: usize }
+pub struct HubSettings { pub max_subscribers: usize, pub buffer: usize }   // a buffer of 0 is used as 1 (`mpsc::channel(0)` panics)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum HubError {
     #[error("the node is starting")] NotReady,
@@ -500,7 +501,7 @@ pub enum HubError {
 // `subscription rejected` with the detail (FR-25, NFR-15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Delivery { pub delivered: usize, pub behind: usize }
-pub struct Hub { settings: HubSettings, registry: std::sync::Mutex<Registry>, count: tokio::sync::watch::Sender<usize> }
+pub struct Hub { settings: HubSettings, registry: std::sync::Mutex<Registry>, count: tokio::sync::watch::Sender<usize>, replay_capped: AtomicU64 }
 impl Hub {
     pub fn new(settings: HubSettings) -> Arc<Self>;
     /// Under one lock, in this order: Closed, NotReady, AtCapacity (FR-25's precedence), then registers.
@@ -509,21 +510,22 @@ impl Hub {
     pub fn start(&self, position: Cursor);
     /// Sets the position to the event's sequence, also when the type has no subscriber; then queues one
     /// shared frame for every subscriber of its type with `try_send`. `None` when the type has no subscriber:
-    /// nothing is encoded, and the position has still moved.
+    /// nothing is encoded, and the position has still moved. Before `start` the position stays unset.
     pub fn deliver(&self, event: &StoredEvent) -> Option<Delivery>;
-    /// position = max(position, given); no effect before `start`.
-    pub fn advance(&self, position: Cursor);
     pub fn close(&self);
     pub fn is_closed(&self) -> bool;
     pub fn subscriber_count(&self) -> usize;
     pub fn type_count(&self) -> usize;
     /// Completes when no subscriber is registered.
     pub async fn drained(&self);
-    /// Replays whose floor the cap of `EVENT_REPLAY_MAX_EVENTS` raised (an `AtomicU64`, no lock).
-    pub fn replay_capped(&self) -> u64;
 }
-impl EventPublisher for Hub { /* started -> start; publish -> deliver(..).map_or(0, |d| d.behind); advance -> advance */ }
-impl SubscriberCount for Hub { /* is_closed, subscriber_count, replay_capped */ }
+// `advance` and `replay_capped` are not inherent methods: clippy::same_name_method forbids an inherent method
+// named like a trait method, so their logic is in the trait impls; `hub.advance(p)` and `hub.replay_capped()`
+// work wherever the trait is in scope.
+impl EventPublisher for Hub { /* started -> start; publish -> deliver(..).map_or(0, |d| d.behind);
+                                advance: position = max(position, given), no effect before `start` */ }
+impl SubscriberCount for Hub { /* closed -> is_closed, count -> subscriber_count;
+                                 replay_capped: replays whose floor the cap of `EVENT_REPLAY_MAX_EVENTS` raised (the `AtomicU64`, no lock) */ }
 
 pub struct Subscriber { id: u64, position: Cursor, receiver: mpsc::Receiver<Arc<Frame>>, hub: Arc<Hub> }
 impl Subscriber {
@@ -553,7 +555,7 @@ Rules of the registry (unchanged from the first plan; all hold after every metho
 - **No empty key.** A `by_type` entry whose map became empty is removed at once; `close` clears `by_type`.
 - **Close.** `close` is one lock section: `closed = true`; `by_type` is cleared; every `Entry::sender` becomes `None`. The entries stay, so the count and `drained` follow the connections. `recv` returns the queued frames and then `None`; `resume` answers `Err(HubError::Closed)`; `subscribe` and `unsubscribe` change only `Entry::types`.
 - **The count is the number of connections.** `subscribers.len()` is compared with `max_subscribers` (`>=` answers `AtCapacity`) and published with `send_replace` under the lock in `register` and `Drop`. Falling behind and `close` do not change the count; a slot is free when the `Subscriber` is dropped (FR-25).
-- **Position.** `None` until `start`, then the tail position: `deliver` sets it to the event's sequence at every published event, whether or not the type has a subscriber (the hand-over of "Algorithms" 6 needs it), `advance` raises it. `register` and `resume` copy it into the subscriber, `subscribe` returns it.
+- **Position.** `None` until `start` (`deliver` and `advance` leave it unset before), then the tail position: `deliver` sets it to the event's sequence at every published event, whether or not the type has a subscriber (the hand-over of "Algorithms" 6 needs it), `advance` raises it. `register` and `resume` copy it into the subscriber, `subscribe` returns it.
 - `by_type` is only read and written by key; everything iterated is a `BTreeMap` or `BTreeSet` (`iter_over_hash_type`). A poisoned mutex is taken over with `PoisonError::into_inner`. `try_send` is judged with `is_err()`; `drained` is `count.subscribe().wait_for(|n| *n == 0)`.
 - The frame is encoded under the lock after the lookup found a subscriber (NFR-2: once per event, shared; not at all without a subscriber).
 
@@ -573,7 +575,9 @@ impl Frame { pub fn encode(event: &StoredEvent) -> Self; }
 /// `a-z0-9._-`); tested byte-equal to `serde_json::to_string` as a dev-dependency.
 pub(crate) fn ws_json(event: &StoredEvent) -> String;
 /// `{"error":"` + reason + `"}` (reasons are fixed ASCII texts); tested byte-equal to `serde_json::to_string` as a dev-dependency.
-pub(crate) fn error_json(reason: &str) -> String;
+/// `pub`, not `pub(crate)`: no production code calls it before the WebSocket session of story 3.7, and an unused
+/// `pub(crate)` function fails the dead-code lint.
+pub fn error_json(reason: &str) -> String;
 ```
 
 `StoredEvent::json` is compact JSON, so it holds no line break and is exactly one `data:` line (FR-6); `Event::id` and `Event::event` get text without line breaks (a decimal number, an event type name), so they cannot panic.
@@ -678,10 +682,14 @@ Why: `WebSocket::send` has no deadline and its flush stays pending while the pee
 Handlers (`http/handler.rs`) and DTOs (`http/dto.rs`):
 
 ```rust
-#[derive(Debug, Clone, Copy, Deserialize, IntoParams, Validate)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoParams, Validate)]
 #[serde(rename_all = "camelCase", default)]
 #[into_params(parameter_in = Query)]
-pub struct ListEventTypesParams { pub page: i32, pub items_per_page: i32 }   // defaults 1 and 30; validated by PageRequest
+pub struct ListEventTypesParams { #[param(minimum = 1, default = 1)] pub page: i32,
+                                  #[param(minimum = 1, maximum = 100, default = 30)] pub items_per_page: i32 }
+// defaults 1 and 30; no validator attribute: the bounds are checked by PageRequest, which reports the first
+// violated one (`page=0&itemsPerPage=0` gives one violation, on `page`).
+impl ListEventTypesParams { pub fn into_query(self) -> ListEventTypes; }   // a value below 1 becomes 0, which PageRequest refuses
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 #[schema(as = EventType)]
@@ -758,7 +766,7 @@ The router adds no layer that needs a state value: the 503s come from `subscript
 
 > Assumption: the implementability review (I6) proposed a separate `streams<S>(hub)` router for an `availability` middleware with `State<Arc<Hub>>`. The semantics review (S12) deleted that middleware, so the two streaming routes stay in `router<S>()`.
 
-GraphQL (`graphql.rs`): `#[graphql(name = "EventType")] struct EventTypeObject { name: String }`; `#[graphql(name = "EventStreamStatus")] struct EventStreamStatusObject` with `state: String`, `reason: Option<String>`, `broker_reachable: bool`, `position`, `end_offset`, `lag`, `window_first`, `window_last: Option<String>`, `subscribers: i32` (`i32::try_from(n).unwrap_or(i32::MAX)`), `rejected_records`, `retention_losses`, `replay_capped: String`; `EventStreamQuery::event_types(ctx, #[graphql(default = 1)] page: i32, #[graphql(default = 30)] items_per_page: i32) -> async_graphql::Result<Vec<EventTypeObject>>` through `handler::list_types` and `problem_to_error`; `EventStreamQuery::event_stream_status(ctx) -> EventStreamStatusObject` from `StatusSource::snapshot`. SDL: `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!` and `eventStreamStatus: EventStreamStatus!`. Descriptions avoid the words `node`, `Connection`, `update`, `delete` (existing SDL test).
+GraphQL (`graphql.rs`): `#[graphql(name = "EventType")] struct EventTypeObject { name: String }`; `#[graphql(name = "EventStreamStatus")] struct EventStreamStatusObject` with `state: String`, `reason: Option<String>`, `broker_reachable: bool`, `position`, `end_offset`, `lag`, `window_first`, `window_last: Option<String>`, `subscribers: i32` (`i32::try_from(n).unwrap_or(i32::MAX)`), `rejected_records`, `retention_losses`, `replay_capped: String`; `EventStreamQuery::event_types(ctx, #[graphql(default = 1)] page: i32, #[graphql(default = 30)] items_per_page: i32) -> async_graphql::Result<Vec<EventTypeObject>>` through `handler::list_types` and `problem_to_error`; `EventStreamQuery::event_stream_status(ctx) -> async_graphql::Result<EventStreamStatusObject>` from `StatusSource::snapshot` (schema data without `EventStreamState` gives the error of `Problem::internal`; the resolver ends with `std::future::ready(..).await`, because the `Object` macro accepts only async resolvers and clippy's `unused_async` refuses an async fn without an await). SDL: `eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!` and `eventStreamStatus: EventStreamStatus!`. Descriptions avoid the words `node`, `Connection`, `update`, `delete` (existing SDL test).
 
 ### Infrastructure crate
 
@@ -831,7 +839,7 @@ Everything that wires, schedules, supervises and serves is in `crates/service` (
 
 ### Configuration
 
-Each variable is an `Option<String>` clap argument of `ServeArgs` (and of `check-config`) with `env = "<NAME>"` and `hide_env_values = true`; `config.rs` collects every problem with `collector.collect("NAME", parser(..))` in two new group functions, `kafka_settings(&mut Collector, &ServeArgs) -> Option<KafkaSettings>` and `stream_settings(&mut Collector, &ServeArgs) -> Option<StreamConfig>`, plus `allowed_origins(..)`; the order of problems is the order of the table; cross-field rules come last. An invalid value is reported `<VARIABLE>: <reason>` without the value, exit status 2 (`check-config` on stderr, `serve` as one `invalid configuration` entry per problem).
+Each variable is an `Option<String>` clap argument with `env = "<NAME>"` and `hide_env_values = true`, in the flattened clap groups `KafkaArgs` and `StreamArgs` of `ServeArgs` (and of `check-config`); `config.rs` collects every problem with `collector.collect("NAME", parser(..))` in the new group functions `kafka_fields(&mut Collector, &KafkaArgs) -> KafkaFields` (each Kafka variable on its own), `stream_settings(&mut Collector, &ServeArgs) -> Option<StreamConfig>` and `allowed_origins(..)`, called in this order by `from_args`, and last `kafka_settings(&mut Collector, &KafkaArgs, KafkaFields) -> Option<KafkaSettings>`, which applies the two rules between Kafka variables and builds the settings; the order of problems is the order of the table; cross-field rules come last (the existing `cross_field_rules`, then the two Kafka rules). An invalid value is reported `<VARIABLE>: <reason>` without the value, exit status 2 (`check-config` on stderr, `serve` as one `invalid configuration` entry per problem).
 
 | Variable | Parsed into | Default | Rule (reason text) |
 | --- | --- | --- | --- |
@@ -859,11 +867,11 @@ Each variable is an `Option<String>` clap argument of `ServeArgs` (and of `check
 | `STREAM_KEEP_ALIVE` | `Duration` | `15s` | `1s` to `5m` |
 | `CORS_ALLOWED_ORIGINS` | `AllowedOrigins` | unset (`NoOrigin`) | exactly `*`, or origins as a browser sends them (scheme `http` or `https`, host, optional port, lower case, nothing else) (`must be * or a comma-separated list of origins such as https://app.example.com`) |
 
-Integers use the existing reason `must be an integer from <a> to <b>`. Cross-field rules: `KAFKA_CONNECT_TIMEOUT` longer than `KAFKA_REQUEST_TIMEOUT` is `KAFKA_CONNECT_TIMEOUT: must not be longer than KAFKA_REQUEST_TIMEOUT` (it runs in `kafka_settings`, after both are parsed); with `KAFKA_SECURITY_PROTOCOL` `sasl_plaintext` or `sasl_ssl` the three SASL variables are each `is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`; otherwise each that is set is `must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`. The rule runs in its own function, `sasl_rule`, because `cross_field_rules` already has five parameters.
+Integers use the existing reason `must be an integer from <a> to <b>`; for a duration variable with a range, a value that is not a duration gets the same reason as one outside the range. Cross-field rules: `KAFKA_CONNECT_TIMEOUT` longer than `KAFKA_REQUEST_TIMEOUT` is `KAFKA_CONNECT_TIMEOUT: must not be longer than KAFKA_REQUEST_TIMEOUT` (it runs in `kafka_settings`, after every per-variable problem); with `KAFKA_SECURITY_PROTOCOL` `sasl_plaintext` or `sasl_ssl` the three SASL variables are each `is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`; otherwise each that is set is `must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`. The rule runs in its own function, `sasl_rule`, because `cross_field_rules` already has five parameters.
 
 `Config` gains `kafka: KafkaSettings`, `streams: StreamConfig { catalog: EventCatalog, max_data_bytes, window_max_events, window_max_bytes, start_events, replay_max_events, replay_permits, retry_delay, stale_after, buffer, max_subscribers, keep_alive }` and `allowed_origins: AllowedOrigins`. The removal stories delete `PostgresSettings`, `MigrateSettings`, the `DATABASE_*` parsing and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT` ("Removal of PostgreSQL").
 
-`.env` gets one line per variable with a default, written with that default, except `KAFKA_BOOTSTRAP_SERVERS=localhost:9095` (the host listener of the local broker, "Local Stack and Load Test"); `EVENT_TYPES`, the three `KAFKA_SASL_*` and `CORS_ALLOWED_ORIGINS` get none. `docs/environment.md` gets a row per variable (docs-check rule 5). The tests that pin the variable set change with the variables: `config/tests.rs` `FIELDS`, `cli/tests.rs`, `tests/integration/check_config.rs` `FULL_ENVIRONMENT`, `tests/integration/support.rs` `VALID_ENVIRONMENT`.
+`.env` gets one line per variable with a default, written with that default, except `KAFKA_BOOTSTRAP_SERVERS=localhost:9095` (the host listener of the local broker, "Local Stack and Load Test"); `EVENT_TYPES`, the three `KAFKA_SASL_*` and `CORS_ALLOWED_ORIGINS` get none. `docs/environment.md` gets a row per variable (docs-check rule 5). The tests that pin the variable set change with the variables: `config/tests.rs` `FIELDS`, `cli/tests.rs`, `tests/integration/check_config.rs` `FULL_ENVIRONMENT`; `tests/integration/support.rs` `VALID_ENVIRONMENT` stays unchanged, because it lists only the variables without a default and every new variable has a default or may be unset.
 
 > Assumption: `.env` names the host listener `localhost:9095` and not the default `localhost:9092`. The test targets run on the host and export `.env` and `.env.test`; in container mode the app container's own `KAFKA_BOOTSTRAP_SERVERS=kafka:9092` from compose wins, because `scripts/with-env.sh` never changes a variable the caller already has.
 
@@ -938,6 +946,7 @@ pub(crate) async fn websocket_origin(State(origins): State<Arc<AllowedOrigins>>,
 
 - `cors`: `CorsLayer::new().allow_origin(AllowOrigin::any() | AllowOrigin::list(..)).allow_methods([GET, POST]).allow_headers([CONTENT_TYPE, "last-event-id"]).max_age(PREFLIGHT_MAX_AGE)`; no credentials, nothing exposed.
 - Order in `http::router::assemble`, outermost first: request id (three layers), security headers, `TraceLayer`, `.option_layer(origin::cors(..))`, `from_fn_with_state(.., origin::websocket_origin)`, `CatchPanicLayer`, request budget, body limit. Between `TraceLayer` and `CatchPanicLayer` every answer of an allowed origin carries the header, the 404, 405, 500 and 503 problems and the SSE head included (first plan, run there).
+- With a list or `*`, tower-http's `CorsLayer` appends `vary` to every response, also to a request without `Origin`; such a request is otherwise unchanged (status, body and every other header but `x-request-id`).
 - The layer is absent, not empty, when no origin is allowed: an installed `CorsLayer` answers every `OPTIONS` with 200 and adds `vary: origin`, which would change existing answers (NFR-21).
 - `websocket_origin` is `pub(crate)`, not a handler, so the handler-file test of `crates/service/src/http` is unchanged.
 
@@ -1074,7 +1083,7 @@ During start-up a fault is logged when it changes: `event topic unreachable` (wa
 >
 > Assumption: `TailState::started` is not affected by a broker outage (a started node keeps accepting subscriptions, FR-20); its readiness probe fails instead by the staleness rule. NFR-15 defines `event tail failed` as "the first failed round after a success".
 
-Files of the template sync that this change touches and that are not yet in `.templatesyncignore`: `crates/service/src/lib.rs`, `src/command/serve.rs`, `src/http/router.rs`, `src/telemetry.rs`, `tests/integration/main.rs`, `tests/integration/support.rs`, `tests/integration/check_config.rs`, `docker-compose.yml`, `docker-compose.override.yml`, `docker-compose.load_test.override.yml`, `docker-compose.prod.yml`, `docs/architecture.md`, `docs/operations.md`, `docs/load-testing.md`, `docs/README.md`, `SECURITY.md`, `docs/make-targets.md`, `crates/internal/health-check/application/src/http.rs`, `crates/internal/health-check/application/src/http/tests.rs`, every new Rust test file that holds `Adapters {` (protected test of `make_repository.bats`), `crates/internal/health-check/domain/src/value_object/dependency.rs` (already ignored per `.templatesyncignore:33-35`, so no entry). Each goes into `.templatesyncignore` by full path in the story that first changes it; files under `crates/shared/`, `xtask/`, `tests/CLI/` and `.github/workflows/` and the health-check manifests are listed only by full file path, never by directory (protected test of `make_repository.bats`); the removal stories add their own (section "Removal of PostgreSQL").
+Files of the template sync that this change touches and that are not yet in `.templatesyncignore`: `crates/service/src/lib.rs`, `src/command/serve.rs`, `src/http/router.rs`, `src/telemetry.rs`, `tests/integration/main.rs`, `tests/integration/support.rs`, `tests/integration/check_config.rs`, `docker-compose.yml`, `docker-compose.load_test.override.yml`, `docker-compose.prod.yml`, `docs/architecture.md`, `docs/operations.md`, `docs/load-testing.md`, `docs/README.md`, `SECURITY.md`, `docs/make-targets.md`, `crates/internal/health-check/application/src/http.rs`, `crates/internal/health-check/application/src/http/tests.rs`, every new Rust test file that holds `Adapters {` (protected test of `make_repository.bats`), `crates/internal/health-check/domain/src/value_object/dependency.rs` (already ignored per `.templatesyncignore:33-35`, so no entry). Each goes into `.templatesyncignore` by full path in the story that first changes it; files under `crates/shared/`, `xtask/`, `tests/CLI/` and `.github/workflows/` and the health-check manifests are listed only by full file path, never by directory (protected test of `make_repository.bats`); the removal stories add their own (section "Removal of PostgreSQL").
 
 ## Wire Protocols
 
@@ -1291,7 +1300,7 @@ Order:
 4. **Removal story 5.1, part B, stack and gates** (parts A, B and the documentation of story 5.2 are green in `make ci` only together, so the same pull request #5; `docs-check` fails until story 5.2 rewrites the documents that cite the deleted targets, command, paths and variables): Makefile targets `migrate`, `migrate-rollback`, `create-migration`, `setup-test-db`, `setup-load-test-db`, `sqlx-prepare`, `validate-sqlx-metadata`, `ensure-database` deleted and no target depends on them; `EXEC_ENV` without `DATABASE_STATEMENT_TIMEOUT`; `TEST_ENV` without `env -u DATABASE_URL`; `DEPS ?= localstack`; `CI_TESTS_TARGETS = tests-with-coverage doc-tests e2e-tests`; help and `.PHONY` lines; `docs-check` without `migrate --help`; `make/gates.mk` without `SQLX_CHECK_CMD`; scripts `setup-test-db.sh`, `check-sqlx-metadata.sh`, `setup-load-test-db.sh` deleted; `scripts/with-load-test-stack.sh` without the call; `scripts/install-tools.sh` and `scripts/doctor.sh` without sqlx-cli; compose files, `Dockerfile`, `.env`, `.env.test`, `.devcontainer/devcontainer.json` without database parts (`docker-compose.prod.yml`: `app.depends_on` becomes `!reset null`, the block is not deleted, so the base dependencies on `localstack` and `kafka` of the inactive profile `local` do not return); `.github/workflows/quality.yml` without the job `query-metadata`; `tests.yml` and `scheduled.yml` without sqlx-cli; `AGENTS.md` gate list equal to `make ci-list`; `.claude/rust-sdlc.yml` regenerated by the operator session as its own commit (`persistence.engine: null`, `migrations_dir: null`, `offline_metadata: false`, `make.setup_test_db`, `make.create_migration`, `make.migrate`, `make.migrate_rollback`, `make.sqlx_prepare`, `make.validate_sqlx_metadata` set to `null`, required check `Persistence query metadata` removed); `.templatesyncignore` gets every synchronised path the removal changes or deletes, files under `crates/shared/`, `xtask/`, `tests/CLI/` and `.github/workflows/` and the health-check manifests by full file path, never by directory; `migrations/` and `.sqlx/` deleted. Protected files: the rest of "Protected Changes", part B.
 5. **Documentation and skills, story 5.2** (operator session): the files of `postgres-removal.md` section 1(k); a new ADR supersedes `docs/adr/0005`. Gates: `make lint-repo docs-check`, then `make ci` with `CONFIG_CHANGE_APPROVED=true BREAKING_CHANGE_APPROVED=true` over parts A, B and the documentation.
 
-The maintainer also removes the required status check "Persistence query metadata" from the branch rules of `main`, or the pull request waits for a check that never reports. The template's SQS parts stay (D11): `AWS_REGION` stays required and the SQS probe stays in the readiness report.
+If "Persistence query metadata" is a required check of the branch rules of `main` (this was never verified), the maintainer also removes it, or the pull request waits for a check that never reports. The template's SQS parts stay (D11): `AWS_REGION` stays required and the SQS probe stays in the readiness report.
 
 > Assumption: `DEPS` becomes `localstack` and not `localstack kafka`, because the broker is started by `ensure-kafka` with its host listener ("Local Stack and Load Test"); the two protected lines that pin the dependency list change to that text.
 
@@ -1364,10 +1373,10 @@ The line numbers are those of head `ecc5d17`; the stories re-read them. Protecte
 - `KAFKA_NODE_ID=1`, `KAFKA_PROCESS_ROLES=broker,controller`, `KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093`, `KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER`, `KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL`;
 - `KAFKA_LISTENERS=PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093,EXTERNAL://:9095`, `KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,INTERNAL://localhost:9094,EXTERNAL://localhost:9095`, `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT`;
 - `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1`, `KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1`, `KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS=0`, `KAFKA_AUTO_CREATE_TOPICS_ENABLE=false`, `KAFKA_LOG_DIRS=/var/lib/kafka/data` on the volume `kafka_data` (the image writes to `/tmp` otherwise);
-- health check: `/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists --topic notifications --partitions 1 --replication-factor 1` followed by `--describe --topic notifications`, interval 10 s, start period 60 s; the broker is healthy only when the topic exists with one partition;
+- health check: `/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists --topic notifications --partitions 1 --replication-factor 1` followed by `--describe --topic notifications` piped into `grep -Eq 'PartitionCount:[[:space:]]*1[[:space:]]'`, interval 10 s, start period 60 s; the broker is healthy only when the topic exists with exactly one partition (a count such as 10 does not match);
 - `app` gets `depends_on: kafka: condition: service_healthy` and `KAFKA_BOOTSTRAP_SERVERS: kafka:9092`.
 
-`docker-compose.prod.yml`: `kafka` under profile `local`; `app` gets `KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}` and `MAX_SUBSCRIBERS: ${MAX_SUBSCRIBERS:-5000}` (NFR-9), and no `:?` variable for Kafka (a protected test renders the reference with only `DATABASE_URL` and `AWS_REGION`, later only `AWS_REGION`). `docker-compose.load_test.override.yml`: `kafka` without a host port and `restart: 'no'`. `docker-compose.override.yml`: no Kafka port. Data and the topic survive a restart of the stack's service (volume).
+`docker-compose.prod.yml`: `kafka` under profile `local`; `app` gets `KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}` and `MAX_SUBSCRIBERS: ${MAX_SUBSCRIBERS:-5000}` (NFR-9), and no `:?` variable for Kafka (a protected test renders the reference with only `DATABASE_URL` and `AWS_REGION`, later only `AWS_REGION`). `docker-compose.load_test.override.yml`: `kafka` without a host port and `restart: 'no'`. `docker-compose.override.yml`: unchanged (no Kafka port; the app keeps `kafka:9092` from the base file), so it gets no `.templatesyncignore` entry. Data and the topic survive a restart of the stack's service (volume).
 
 **Host listener for the tests.** A new file `docker-compose.kafka-host.yml` holds only `services: kafka: ports: ["127.0.0.1:9095:9095"]`. A new `make/service.mk` (loaded by `Makefile:566`) adds:
 
@@ -1390,7 +1399,7 @@ Both names get a row in a new `docs/make-targets-service.md` (docs-check rule 6)
 
 General rules: unit tests in sibling `tests.rs`; paused tokio time wherever a timer is involved; every awaited call of a test inside `tokio::time::timeout`; a scripted fake that a loop waits on pends (`std::future::pending`) after its script instead of answering for ever, so a mutant fails an assertion and never hangs a test; one Kafka topic per test (nextest runs tests in parallel processes against one broker).
 
-**Fakes (`tests/support`, `std` and `async-trait` only, depends on `event-stream-domain`):** `ScriptedTopicProbe`, `ScriptedTopicTail` and `ScriptedTopicReplay`, each a `Mutex<VecDeque<Result<..>>>` of scripted answers that records its calls (seek positions, page positions); `StaticTopic`, an in-memory partition (records, log start, end) that serves all three ports with the port rules, for subscription and two-node tests without a broker. `StaticTopic::fetch` with no record at or above the position returns `Pending` once and wakes itself before it answers the empty batch (a hand-written future, std only), so a loop on it yields; `page` answers at once; at the end of the log both answer an empty batch whose `next` equals the requested position. Test support has no timer, so a test that runs the supervised loop on it wraps the tail in a pacing adapter of its own crate (`crates/service` tests), which awaits `tokio::time::sleep(KAFKA_FETCH_MAX_WAIT)` after an empty batch.
+**Fakes (`tests/support`, `std` and `async-trait` only, depends on `event-stream-domain`):** `ScriptedTopicProbe`, `ScriptedTopicTail` and `ScriptedTopicReplay`, each a `Mutex<VecDeque<Result<..>>>` of scripted answers that records its calls (seek positions, page positions); `StaticTopic`, an in-memory partition (records, log start, end) that serves all three ports with the port rules, for subscription and two-node tests without a broker. `StaticTopic::fetch` with no record at or above the position returns `Pending` once and wakes itself before it answers the empty batch (a hand-written future, std only), so a loop on it yields; `page` answers at once; at the end of the log both answer an empty batch whose `next` equals the requested position. Test support has no timer, so a test that runs the supervised loop on it wraps the tail in a pacing adapter of its own crate (`crates/service` tests), which awaits `tokio::time::sleep(KAFKA_FETCH_MAX_WAIT)` after an empty batch. The fixture `test_support::fixture::stored_event(sequence, type, json)` (story 2.2) builds a `StoredEvent` for application tests, because the application crate has no `uuid` dependency and `uuid` is not in its `dev_external` allow-list.
 
 **Domain:** `EventType` (length 128 and 129, the pattern), `Cursor::parse` (digits, sign, blank, empty, overflow), the saturating arithmetic of `Cursor` and `Offset::sequence`, `Sequence::new(0)`, `PageLimit::reached`, `StoredEvent::cost`.
 
