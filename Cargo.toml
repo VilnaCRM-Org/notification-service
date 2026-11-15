@@ -7,6 +7,9 @@ members = [
     "crates/internal/health-check/application",
     "crates/internal/health-check/domain",
     "crates/internal/health-check/infrastructure",
+    "crates/notification/event-stream/application",
+    "crates/notification/event-stream/domain",
+    "crates/notification/event-stream/infrastructure",
     "crates/service",
     "crates/shared/application",
     "crates/shared/domain",
@@ -29,6 +32,8 @@ repository = "https://github.com/VilnaCRM-Org/notification-service"
 
 [workspace.dependencies]
 # Workspace crates
+event-stream-application = { path = "crates/notification/event-stream/application" }
+event-stream-domain = { path = "crates/notification/event-stream/domain" }
 health-check-application = { path = "crates/internal/health-check/application" }
 health-check-domain = { path = "crates/internal/health-check/domain" }
 health-check-infrastructure = { path = "crates/internal/health-check/infrastructure" }

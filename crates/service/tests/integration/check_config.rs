@@ -5,7 +5,7 @@ use rstest::rstest;
 
 use crate::support::{Scratch, VALID_ENVIRONMENT, stderr, stdout};
 
-const FULL_ENVIRONMENT: [(&str, &str); 19] = [
+const FULL_ENVIRONMENT: [(&str, &str); 20] = [
     ("APP_ENV", "dev"),
     ("APP_HOST", "127.0.0.1"),
     ("APP_PORT", "0"),
@@ -28,6 +28,7 @@ const FULL_ENVIRONMENT: [(&str, &str); 19] = [
     ("HTTP_REQUEST_TIMEOUT", "5s"),
     ("HTTP_MAX_BODY_BYTES", "2048"),
     ("SHUTDOWN_GRACE_PERIOD", "3s"),
+    ("EVENT_TYPES", "user.created,order.paid"),
 ];
 
 #[test]
@@ -137,6 +138,84 @@ fn a_statement_timeout_outside_its_range_is_rejected(#[case] value: &str) {
         stderr(&output),
         "DATABASE_STATEMENT_TIMEOUT: must be a duration from 1ms to 24d\n"
     );
+}
+
+const EVENT_TYPES_PROBLEM: &str =
+    "EVENT_TYPES: must be a comma-separated list of 1 to 1000 event type names";
+
+/// `count` distinct valid names, joined by commas.
+fn distinct_names(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("t{index}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[rstest]
+#[case::empty_value("")]
+#[case::empty_entry("secret.a,,secret.b")]
+#[case::invalid_name("secret.a,Secret.B")]
+#[case::a_thousand_and_one(&distinct_names(1_001))]
+fn check_config_rejects_invalid_event_types_without_their_value(#[case] value: &str) {
+    let scratch = Scratch::new();
+    let variables = [
+        VALID_ENVIRONMENT[0],
+        VALID_ENVIRONMENT[1],
+        ("EVENT_TYPES", value),
+    ];
+
+    let output = scratch.run(&["check-config"], &variables);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), format!("{EVENT_TYPES_PROBLEM}\n"));
+}
+
+#[rstest]
+#[case::empty_entry("secret.a,,secret.b")]
+#[case::invalid_name("secret.a,Secret.B")]
+fn serve_rejects_invalid_event_types_without_their_value(#[case] value: &str) {
+    let scratch = Scratch::new();
+    let variables = [
+        VALID_ENVIRONMENT[0],
+        VALID_ENVIRONMENT[1],
+        ("EVENT_TYPES", value),
+    ];
+
+    let output = scratch.run(&["serve"], &variables);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(stderr(&output), "");
+    let printed = stdout(&output);
+    let lines: Vec<serde_json::Value> = printed
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{printed}");
+    assert_eq!(lines[0]["message"], "invalid configuration");
+    assert_eq!(lines[0]["variable"], "EVENT_TYPES");
+    assert_eq!(
+        lines[0]["reason"],
+        "must be a comma-separated list of 1 to 1000 event type names"
+    );
+    assert!(!printed.contains("secret."));
+    assert!(!printed.contains("Secret.B"));
+}
+
+#[test]
+fn check_config_accepts_a_thousand_distinct_event_types() {
+    let scratch = Scratch::new();
+    let names = distinct_names(1_000);
+    let variables = [
+        VALID_ENVIRONMENT[0],
+        VALID_ENVIRONMENT[1],
+        ("EVENT_TYPES", names.as_str()),
+    ];
+
+    let output = scratch.run(&["check-config"], &variables);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "configuration OK\n");
 }
 
 #[test]

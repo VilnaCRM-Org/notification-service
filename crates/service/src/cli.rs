@@ -158,6 +158,10 @@ pub struct ServeArgs {
         hide_env_values = true
     )]
     pub shutdown_grace_period: Option<String>,
+    /// Comma-separated names of the subscribable event types, 1 to 1000 distinct names (default:
+    /// none).
+    #[arg(long = "event-types", env = "EVENT_TYPES", hide_env_values = true)]
+    pub event_types: Option<String>,
 }
 
 /// Settings of `migrate` and `migrate revert`.

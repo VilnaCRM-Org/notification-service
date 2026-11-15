@@ -55,3 +55,10 @@ tests/e2e/
 .github/workflows/template-sync-pat.yml
 .github/TEMPLATE_SYNC_PAT.md
 docs/extension-seams.md
+docker-compose.yml
+docker-compose.load_test.override.yml
+docker-compose.prod.yml
+docs/make-targets.md
+docs/architecture.md
+crates/service/tests/integration/check_config.rs
+crates/notification/

@@ -1,5 +1,5 @@
-//! The world of a scenario: injected faults, the last response, the created ids and the scenario
-//! database. A new application instance is built for every request.
+//! The world of a scenario: injected faults, the configured event types, the last response, the
+//! created ids and the scenario database. A new application instance is built for every request.
 
 use std::collections::BTreeSet;
 use std::str::FromStr as _;
@@ -47,6 +47,7 @@ impl Reply {
 #[derive(Debug, Default, cucumber::World)]
 pub(crate) struct AppWorld {
     failing: Vec<Dependency>,
+    event_types: Option<String>,
     database: Option<String>,
     reply: Option<Reply>,
     created: Vec<String>,
@@ -55,7 +56,13 @@ pub(crate) struct AppWorld {
 
 /// The configuration as the binary reads it from the environment.
 fn base_config() -> Config {
-    let Command::Serve(args) = Cli::parse_from(["service", "serve"]).command else {
+    config_with(&[])
+}
+
+/// The configuration as the binary reads it from the environment and the extra flags.
+fn config_with(flags: &[&str]) -> Config {
+    let arguments = ["service", "serve"].iter().chain(flags);
+    let Command::Serve(args) = Cli::parse_from(arguments).command else {
         panic!("`serve` arguments expected");
     };
     let mut config = Config::from_args(args).expect("valid configuration");
@@ -109,6 +116,11 @@ impl AppWorld {
     /// Marks a dependency as failing: its probe is replaced before the next request.
     pub(crate) fn fail(&mut self, dependency: Dependency) {
         self.failing.push(dependency);
+    }
+
+    /// Sets `EVENT_TYPES` of the next requests.
+    pub(crate) fn configure_event_types(&mut self, value: &str) {
+        self.event_types = Some(value.to_owned());
     }
 
     /// The last response.
@@ -180,7 +192,10 @@ impl AppWorld {
         body: &str,
     ) {
         let url = self.database_url().await;
-        let mut config = base_config();
+        let mut config = self
+            .event_types
+            .as_deref()
+            .map_or_else(base_config, |value| config_with(&["--event-types", value]));
         config.database.url = url;
         let mut adapters = Adapters::connect(&config).await.expect("production wiring");
         for dependency in &self.failing {

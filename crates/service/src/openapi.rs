@@ -22,6 +22,7 @@ pub const API_VERSION: &str = "1.0.0";
     ),
     servers((url = "/", description = "Current host")),
     tags(
+        (name = "EventStream", description = "Event catalog and event stream status endpoints."),
         (name = "ExampleApiResource", description = "Template example resource endpoints."),
         (name = "HealthCheck", description = "Runtime health-check endpoints."),
     )
@@ -60,6 +61,7 @@ pub fn api_router() -> OpenApiRouter<AppState> {
     OpenApiRouter::with_openapi(document)
         .nest("/api", health_check_application::router())
         .nest("/api", some_module_application::http::router())
+        .nest("/api", event_stream_application::http::router())
 }
 
 /// The document.

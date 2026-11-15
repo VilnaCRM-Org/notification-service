@@ -7,6 +7,8 @@
 use std::sync::Arc;
 
 use axum::Router;
+use event_stream_application::http::EventStreamState;
+use event_stream_application::{EventCatalog, ListEventTypesHandler};
 use health_check_application::HealthCheckState;
 use health_check_application::HealthService;
 use health_check_domain::HealthProbe;
@@ -115,14 +117,16 @@ fn register_commands(
     Ok(bus.register(create)?)
 }
 
-/// Registers the query handlers of the example context.
+/// Registers the query handlers of the example context and of the event stream.
 fn register_queries(
     bus: InMemoryQueryBus,
     repository: &Arc<dyn ExampleApiResourceRepository>,
+    catalog: &EventCatalog,
 ) -> Result<InMemoryQueryBus, BootstrapError> {
     let get = GetExampleApiResourceHandler::new(Arc::clone(repository));
     let list = ListExampleApiResourcesHandler::new(Arc::clone(repository));
-    Ok(bus.register(get)?.register(list)?)
+    let event_types = ListEventTypesHandler::new(Arc::new(catalog.clone()));
+    Ok(bus.register(get)?.register(list)?.register(event_types)?)
 }
 
 /// Registers every handler, builds the command and query buses, the state, the `GraphQL` schema
@@ -139,9 +143,13 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
         Arc::clone(&adapters.uuid_generator),
     );
     let command_bus = register_commands(InMemoryCommandBus::new(), create)?;
-    let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository)?;
+    let catalog = &config.streams.catalog;
+    let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository, catalog)?;
     let commands: Arc<dyn CommandBus> = Arc::new(command_bus);
     let queries: Arc<dyn QueryBus> = Arc::new(query_bus);
+    let event_stream = EventStreamState {
+        query_bus: Arc::clone(&queries),
+    };
     let some_module = SomeModuleState {
         command_bus: commands,
         query_bus: queries,
@@ -155,6 +163,7 @@ pub fn router(adapters: Adapters, config: &Config) -> Result<Router, BootstrapEr
     let state = AppState {
         health_check,
         some_module,
+        event_stream,
     };
     Ok(assemble(state, schema, config))
 }

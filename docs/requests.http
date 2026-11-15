@@ -10,6 +10,9 @@ GET {{baseUrl}}/ping
 ### Health check: 204 without a body, or a 500 problem document that lists the failing dependencies
 GET {{baseUrl}}/api/health
 
+### List the subscribable event types (EVENT_TYPES), in byte order; page starts at 1, itemsPerPage is 1 to 100 (a bare JSON array)
+GET {{baseUrl}}/api/event-types?page=1&itemsPerPage=30
+
 ### List the resources, newest first; page starts at 1, itemsPerPage is 1 to 100 (a bare JSON array)
 GET {{baseUrl}}/api/example_api_resources?page=1&itemsPerPage=30
 

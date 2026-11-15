@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use event_stream_application::{EventCatalog, ListEventTypesHandler};
 use health_check_domain::{Dependency, HealthProbe};
 use health_check_infrastructure::CacheProbe;
 use http_body_util::BodyExt as _;
@@ -333,7 +334,7 @@ fn a_second_query_handler_is_a_duplicate_that_names_the_message() {
         .register(GetExampleApiResourceHandler::new(Arc::clone(&repository)))
         .unwrap();
 
-    let error = register_queries(bus, &repository).unwrap_err();
+    let error = register_queries(bus, &repository, &EventCatalog::default()).unwrap_err();
 
     assert!(
         matches!(error, BootstrapError::DuplicateHandler(_)),
@@ -343,6 +344,50 @@ fn a_second_query_handler_is_a_duplicate_that_names_the_message() {
         error.to_string().contains("GetExampleApiResource"),
         "{error}"
     );
+}
+
+#[test]
+fn a_second_event_type_handler_is_a_duplicate_that_names_the_message() {
+    let bus = InMemoryQueryBus::new()
+        .register(ListEventTypesHandler::new(
+            Arc::new(EventCatalog::default()),
+        ))
+        .unwrap();
+
+    let error = register_queries(bus, &repository(), &EventCatalog::default()).unwrap_err();
+
+    assert!(
+        matches!(error, BootstrapError::DuplicateHandler(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("ListEventTypes"), "{error}");
+}
+
+#[tokio::test]
+async fn the_event_catalog_of_the_configuration_is_served() {
+    let mut args = ServeArgs {
+        aws_region: Some("us-east-1".to_owned()),
+        event_types: Some("user.created,order.paid,order.paid".to_owned()),
+        ..ServeArgs::default()
+    };
+    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
+    let app = router(adapters(), &Config::from_args(args).unwrap()).unwrap();
+
+    let answer = send(&app, get("/api/event-types")).await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.json(),
+        serde_json::json!([{"name": "order.paid"}, {"name": "user.created"}])
+    );
+}
+
+#[tokio::test]
+async fn an_unset_event_catalog_answers_an_empty_array() {
+    let answer = send(&app(adapters()), get("/api/event-types")).await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.body, "[]");
 }
 
 #[test]

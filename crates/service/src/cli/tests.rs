@@ -62,6 +62,8 @@ fn serve_takes_every_setting_as_a_flag() {
         "2048",
         "--shutdown-grace-period",
         "6s",
+        "--event-types",
+        "user.created,order.paid",
     ])
     .unwrap();
 
@@ -88,6 +90,7 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.http_request_timeout.as_deref(), Some("5s"));
     assert_eq!(args.http_max_body_bytes.as_deref(), Some("2048"));
     assert_eq!(args.shutdown_grace_period.as_deref(), Some("6s"));
+    assert_eq!(args.event_types.as_deref(), Some("user.created,order.paid"));
 }
 
 #[test]
@@ -241,6 +244,7 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "DATABASE_MAX_CONNECTIONS",
         "DATABASE_STATEMENT_TIMEOUT",
         "DATABASE_URL",
+        "EVENT_TYPES",
         "HEALTH_PROBE_TIMEOUT",
         "HTTP_MAX_BODY_BYTES",
         "HTTP_REQUEST_TIMEOUT",

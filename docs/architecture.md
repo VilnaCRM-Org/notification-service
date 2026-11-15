@@ -20,12 +20,13 @@ Application and Infrastructure never depend on each other. A handler therefore c
 
 ## Crates and bounded contexts
 
-The workspace has thirteen crates: nine layer crates (three bounded contexts times three layers), the composition root `service` (a library plus the binary), the test-double crate `test-support`, the Gherkin suite `e2e-tests` and the tooling crate `xtask`.
+The workspace has sixteen crates: twelve layer crates (four bounded contexts times three layers), the composition root `service` (a library plus the binary), the test-double crate `test-support`, the Gherkin suite `e2e-tests` and the tooling crate `xtask`.
 
 | Bounded context | Purpose | Crates |
 | --- | --- | --- |
 | `shared` | The shared kernel: aggregate root, domain event, bus ports and their in-process adapters, technical ports and adapters, the problem type and the problem-aware extractors | `shared-domain`, `shared-application`, `shared-infrastructure` |
 | `health-check` | The readiness check: the probe port, the orchestration of the three probes, and the PostgreSQL, cache and SQS probes | `health-check-domain`, `health-check-application`, `health-check-infrastructure` |
+| `event-stream` | The catalog of subscribable event types, read from `EVENT_TYPES` and served at `GET /api/event-types` | `event-stream-domain`, `event-stream-application`, `event-stream-infrastructure` |
 | `some-module` | The example context: create, read by id and list `ExampleApiResource`, REST and GraphQL | `some-module-domain`, `some-module-application`, `some-module-infrastructure` |
 
 A crate belongs to the context named by the text its layer pattern matches in `architecture.toml` (`some-module-domain` belongs to `some-module`). A context may use itself and the shared kernel and nothing else, so adding a context changes no rule file. `cargo xtask new-context <group> <context>` creates the three crates and registers them in the workspace. The layer crates live at `crates/<group>/<context>/<layer>`; the shared kernel lives at `crates/shared/<layer>`; `service` is at `crates/service`, `test-support` at `tests/support/`, `e2e-tests` at `tests/e2e/` and `xtask` at `xtask/`.

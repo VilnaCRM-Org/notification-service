@@ -1,0 +1,19 @@
+[package]
+name = "event-stream-domain"
+description = "Bounded context event-stream, domain layer: aggregates, value objects, domain events and the ports of the context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+rstest.workspace = true
+
+[lints]
+workspace = true

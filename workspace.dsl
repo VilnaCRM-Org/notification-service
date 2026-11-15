@@ -48,6 +48,23 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                 }
+                group "Notification/EventStream" {
+                    group "Notification/EventStream/Domain" {
+                        eventStreamDomain = component "event-stream-domain" "EventType value object and the domain errors of the event stream." "Rust crate" {
+                            tags "Domain"
+                        }
+                    }
+                    group "Notification/EventStream/Application" {
+                        eventStreamApplication = component "event-stream-application" "Event catalog, the list event types query and the GET /api/event-types handler." "Rust crate" {
+                            tags "Application"
+                        }
+                    }
+                    group "Notification/EventStream/Infrastructure" {
+                        eventStreamInfrastructure = component "event-stream-infrastructure" "Adapters of the event stream; none yet." "Rust crate" {
+                            tags "Infrastructure"
+                        }
+                    }
+                }
                 group "CompanySubdomain/SomeModule" {
                     group "CompanySubdomain/SomeModule/Domain" {
                         someModuleDomain = component "some-module-domain" "ExampleApiResource aggregate, value objects, created event, repository port." "Rust crate" {
@@ -74,6 +91,8 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 compositionRoot -> sharedDomain "Wires the bus, clock and UUID ports"
                 compositionRoot -> healthCheckDomain "Collects the probes behind the HealthProbe port"
                 compositionRoot -> someModuleDomain "Holds the repository behind the repository port"
+                compositionRoot -> eventStreamApplication "Mounts the event catalog route and registers its handler"
+                compositionRoot -> eventStreamDomain "Parses EVENT_TYPES into event types"
                 sharedApplication -> sharedDomain "Uses bus errors"
                 sharedInfrastructure -> sharedDomain "Implements bus, cache, clock and UUID ports"
                 healthCheckDomain -> sharedDomain "Uses the shared error type"
@@ -86,6 +105,9 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 someModuleApplication -> someModuleDomain "Uses the aggregate and the repository port"
                 someModuleApplication -> sharedDomain "Dispatches through the bus ports"
                 someModuleApplication -> sharedApplication "Uses extractors and problem documents"
+                eventStreamApplication -> eventStreamDomain "Pages the catalog of event types"
+                eventStreamApplication -> sharedDomain "Answers through the query bus ports"
+                eventStreamApplication -> sharedApplication "Uses extractors and problem documents"
                 someModuleInfrastructure -> someModuleDomain "Implements the repository port"
                 someModuleInfrastructure -> sharedDomain "Uses shared value objects"
                 sharedInfrastructure -> database "Opens the connection pool and applies migrations" "SQL over TCP"

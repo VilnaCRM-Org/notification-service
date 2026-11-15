@@ -30,6 +30,9 @@ A service that adds variables for its own adapters adds their rows here. The syn
 | `HTTP_REQUEST_TIMEOUT` | duration | `10s` | no | `service` | none |
 | `HTTP_MAX_BODY_BYTES` | integer 1 024 to 10 485 760 | `65536` | no | `service` | none |
 | `SHUTDOWN_GRACE_PERIOD` | duration | `10s` | no | `service` | none |
+| `EVENT_TYPES` | comma-separated event type names, 1 to 1 000 distinct names, each 1 to 128 characters matching `^[a-z][a-z0-9]*([._-][a-z0-9]+)*$`; no empty value or entry; a repeated name counts once | unset (an empty catalog) | no | `service` (the catalog of `GET /api/event-types`) | none |
+| `KAFKA_BOOTSTRAP_SERVERS` | comma-separated `host:port`, 1 to 16 entries; host a DNS name, an IPv4 address or a bracketed IPv6 address; port 1 to 65 535; no empty entry | `localhost:9092` | no | `service`; compose (`docker-compose.yml` sets `kafka:9092` in the `app` container, `docker-compose.prod.yml` defaults to `kafka:9092`); `.env` holds `localhost:9095`, the host listener of the local broker that `make ensure-kafka` publishes | none |
+| `MAX_SUBSCRIBERS` | integer 1 to 1 000 000 | `100000` (the production reference `docker-compose.prod.yml` defaults to `5000`) | no | `service` (the subscriber cap of a node); compose | none |
 
 Cross-field rules checked at start-up: `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`; `HEALTH_PROBE_TIMEOUT >= SQS_OPERATION_TIMEOUT`; `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT`; the two AWS key variables are both set or both unset (the error names the missing one). A configuration problem never prints the value of a variable.
 

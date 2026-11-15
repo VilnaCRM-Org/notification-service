@@ -16,6 +16,13 @@ fn json_document() -> Value {
     ("Checks the health of the service.", "Returns 204 when the database, the cache and the message broker respond. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
 )]
 #[case(
+    "/api/event-types",
+    "get",
+    "api_event_types_get",
+    "EventStream",
+    ("Retrieves the collection of EventType resources.", "Returns one page of the subscribable event types, in byte order of their names.", "200 400 422 default")
+)]
+#[case(
     "/api/example_api_resources",
     "get",
     "api_example_api_resources_get",
@@ -70,7 +77,7 @@ fn documents_every_operation(
 }
 
 #[test]
-fn documents_exactly_the_four_operations() {
+fn documents_exactly_the_five_operations() {
     let json = json_document();
     let mut operations = Vec::new();
     for (path, item) in json["paths"].as_object().unwrap() {
@@ -82,6 +89,7 @@ fn documents_exactly_the_four_operations() {
     assert_eq!(
         operations,
         [
+            "get /api/event-types",
             "get /api/example_api_resources",
             "post /api/example_api_resources",
             "get /api/example_api_resources/{id}",
@@ -152,6 +160,7 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
     assert_eq!(
         json["tags"],
         json!([
+            { "name": "EventStream", "description": "Event catalog and event stream status endpoints." },
             { "name": "ExampleApiResource", "description": "Template example resource endpoints." },
             { "name": "HealthCheck", "description": "Runtime health-check endpoints." },
         ])
@@ -161,7 +170,7 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
 }
 
 #[test]
-fn defines_exactly_the_five_schemas() {
+fn defines_exactly_the_six_schemas() {
     let json = json_document();
     let schemas = json["components"]["schemas"].as_object().unwrap();
 
@@ -171,6 +180,7 @@ fn defines_exactly_the_five_schemas() {
         [
             "CreateExampleApiResourceRequest",
             "DependencyFailure",
+            "EventType",
             "ExampleApiResource",
             "Problem",
             "Violation"
@@ -183,6 +193,20 @@ fn defines_exactly_the_five_schemas() {
     assert_eq!(
         schemas["ExampleApiResource"]["properties"]["id"]["format"],
         "uuid"
+    );
+}
+
+#[test]
+fn the_event_type_schema_carries_the_grammar_of_the_names() {
+    let json = json_document();
+
+    let name = &json["components"]["schemas"]["EventType"]["properties"]["name"];
+    assert_eq!(name["pattern"], "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$");
+    assert_eq!(name["maxLength"], 128);
+    assert_eq!(
+        json["paths"]["/api/event-types"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["schema"],
+        json!({"type": "array", "items": {"$ref": "#/components/schemas/EventType"}})
     );
 }
 

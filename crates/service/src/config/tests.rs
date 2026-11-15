@@ -57,6 +57,8 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(config.request_timeout, Duration::from_secs(10));
     assert_eq!(config.max_body_bytes, 65_536);
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(10));
+    assert_eq!(config.streams, StreamConfig::default());
+    assert_eq!(config.streams.catalog, EventCatalog::default());
 }
 
 #[test]
@@ -83,6 +85,7 @@ fn every_variable_accepts_a_valid_value() {
         http_request_timeout: some("1m"),
         http_max_body_bytes: some("2048"),
         shutdown_grace_period: some("15s"),
+        event_types: some("user.created,order.paid"),
     };
 
     let config = Config::from_args(args).unwrap();
@@ -110,6 +113,10 @@ fn every_variable_accepts_a_valid_value() {
     assert_eq!(config.request_timeout, Duration::from_secs(60));
     assert_eq!(config.max_body_bytes, 2048);
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(15));
+    assert_eq!(
+        config.streams.catalog,
+        catalog(&["order.paid", "user.created"])
+    );
 }
 
 #[rstest]
@@ -712,11 +719,123 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
     );
 }
 
+#[test]
+fn event_types_is_reported_after_the_limits() {
+    let args = ServeArgs {
+        shutdown_grace_period: some("later"),
+        event_types: some(""),
+        ..valid()
+    };
+
+    assert_eq!(
+        problems(args),
+        [
+            (
+                "SHUTDOWN_GRACE_PERIOD",
+                "must be a duration such as 500ms, 2s or 1m".to_owned()
+            ),
+            ("EVENT_TYPES", EVENT_TYPES_REASON.to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn event_types_is_reported_before_the_rules_between_variables() {
+    let args = ServeArgs {
+        event_types: some(""),
+        ..timeouts("4s", "2s", "3s", "10s")
+    };
+
+    assert_eq!(
+        problems(args),
+        [
+            ("EVENT_TYPES", EVENT_TYPES_REASON.to_owned()),
+            (
+                "HEALTH_PROBE_TIMEOUT",
+                "must not be shorter than DATABASE_ACQUIRE_TIMEOUT".to_owned()
+            ),
+        ]
+    );
+}
+
+fn catalog(names: &[&str]) -> EventCatalog {
+    EventCatalog::new(
+        names
+            .iter()
+            .map(|name| EventType::new((*name).to_owned()).unwrap())
+            .collect(),
+    )
+}
+
+fn with_event_types(raw: &str) -> ServeArgs {
+    ServeArgs {
+        event_types: some(raw),
+        ..valid()
+    }
+}
+
+/// `count` distinct valid names, joined by commas.
+fn distinct_names(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("t{index}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+const EVENT_TYPES_REASON: &str = "must be a comma-separated list of 1 to 1000 event type names";
+
+#[test]
+fn event_types_keeps_each_name_once_in_byte_order() {
+    let config = Config::from_args(with_event_types(
+        "user.created,order.paid,order-paid,order_paid,order.paid",
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.streams.catalog,
+        catalog(&["order-paid", "order.paid", "order_paid", "user.created"])
+    );
+}
+
+#[rstest]
+#[case::one("a", 1)]
+#[case::a_thousand(&distinct_names(1_000), 1_000)]
+#[case::a_thousand_and_a_repeat(&format!("{},t0", distinct_names(1_000)), 1_000)]
+fn event_types_accepts_1_to_1000_distinct_names(#[case] raw: &str, #[case] count: usize) {
+    let config = Config::from_args(with_event_types(raw)).unwrap();
+
+    let seen: usize = (1..=10_u32)
+        .map(|page| {
+            config
+                .streams
+                .catalog
+                .page(shared_domain::PageRequest::new(page, 100).unwrap())
+                .len()
+        })
+        .sum();
+    assert_eq!(seen, count);
+}
+
+#[rstest]
+#[case::empty_value("")]
+#[case::empty_entry("a,,b")]
+#[case::trailing_comma("a,")]
+#[case::leading_comma(",a")]
+#[case::invalid_name("a,User.created")]
+#[case::blank_name("a, b")]
+#[case::too_long(&"a".repeat(129))]
+#[case::a_thousand_and_one(&distinct_names(1_001))]
+fn event_types_rejects_anything_else_without_echoing_it(#[case] raw: &str) {
+    let reported = problems(with_event_types(raw));
+
+    assert_eq!(reported, [("EVENT_TYPES", EVENT_TYPES_REASON.to_owned())]);
+}
+
 type Mutator = fn(&mut ServeArgs);
 
 /// One row per variable of `ServeArgs`: the variable, a way to make it the only problem, and the
 /// variable that the problem names.
-const FIELDS: [(&str, Mutator, &str); 19] = [
+const FIELDS: [(&str, Mutator, &str); 20] = [
     ("APP_ENV", |a| a.app_env = some("x"), "APP_ENV"),
     ("APP_HOST", |a| a.app_host = some("x"), "APP_HOST"),
     ("APP_PORT", |a| a.app_port = some("x"), "APP_PORT"),
@@ -788,6 +907,7 @@ const FIELDS: [(&str, Mutator, &str); 19] = [
         |a| a.shutdown_grace_period = some("x"),
         "SHUTDOWN_GRACE_PERIOD",
     ),
+    ("EVENT_TYPES", |a| a.event_types = some(""), "EVENT_TYPES"),
 ];
 
 #[test]

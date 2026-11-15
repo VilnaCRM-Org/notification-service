@@ -1521,6 +1521,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-stream-application"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "event-stream-domain",
+ "http-body-util",
+ "rstest",
+ "serde",
+ "serde_json",
+ "shared-application",
+ "shared-domain",
+ "test-support",
+ "thiserror",
+ "tokio",
+ "tower",
+ "utoipa",
+ "utoipa-axum",
+ "validator",
+]
+
+[[package]]
+name = "event-stream-domain"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rstest",
+ "thiserror",
+]
+
+[[package]]
+name = "event-stream-infrastructure"
+version = "0.1.0"
+
+[[package]]
 name = "fake"
 version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3272,6 +3307,8 @@ dependencies = [
  "axum",
  "clap",
  "dotenvy",
+ "event-stream-application",
+ "event-stream-domain",
  "health-check-application",
  "health-check-domain",
  "health-check-infrastructure",
@@ -3875,6 +3912,7 @@ name = "test-support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "event-stream-domain",
  "fake",
  "health-check-domain",
  "rand",

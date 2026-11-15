@@ -4,6 +4,7 @@
 //! names the environment variable and a reason that never contains a value, so a secret that is
 //! malformed is not echoed.
 
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr};
 use std::ops::RangeInclusive;
@@ -12,6 +13,8 @@ use std::time::Duration;
 
 use axum::http::Uri;
 use axum::http::uri::Authority;
+use event_stream_application::EventCatalog;
+use event_stream_domain::EventType;
 use shared_infrastructure::messaging::SqsSettings;
 use shared_infrastructure::persistence::{
     MAX_STATEMENT_TIMEOUT, MIN_STATEMENT_TIMEOUT, PostgresSettings,
@@ -78,6 +81,15 @@ pub struct Config {
     pub max_body_bytes: usize,
     /// Time the in-flight requests get to finish after a termination signal.
     pub shutdown_grace_period: Duration,
+    /// Settings of the event stream.
+    pub streams: StreamConfig,
+}
+
+/// Settings of the event stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamConfig {
+    /// The subscribable event types (`EVENT_TYPES`).
+    pub catalog: EventCatalog,
 }
 
 impl Config {
@@ -96,14 +108,15 @@ impl Config {
         let database = database(&mut collector, &args.database);
         let sqs = sqs(&mut collector, &args);
         let limits = limits(&mut collector, &args);
+        let streams = stream_settings(&mut collector, &args);
         collector.cross_field_rules(
             database.as_ref().map(|settings| settings.acquire_timeout),
             sqs.as_ref().map(|settings| settings.operation_timeout),
             limits.as_ref().map(|limits| limits.health_probe_timeout),
             limits.as_ref().map(|limits| limits.request_timeout),
         );
-        match (server, database, sqs, limits) {
-            (Some(server), Some(database), Some(sqs), Some(limits))
+        match (server, database, sqs, limits, streams) {
+            (Some(server), Some(database), Some(sqs), Some(limits), Some(streams))
                 if collector.problems.is_empty() =>
             {
                 Ok(Self {
@@ -117,6 +130,7 @@ impl Config {
                     request_timeout: limits.request_timeout,
                     max_body_bytes: limits.max_body_bytes,
                     shutdown_grace_period: limits.shutdown_grace_period,
+                    streams,
                 })
             }
             _ => Err(ConfigErrors(collector.problems)),
@@ -366,6 +380,32 @@ fn limits(collector: &mut Collector, args: &ServeArgs) -> Option<Limits> {
         max_body_bytes: body?,
         shutdown_grace_period: grace?,
     })
+}
+
+fn stream_settings(collector: &mut Collector, args: &ServeArgs) -> Option<StreamConfig> {
+    let catalog = collector.collect("EVENT_TYPES", event_catalog(args.event_types.as_deref()));
+    Some(StreamConfig { catalog: catalog? })
+}
+
+/// The largest number of distinct names of `EVENT_TYPES`.
+const MAX_EVENT_TYPES: usize = 1_000;
+
+/// `EVENT_TYPES`: unset is an empty catalog; a value is 1 to 1 000 distinct valid names separated
+/// by commas, without an empty entry; a repeated name counts once.
+fn event_catalog(raw: Option<&str>) -> Parsed<EventCatalog> {
+    let Some(value) = raw else {
+        return Ok(EventCatalog::default());
+    };
+    let reason = || "must be a comma-separated list of 1 to 1000 event type names".to_owned();
+    let names = value
+        .split(',')
+        .map(|name| EventType::new(name.to_owned()))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map_err(|_invalid| reason())?;
+    if names.len() > MAX_EVENT_TYPES {
+        return Err(reason());
+    }
+    Ok(EventCatalog::new(names))
 }
 
 fn app_env(raw: Option<&str>) -> Parsed<AppEnv> {

@@ -1,6 +1,7 @@
 //! HTTP assembly of the service: the application state, the router and the middleware stack.
 
 use axum::extract::FromRef;
+use event_stream_application::http::EventStreamState;
 use health_check_application::HealthCheckState;
 use some_module_application::http::SomeModuleState;
 
@@ -19,4 +20,6 @@ pub struct AppState {
     pub health_check: HealthCheckState,
     /// State of the example context's routes.
     pub some_module: SomeModuleState,
+    /// State of the event stream's routes.
+    pub event_stream: EventStreamState,
 }

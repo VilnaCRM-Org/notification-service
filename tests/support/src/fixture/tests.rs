@@ -1,6 +1,7 @@
+use event_stream_domain::EventType;
 use some_module_domain::{ExampleApiResourceDescription, ExampleApiResourceName};
 
-use super::{example_api_resource, example_description, example_name};
+use super::{event_type, example_api_resource, example_description, example_name};
 use crate::seed::TestRng;
 
 #[test]
@@ -48,4 +49,33 @@ fn generated_values_satisfy_the_invariants() {
         assert!(ExampleApiResourceDescription::new(description.to_owned()).is_ok());
         assert_eq!(resource.id().value().as_uuid().get_version_num(), 7);
     }
+}
+
+#[test]
+fn generated_event_types_satisfy_the_grammar() {
+    let mut rng = TestRng::from_seed(20_261_114);
+
+    for _round in 0..500 {
+        let name = event_type(&mut rng);
+
+        assert!(EventType::new(name.as_str().to_owned()).is_ok());
+        assert!(name.as_str().chars().count() <= 45);
+    }
+}
+
+#[test]
+fn the_same_seed_gives_equal_event_types() {
+    assert_eq!(
+        event_type(&mut TestRng::from_seed(3)),
+        event_type(&mut TestRng::from_seed(3))
+    );
+}
+
+#[test]
+fn event_types_vary_with_the_seed() {
+    let mut rng = TestRng::from_seed(5);
+    let names: std::collections::BTreeSet<EventType> =
+        (0..50).map(|_| event_type(&mut rng)).collect();
+
+    assert!(names.len() > 40);
 }
