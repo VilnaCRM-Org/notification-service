@@ -1,8 +1,10 @@
-//! REST adapter of the event stream: the state its handlers read and the router that registers
-//! them.
+//! REST adapter of the event stream: the state its handlers read, the router that registers
+//! them, the frames of the streaming transports and the hub that hands them to the subscribers.
 
 pub mod dto;
+pub mod frame;
 pub mod handler;
+pub mod hub;
 
 use std::sync::Arc;
 
