@@ -155,13 +155,11 @@ override_exempt = ["tests/CLI/bats/fixtures/", "xtask/tests/fixtures/"]
 required_directories = [
     ".github/graphql-spec",
     ".github/openapi-spec",
-    ".sqlx",
     "crates/service",
     "crates/shared/application",
     "crates/shared/domain",
     "crates/shared/infrastructure",
     "features",
-    "migrations",
     "tests/CLI/bats",
     "tests/Load",
     "tests/e2e",
