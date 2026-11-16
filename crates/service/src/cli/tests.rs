@@ -167,6 +167,163 @@ fn the_credentials_are_accepted_as_hidden_flags() {
     assert_eq!(args.aws_secret_access_key.as_deref(), Some("secret"));
 }
 
+/// The arguments of `command` with `flag` set to `secret` and `--app-port 9000` after it.
+fn serve_args_with_secret(command: &str, flag: &str, secret: &str) -> ServeArgs {
+    let cli = parse(&[command, flag, secret, "--app-port", "9000"]).unwrap();
+    let (Command::Serve(args) | Command::CheckConfig(args)) = cli.command else {
+        panic!("expected serve or check-config");
+    };
+    assert_eq!(args.app_port.as_deref(), Some("9000"));
+    args
+}
+
+#[rstest]
+fn a_secret_access_key_that_starts_with_a_hyphen_is_taken_as_the_value(
+    #[values("serve", "check-config")] command: &str,
+    #[values("--AwSsEcReT", "-AwSsEcReT", "-", "--")] secret: &str,
+) {
+    let args = serve_args_with_secret(command, "--aws-secret-access-key", secret);
+
+    assert_eq!(args.aws_secret_access_key.as_deref(), Some(secret));
+}
+
+#[rstest]
+fn a_sasl_password_that_starts_with_a_hyphen_is_taken_as_the_value(
+    #[values("serve", "check-config")] command: &str,
+    #[values("--s3cretpw", "-s3cretpw", "-", "--")] secret: &str,
+) {
+    let args = serve_args_with_secret(command, "--kafka-sasl-password", secret);
+
+    assert_eq!(args.kafka.sasl_password.as_deref(), Some(secret));
+}
+
+#[rstest]
+#[case("--aws-secret-access-key", "--AwSsEcReT")]
+#[case("--aws-secret-access-key", "-AwSsEcReT")]
+#[case("--kafka-sasl-password", "--s3cretpw")]
+#[case("--kafka-sasl-password", "-s3cretpw")]
+fn a_usage_error_after_a_secret_that_starts_with_a_hyphen_never_names_it(
+    #[case] flag: &str,
+    #[case] secret: &str,
+) {
+    let error = parse(&["check-config", flag, secret, "--no-such-flag"]).unwrap_err();
+    let rendered = error.render().to_string();
+
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    assert!(
+        rendered.contains("unexpected argument '--no-such-flag' found"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(secret), "{rendered}");
+}
+
+#[rstest]
+#[case("serve")]
+#[case("check-config")]
+fn the_debug_output_of_the_arguments_redacts_the_secrets(#[case] command: &str) {
+    let cli = parse(&[
+        command,
+        "--aws-access-key-id",
+        "key-id-value",
+        "--aws-secret-access-key",
+        "aws-secret-value",
+        "--kafka-sasl-username",
+        "reader",
+        "--kafka-sasl-password",
+        "sasl-secret-value",
+    ])
+    .unwrap();
+
+    let printed = format!("{cli:?}");
+
+    assert!(!printed.contains("aws-secret-value"), "{printed}");
+    assert!(!printed.contains("sasl-secret-value"), "{printed}");
+    assert!(
+        printed.contains("aws_secret_access_key: Some(<redacted>)"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("sasl_password: Some(<redacted>)"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(r#"aws_access_key_id: Some("key-id-value")"#),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(r#"sasl_username: Some("reader")"#),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_debug_output_of_the_kafka_arguments_changes_only_the_password() {
+    let args = KafkaArgs {
+        bootstrap_servers: Some("a:9092".to_owned()),
+        sasl_username: Some("reader".to_owned()),
+        sasl_password: Some("sasl-secret-value".to_owned()),
+        retry_delay: Some("2s".to_owned()),
+        ..KafkaArgs::default()
+    };
+
+    assert_eq!(
+        format!("{args:?}"),
+        "KafkaArgs { bootstrap_servers: Some(\"a:9092\"), topic: None, security_protocol: None, \
+         sasl_mechanism: None, sasl_username: Some(\"reader\"), sasl_password: Some(<redacted>), \
+         client_id: None, request_timeout: None, connect_timeout: None, fetch_max_wait: None, \
+         retry_delay: Some(\"2s\") }"
+    );
+}
+
+#[test]
+fn the_debug_output_of_the_serve_arguments_changes_only_the_secret_key() {
+    let args = ServeArgs {
+        app_port: Some("9000".to_owned()),
+        aws_secret_access_key: Some("aws-secret-value".to_owned()),
+        cors_allowed_origins: Some("*".to_owned()),
+        ..ServeArgs::default()
+    };
+
+    assert_eq!(
+        format!("{args:?}"),
+        format!(
+            "ServeArgs {{ app_env: None, app_host: None, app_port: Some(\"9000\"), log_level: None, \
+             aws_region: None, aws_endpoint_url_sqs: None, aws_access_key_id: None, \
+             aws_secret_access_key: Some(<redacted>), sqs_connect_timeout: None, \
+             sqs_operation_timeout: None, sqs_max_attempts: None, health_probe_timeout: None, \
+             http_request_timeout: None, http_max_body_bytes: None, shutdown_grace_period: None, \
+             event_types: None, kafka: {:?}, streams: {:?}, cors_allowed_origins: Some(\"*\") }}",
+            KafkaArgs::default(),
+            StreamArgs::default()
+        )
+    );
+}
+
+#[test]
+fn the_pretty_debug_output_prints_a_set_secret_like_an_option() {
+    let args = KafkaArgs {
+        sasl_password: Some("sasl-secret-value".to_owned()),
+        ..KafkaArgs::default()
+    };
+
+    let printed = format!("{args:#?}");
+
+    assert!(!printed.contains("sasl-secret-value"), "{printed}");
+    assert!(
+        printed.contains("    sasl_password: Some(\n        <redacted>,\n    ),\n"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_debug_output_shows_an_unset_secret_as_none() {
+    let printed = format!("{:?}", ServeArgs::default());
+
+    assert!(printed.contains("aws_secret_access_key: None"), "{printed}");
+    assert!(printed.contains("sasl_password: None"), "{printed}");
+    assert!(!printed.contains("<redacted>"), "{printed}");
+}
+
 #[test]
 fn check_config_takes_the_arguments_of_serve() {
     let cli = parse(&["check-config", "--app-port", "9000"]).unwrap();

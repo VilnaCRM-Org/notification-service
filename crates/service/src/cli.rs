@@ -2,8 +2,11 @@
 //!
 //! Every setting is an `Option<String>` bound to its environment variable, so clap never rejects a
 //! value: [`crate::config::Config::from_args`] parses and validates all of them and names the
-//! variable of every problem. `--help` names each variable and never prints a value.
+//! variable of every problem. `--help` names each variable and never prints a value, and the
+//! `Debug` output prints the value of a set secret as `<redacted>`. A secret flag takes the next
+//! token as its value even when it starts with `-`, so a usage error never names a secret.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -33,7 +36,7 @@ pub enum Command {
 }
 
 /// Settings of `serve` and `check-config`: every service variable.
-#[derive(Debug, Clone, Default, Args)]
+#[derive(Clone, Default, Args)]
 pub struct ServeArgs {
     /// Deployment environment: `dev`, `test` or `prod` (default `prod`).
     #[arg(long = "app-env", env = "APP_ENV", hide_env_values = true)]
@@ -61,11 +64,14 @@ pub struct ServeArgs {
     #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, hide = true)]
     pub aws_access_key_id: Option<String>,
     /// Secret access key; only validated as a pair with the key id, the AWS SDK reads it itself.
+    // The token after the flag is always the value, also when it starts with `-`, so a usage error
+    // never names the key.
     #[arg(
         long,
         env = "AWS_SECRET_ACCESS_KEY",
         hide_env_values = true,
-        hide = true
+        hide = true,
+        allow_hyphen_values = true
     )]
     pub aws_secret_access_key: Option<String>,
     /// Timeout of establishing an SQS connection (default 500ms).
@@ -138,7 +144,7 @@ pub struct ServeArgs {
 }
 
 /// Settings of the Kafka connection of the event stream.
-#[derive(Debug, Clone, Default, Args)]
+#[derive(Clone, Default, Args)]
 pub struct KafkaArgs {
     /// Comma-separated `host:port` addresses of the brokers, 1 to 16 (default `localhost:9092`).
     #[arg(
@@ -172,10 +178,13 @@ pub struct KafkaArgs {
     )]
     pub sasl_username: Option<String>,
     /// SASL password; only with a SASL protocol, never printed.
+    // The token after the flag is always the value, also when it starts with `-`, so a usage error
+    // never names the password.
     #[arg(
         long = "kafka-sasl-password",
         env = "KAFKA_SASL_PASSWORD",
-        hide_env_values = true
+        hide_env_values = true,
+        allow_hyphen_values = true
     )]
     pub sasl_password: Option<String>,
     /// Client id of every Kafka connection, 1 to 128 characters (default `notification-service`).
@@ -214,6 +223,75 @@ pub struct KafkaArgs {
         hide_env_values = true
     )]
     pub retry_delay: Option<String>,
+}
+
+/// Every field as the derived `Debug` prints it, except the value of a set `AWS_SECRET_ACCESS_KEY`,
+/// which is printed as `<redacted>`.
+impl fmt::Debug for ServeArgs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServeArgs")
+            .field("app_env", &self.app_env)
+            .field("app_host", &self.app_host)
+            .field("app_port", &self.app_port)
+            .field("log_level", &self.log_level)
+            .field("aws_region", &self.aws_region)
+            .field("aws_endpoint_url_sqs", &self.aws_endpoint_url_sqs)
+            .field("aws_access_key_id", &self.aws_access_key_id)
+            .field(
+                "aws_secret_access_key",
+                &Redacted(self.aws_secret_access_key.as_deref()),
+            )
+            .field("sqs_connect_timeout", &self.sqs_connect_timeout)
+            .field("sqs_operation_timeout", &self.sqs_operation_timeout)
+            .field("sqs_max_attempts", &self.sqs_max_attempts)
+            .field("health_probe_timeout", &self.health_probe_timeout)
+            .field("http_request_timeout", &self.http_request_timeout)
+            .field("http_max_body_bytes", &self.http_max_body_bytes)
+            .field("shutdown_grace_period", &self.shutdown_grace_period)
+            .field("event_types", &self.event_types)
+            .field("kafka", &self.kafka)
+            .field("streams", &self.streams)
+            .field("cors_allowed_origins", &self.cors_allowed_origins)
+            .finish()
+    }
+}
+
+/// Every field as the derived `Debug` prints it, except the value of a set `KAFKA_SASL_PASSWORD`,
+/// which is printed as `<redacted>`.
+impl fmt::Debug for KafkaArgs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KafkaArgs")
+            .field("bootstrap_servers", &self.bootstrap_servers)
+            .field("topic", &self.topic)
+            .field("security_protocol", &self.security_protocol)
+            .field("sasl_mechanism", &self.sasl_mechanism)
+            .field("sasl_username", &self.sasl_username)
+            .field("sasl_password", &Redacted(self.sasl_password.as_deref()))
+            .field("client_id", &self.client_id)
+            .field("request_timeout", &self.request_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("fetch_max_wait", &self.fetch_max_wait)
+            .field("retry_delay", &self.retry_delay)
+            .finish()
+    }
+}
+
+/// The `Debug` stand-in of an optional secret: it prints like the `Option` it wraps, with
+/// `<redacted>` in place of a set value, so a reader still sees whether the secret is set.
+struct Redacted<'secret>(Option<&'secret str>);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(_) => formatter
+                .debug_tuple("Some")
+                .field(&format_args!("<redacted>"))
+                .finish(),
+            None => formatter.write_str("None"),
+        }
+    }
 }
 
 /// Limits of the event stream.
