@@ -2,7 +2,7 @@
 # Stages: base -> chef -> planner -> builder -> prod   (production image)
 #         base -> dev                                  (development image)
 # The tag of this image is the toolchain version: it equals rust-toolchain.toml and rust-version (G31 rule (c)).
-FROM rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58dd858b09c39a47dd02d7 AS base
+FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS base
 WORKDIR /app
 ENV CARGO_TERM_COLOR=always \
     CARGO_NET_RETRY=10 \
@@ -55,7 +55,7 @@ ENV CARGO_INCREMENTAL=1 \
 EXPOSE 8081
 CMD ["watchexec", "--restart", "--stop-signal", "SIGTERM", "--watch", "crates", "--watch", "Cargo.toml", "--watch", "Cargo.lock", "--", "cargo", "run", "--locked", "-p", "service", "--", "serve"]
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS prod
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2 AS prod
 LABEL org.opencontainers.image.licenses="CC0-1.0"
 COPY --from=builder /out/service /app/service
 ENV APP_ENV=prod \
