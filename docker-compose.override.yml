@@ -16,32 +16,20 @@ services:
     <<: *dev
     environment:
       IN_DEV_CONTAINER: '1'
-      # The services inside the compose network, at their in-network ports: DB_PORT and LOCALSTACK_PORT of .env
-      # are the published host ports, and the URLs of .env and .env.test are built from these four values.
-      DB_HOST: database
-      DB_PORT: '5432'
+      # LocalStack inside the compose network, at its in-network port: LOCALSTACK_PORT of .env is the published
+      # host port, and the URL of .env is built from these two values.
       LOCALSTACK_HOST: localstack
       LOCALSTACK_PORT: '4566'
       # Removed so that the binary reads .env and the test targets read .env.test.
       APP_ENV: !reset null
       LOG_LEVEL: !reset null
-      DATABASE_URL: !reset null
       AWS_ENDPOINT_URL_SQS: !reset null
     ports: !override
       - '127.0.0.1:${APP_PORT:-8081}:8081'
     healthcheck:
       test: ['CMD', '/cargo-target/debug/service', 'healthcheck']
-      start_period: 60s # the first compile happens in the migrate step
+      start_period: 600s # the first compile of the service happens in this container
       start_interval: 5s
-
-  migrate:
-    <<: *dev
-    command: ['cargo', 'run', '--locked', '--quiet', '-p', 'service', '--', 'migrate']
-    environment:
-      # The database inside the compose network, at its in-network port (DB_PORT of .env is the host port).
-      DB_HOST: database
-      DB_PORT: '5432'
-      DATABASE_URL: !reset null
 
   localstack:
     environment:

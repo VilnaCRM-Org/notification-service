@@ -12,10 +12,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
             tags "External"
         }
         system = softwareSystem "Service" "A VilnaCRM service built from the Rust service template." {
-            database = container "Database" "Stores the data of every bounded context." "PostgreSQL 16" {
-                tags "Database"
-            }
-            service = container "Service binary" "Serves REST under /api, GraphQL at /api/graphql, /api/health and /ping; also runs migrations and exports the API contracts." "Rust, axum, tokio" {
+            service = container "Service binary" "Serves REST under /api, GraphQL at /api/graphql, /api/health and /ping; also exports the API contracts." "Rust, axum, tokio" {
                 compositionRoot = component "service" "Composition root: CLI, configuration, wiring, router, middleware, OpenAPI document, GraphQL schema." "Rust crate"
                 group "Shared" {
                     group "Shared/Domain" {
@@ -29,7 +26,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Shared/Infrastructure" {
-                        sharedInfrastructure = component "shared-infrastructure" "In-process buses, cache adapter, clock, UUID generator, connection pool, migrator, SQS client factory." "Rust crate" {
+                        sharedInfrastructure = component "shared-infrastructure" "In-process buses, cache adapter, clock, UUID generator, SQS client factory." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -46,7 +43,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Internal/HealthCheck/Infrastructure" {
-                        healthCheckInfrastructure = component "health-check-infrastructure" "PostgreSQL, cache and SQS probes." "Rust crate" {
+                        healthCheckInfrastructure = component "health-check-infrastructure" "Cache and SQS probes." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -68,32 +65,12 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                 }
-                group "CompanySubdomain/SomeModule" {
-                    group "CompanySubdomain/SomeModule/Domain" {
-                        someModuleDomain = component "some-module-domain" "ExampleApiResource aggregate, value objects, created event, repository port." "Rust crate" {
-                            tags "Domain"
-                        }
-                    }
-                    group "CompanySubdomain/SomeModule/Application" {
-                        someModuleApplication = component "some-module-application" "Create command, get and list queries, audit subscriber, REST handlers, GraphQL resolvers." "Rust crate" {
-                            tags "Application"
-                        }
-                    }
-                    group "CompanySubdomain/SomeModule/Infrastructure" {
-                        someModuleInfrastructure = component "some-module-infrastructure" "PostgreSQL repository adapter." "Rust crate" {
-                            tags "Infrastructure"
-                        }
-                    }
-                }
                 compositionRoot -> sharedApplication "Uses fallbacks and middleware"
-                compositionRoot -> sharedInfrastructure "Builds buses, cache, pool and SQS client"
+                compositionRoot -> sharedInfrastructure "Builds buses, cache and SQS client"
                 compositionRoot -> healthCheckApplication "Mounts the health route"
                 compositionRoot -> healthCheckInfrastructure "Registers the probes"
-                compositionRoot -> someModuleApplication "Mounts routes, registers handlers and subscribers"
-                compositionRoot -> someModuleInfrastructure "Registers the repository"
                 compositionRoot -> sharedDomain "Wires the bus, clock and UUID ports"
                 compositionRoot -> healthCheckDomain "Collects the probes behind the HealthProbe port"
-                compositionRoot -> someModuleDomain "Holds the repository behind the repository port"
                 compositionRoot -> eventStreamApplication "Mounts the event catalog route and registers its handler"
                 compositionRoot -> eventStreamDomain "Parses EVENT_TYPES into event types"
                 compositionRoot -> eventStreamInfrastructure "Parses the Kafka settings"
@@ -105,21 +82,12 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 healthCheckApplication -> sharedDomain "Formats the error chain of a failed probe"
                 healthCheckInfrastructure -> healthCheckDomain "Implements HealthProbe"
                 healthCheckInfrastructure -> sharedDomain "Uses the Cache port"
-                someModuleDomain -> sharedDomain "Uses aggregate root, events and value objects"
-                someModuleApplication -> someModuleDomain "Uses the aggregate and the repository port"
-                someModuleApplication -> sharedDomain "Dispatches through the bus ports"
-                someModuleApplication -> sharedApplication "Uses extractors and problem documents"
                 eventStreamDomain -> sharedDomain "Uses the shared error type in the topic ports"
                 eventStreamApplication -> eventStreamDomain "Pages the catalog of event types"
                 eventStreamApplication -> sharedDomain "Answers through the query bus ports"
                 eventStreamApplication -> sharedApplication "Uses extractors and problem documents"
                 eventStreamInfrastructure -> eventStreamDomain "Implements the topic ports"
                 eventStreamInfrastructure -> sharedDomain "Uses the shared error type"
-                someModuleInfrastructure -> someModuleDomain "Implements the repository port"
-                someModuleInfrastructure -> sharedDomain "Uses shared value objects"
-                sharedInfrastructure -> database "Opens the connection pool and applies migrations" "SQL over TCP"
-                healthCheckInfrastructure -> database "Runs SELECT 1" "SQL over TCP"
-                someModuleInfrastructure -> database "Reads and writes example_api_resources" "SQL over TCP"
             }
         }
         apiClient -> system.service "Calls the REST and GraphQL API" "HTTP, JSON"
@@ -131,7 +99,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
             include *
             autolayout lr
         }
-        container system "Containers" "The service binary and its database." {
+        container system "Containers" "The service binary." {
             include *
             autolayout lr
         }
@@ -142,9 +110,6 @@ workspace "Service architecture" "C4 model of the service: system context, conta
         styles {
             element "Person" {
                 shape Person
-            }
-            element "Database" {
-                shape Cylinder
             }
             element "External" {
                 background #999999

@@ -38,12 +38,11 @@ setup_file() {
   unset COMPOSE_PROJECT_NAME CI IN_DEV_CONTAINER RUN_IN_CONTAINER
   export PROJECT_NAME="bats-exec-${suffix}"
   # free_port of the helper (20000 to 32767, below the ephemeral ports) keeps the chosen ports in a file, so the
-  # four command substitutions cannot draw the same port twice.
-  DB_PORT="$(free_port)"
+  # three command substitutions cannot draw the same port twice.
   LOCALSTACK_PORT="$(free_port)"
   APP_PORT="$(free_port)"
   STRUCTURIZR_PORT="$(free_port)"
-  export DB_PORT LOCALSTACK_PORT APP_PORT STRUCTURIZR_PORT
+  export LOCALSTACK_PORT APP_PORT STRUCTURIZR_PORT
   # An image that an earlier `make start` of this checkout built is reused; otherwise `make start` builds it.
   if [[ -z "${DEV_IMAGE:-}" ]]; then
     if docker image inspect "$(_default_dev_image)" >/dev/null 2>&1; then
@@ -100,10 +99,10 @@ probe_makefile() {
   refute_output --partial 'docker compose exec'
 }
 
-@test "RUN_IN_CONTAINER=1 make -n format-check starts with docker compose exec -T and carries the five -e options" {
+@test "RUN_IN_CONTAINER=1 make -n format-check starts with docker compose exec -T and carries the four -e options" {
   RUN_IN_CONTAINER=1 run make --no-print-directory -n format-check
   assert_success
-  assert_line --index 0 --regexp '^docker compose exec -T --user [0-9]+:[0-9]+ -e TEST_SEED -e PROPTEST_RNG_SEED -e CONFIG_CHANGE_APPROVED -e CARGO_BUILD_WARNINGS -e DATABASE_STATEMENT_TIMEOUT app cargo fmt --all --check$'
+  assert_line --index 0 --regexp '^docker compose exec -T --user [0-9]+:[0-9]+ -e TEST_SEED -e PROPTEST_RNG_SEED -e CONFIG_CHANGE_APPROVED -e CARGO_BUILD_WARNINGS app cargo fmt --all --check$'
 }
 
 @test "RUN_IN_CONTAINER=true is the same opt-in" {
@@ -133,7 +132,7 @@ probe_makefile() {
   refute_output --partial 'docker compose exec'
   RUN_IN_CONTAINER=1 run make --no-print-directory -n start-deps
   assert_success
-  assert_output --partial 'up --detach --wait --no-recreate database localstack'
+  assert_output --partial 'up --detach --wait --no-recreate localstack'
   refute_output --partial 'compose exec'
 }
 
@@ -189,31 +188,24 @@ probe_makefile() {
   assert_success
 }
 
-@test "RUN_IN_CONTAINER=1 make setup-test-db succeeds in the running container" {
-  RUN_IN_CONTAINER=1 run make --no-print-directory setup-test-db
-  assert_success
-}
-
-@test "inside the container the test environment is APP_ENV=test and a URL on database:5432/app_test" {
-  probe_makefile "\$(TEST_ENV) printenv APP_ENV DATABASE_URL"
+@test "inside the container the test environment is APP_ENV=test" {
+  probe_makefile "\$(TEST_ENV) printenv APP_ENV"
   RUN_IN_CONTAINER=1 run make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
   assert_success
-  assert_line --index 0 'test'
-  assert_line --index 1 --regexp '^postgres://[^@]+@database:5432/app_test$'
+  assert_output 'test'
 }
 
-@test "inside the container the URLs use the in-network ports whatever .env publishes" {
-  # Host ports in .env that differ from the in-network ports 5432 and 4566. The container reads the bind-mounted
-  # .env, and compose gives it the in-network ports, which win over the file.
-  sed -e 's/^DB_PORT=.*/DB_PORT=15432/' -e 's/^LOCALSTACK_PORT=.*/LOCALSTACK_PORT=14566/' .env >"${tmp}/env"
-  run grep -c -E '^(DB_PORT=15432|LOCALSTACK_PORT=14566)$' "${tmp}/env"
-  assert_output '2'
+@test "inside the container the URL uses the in-network port whatever .env publishes" {
+  # A host port in .env that differs from the in-network port 4566. The container reads the bind-mounted .env, and
+  # compose gives it the in-network port, which wins over the file.
+  sed -e 's/^LOCALSTACK_PORT=.*/LOCALSTACK_PORT=14566/' .env >"${tmp}/env"
+  run grep -c -E '^LOCALSTACK_PORT=14566$' "${tmp}/env"
+  assert_output '1'
   plant_replace .env "${tmp}/env"
-  probe_makefile "scripts/with-env.sh .env .env.test -- printenv DATABASE_URL AWS_ENDPOINT_URL_SQS"
+  probe_makefile "scripts/with-env.sh .env .env.test -- printenv AWS_ENDPOINT_URL_SQS"
   RUN_IN_CONTAINER=1 run make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
   assert_success
-  assert_line --index 0 --regexp '^postgres://[^@]+@database:5432/app_test$'
-  assert_line --index 1 'http://localstack:4566'
+  assert_output 'http://localstack:4566'
 }
 
 @test "TEST_SEED=7 reaches a command behind EXEC" {
@@ -228,20 +220,6 @@ probe_makefile() {
   RUN_IN_CONTAINER=1 run env -u TEST_SEED make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
   assert_success
   assert_output 'seed=[unset]'
-}
-
-@test "DATABASE_STATEMENT_TIMEOUT=30m reaches a command behind EXEC" {
-  probe_makefile "bash -c 'echo \"timeout=[\$\${DATABASE_STATEMENT_TIMEOUT-unset}]\"'"
-  RUN_IN_CONTAINER=1 DATABASE_STATEMENT_TIMEOUT=30m run make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
-  assert_success
-  assert_output 'timeout=[30m]'
-}
-
-@test "without DATABASE_STATEMENT_TIMEOUT the variable is unset behind EXEC" {
-  probe_makefile "bash -c 'echo \"timeout=[\$\${DATABASE_STATEMENT_TIMEOUT-unset}]\"'"
-  RUN_IN_CONTAINER=1 run env -u DATABASE_STATEMENT_TIMEOUT make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
-  assert_success
-  assert_output 'timeout=[unset]'
 }
 
 @test "RUN_IN_CONTAINER=1 scripts/doctor.sh without cargo on PATH exits 0 and prints the SKIP line" {

@@ -105,40 +105,6 @@ STUB
   chmod +x "${BATS_TEST_TMPDIR}/bin/docker"
 }
 
-# --- setup-load-test-db ----------------------------------------------------------------------------------------
-
-@test "setup-load-test-db takes the role and the database from the container, not from DB_USER and DB_NAME of the shell" {
-  mkdir -p "${BATS_TEST_TMPDIR}/bin"
-  cat >"${BATS_TEST_TMPDIR}/bin/docker" <<'STUB'
-#!/bin/bash
-printf '%s\n' "$*" >>"${RECORD}"
-case "$*" in *' ps '*) echo some-container-id ;; esac
-exit 0
-STUB
-  chmod +x "${BATS_TEST_TMPDIR}/bin/docker"
-  PATH="${BATS_TEST_TMPDIR}/bin:${PATH}" RECORD="${BATS_TEST_TMPDIR}/calls" LOAD_TEST_PROJECT=bats-other-load DB_USER=orders DB_NAME=orders \
-    run scripts/setup-load-test-db.sh
-  assert_success
-  # The statements run in the database container and expand the variables of that container.
-  local dollar='$'
-  run grep -c -F "exec -T database sh -c dropdb -U \"${dollar}POSTGRES_USER\" --if-exists --force \"${dollar}POSTGRES_DB\"" "${BATS_TEST_TMPDIR}/calls"
-  assert_output '1'
-  run grep -c -F "exec -T database sh -c createdb -U \"${dollar}POSTGRES_USER\" \"${dollar}POSTGRES_DB\"" "${BATS_TEST_TMPDIR}/calls"
-  assert_output '1'
-  run grep -c -E 'orders|-U app' "${BATS_TEST_TMPDIR}/calls"
-  assert_output '0'
-}
-
-@test "setup-load-test-db refuses the development project and does not call docker" {
-  mkdir -p "${BATS_TEST_TMPDIR}/bin"
-  printf '#!/bin/sh\necho called >>"%s/calls"\n' "${BATS_TEST_TMPDIR}" >"${BATS_TEST_TMPDIR}/bin/docker"
-  chmod +x "${BATS_TEST_TMPDIR}/bin/docker"
-  PATH="${BATS_TEST_TMPDIR}/bin:${PATH}" LOAD_TEST_PROJECT="$(make_var PROJECT_NAME)" run scripts/setup-load-test-db.sh
-  assert_failure 2
-  assert_output --partial 'refusing to act on project'
-  assert_file_not_exists "${BATS_TEST_TMPDIR}/calls"
-}
-
 # --- execute-load-tests-script -------------------------------------------------------------------------------
 
 # bats test_tags=slow

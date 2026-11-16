@@ -29,8 +29,6 @@ files = [
     "scripts/check-docs.sh",
     "scripts/check-invariants.sh",
     "scripts/mutation-diff.sh",
-    "scripts/setup-test-db.sh",
-    "scripts/check-sqlx-metadata.sh",
     "scripts/validate-openapi-spec.sh",
     "scripts/openapi-diff.sh",
     "scripts/graphql-diff.sh",

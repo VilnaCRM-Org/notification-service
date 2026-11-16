@@ -171,7 +171,6 @@ check_cargo_tools() {
   check_cargo_tool cargo-deny CARGO_DENY_VERSION "check-security, check-security-offline" cargo deny --version
   check_cargo_tool cargo-shear CARGO_SHEAR_VERSION "unused-dependencies" cargo shear --version
   check_cargo_tool cargo-hack CARGO_HACK_VERSION "check-crate-isolation" cargo hack --version
-  check_cargo_tool sqlx-cli SQLX_CLI_VERSION "setup-test-db, validate-sqlx-metadata, create-migration" sqlx --version
   check_cargo_tool clippy-sarif CLIPPY_SARIF_VERSION "static-analysis-sarif" clippy-sarif --version
   check_cargo_tool taplo TAPLO_VERSION "lint-toml, format-repo" taplo --version
   check_cargo_tool typos TYPOS_VERSION "lint-spelling" typos --version

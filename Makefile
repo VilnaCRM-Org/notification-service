@@ -28,7 +28,7 @@ export CARGO_BUILD_WARNINGS ?= deny
 endif
 ci: export CARGO_BUILD_WARNINGS ?= deny
 
-EXEC_ENV := TEST_SEED PROPTEST_RNG_SEED CONFIG_CHANGE_APPROVED CARGO_BUILD_WARNINGS DATABASE_STATEMENT_TIMEOUT
+EXEC_ENV := TEST_SEED PROPTEST_RNG_SEED CONFIG_CHANGE_APPROVED CARGO_BUILD_WARNINGS
 EXEC :=
 ifneq ($(filter 1 true,$(RUN_IN_CONTAINER)),)
 ifeq ($(strip $(CI))$(strip $(IN_DEV_CONTAINER)),)
@@ -36,16 +36,15 @@ EXEC := $(DOCKER_COMPOSE) exec -T --user $(HOST_UID):$(HOST_GID) $(foreach v,$(E
 endif
 endif
 
-# The test targets run on the test database of .env.test: a DATABASE_URL exported in the caller's shell (sqlx-cli users
-# often have one that names the development database) is removed first, every other caller value still wins.
-TEST_ENV = env -u DATABASE_URL scripts/with-env.sh .env .env.test --
+# The test targets read .env and then .env.test; a value the caller exports still wins.
+TEST_ENV = scripts/with-env.sh .env .env.test --
 
 # Caller-settable variables (a value set by the caller always wins, FR64). `CARGO_BUILD_WARNINGS` is declared in
 # the header above and must stay undefined until then, because of the target-specific line for `ci`.
 RUN_IN_CONTAINER ?=
 CI ?=
 IN_DEV_CONTAINER ?=
-DEPS ?= database localstack
+DEPS ?= localstack
 base_ref ?= origin/main
 SCHEMATHESIS_URL ?= http://localhost:$(LOAD_TEST_APP_PORT)
 scenario ?=
@@ -63,7 +62,6 @@ branch ?=
 repo_url ?=
 security_group ?=
 load_target ?=
-name ?=
 group ?=
 context ?=
 MUTANTS_SHARD ?=
@@ -89,7 +87,7 @@ PNPM_INSTALL = corepack pnpm install --frozen-lockfile --ignore-scripts --store-
 # The seven stages of `make ci` (DD-02), in order; `ci-list` prints the targets of all of them.
 CI_PREFLIGHT_TARGETS := validate-configuration validate-invariants secrets-scan lint-repo lint-load-tests validate-architecture-model
 CI_STATIC_ANALYSIS_TARGETS := format-check validate-manifest check-crate-isolation static-analysis complexity architecture check-security unused-dependencies check-requirements docs-check
-CI_TESTS_TARGETS := setup-test-db validate-sqlx-metadata tests-with-coverage doc-tests e2e-tests
+CI_TESTS_TARGETS := tests-with-coverage doc-tests e2e-tests
 CI_CONTRACTS_TARGETS := validate-contract-snapshots validate-openapi-spec openapi-diff graphql-diff
 CI_MUTATION_TARGETS := mutation-tests-diff
 CI_DELIVERY_TARGETS := build-prod-image image-scan schemathesis-validate smoke-load-tests
@@ -110,7 +108,7 @@ STAGE_RECIPE = $(foreach gate,$(1),@$(MAKE) --no-print-directory $(gate)$(NEWLIN
 # ---------------------------------------------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------------------------------------------
-.PHONY: help doctor bootstrap start up start-deps ensure-deps ensure-database build stop down sh logs new-logs purge clean
+.PHONY: help doctor bootstrap start up start-deps ensure-deps build stop down sh logs new-logs purge clean
 
 help: ## Show this help
 	@printf '%s\n' 'Usage:' '  make [target] [arg="val"...]' 'Targets:'
@@ -119,7 +117,7 @@ help: ## Show this help
 doctor: ## Check host prerequisites and pinned tool versions
 	@MAKE_COMMAND="$(DOCTOR_MAKE)" scripts/doctor.sh
 
-bootstrap: ## Prepare a fresh clone: check, install tools, hooks, build, start, migrate
+bootstrap: ## Prepare a fresh clone: check, install tools, hooks, build, start
 	MAKE_COMMAND="$(DOCTOR_MAKE)" scripts/doctor.sh --prerequisites
 ifeq ($(EXEC),)
 	@$(MAKE) --no-print-directory install
@@ -141,11 +139,8 @@ start-deps: ## Start the backing services named in DEPS if they are not running 
 	$(REQUIRE_DOCKER)
 	$(DOCKER_COMPOSE) up --detach --wait --no-recreate $(DEPS)
 
-ensure-deps: ## Start PostgreSQL and LocalStack unless this shell is the development container
+ensure-deps: ## Start LocalStack and Kafka unless this shell is the development container
 	@[ "$(IN_DEV_CONTAINER)" = 1 ] || $(MAKE) --no-print-directory start-deps
-
-ensure-database: ## Start PostgreSQL unless this shell is the development container
-	@[ "$(IN_DEV_CONTAINER)" = 1 ] || $(MAKE) --no-print-directory start-deps DEPS=database
 
 build: ## Rebuild the development images from scratch
 	$(REQUIRE_DOCKER)
@@ -196,7 +191,7 @@ build-prod-image: ## Build the production image
 # ---------------------------------------------------------------------------------------------------------------
 # Formatting, lint and analysis
 # ---------------------------------------------------------------------------------------------------------------
-.PHONY: format format-check format-repo lint-code lint-rustdoc static-analysis static-analysis-fix static-analysis-sarif complexity architecture validate-configuration validate-manifest check-crate-isolation validate-sqlx-metadata check-requirements unused-dependencies unused-dependencies-fix
+.PHONY: format format-check format-repo lint-code lint-rustdoc static-analysis static-analysis-fix static-analysis-sarif complexity architecture validate-configuration validate-manifest check-crate-isolation check-requirements unused-dependencies unused-dependencies-fix
 
 format: ## Format the Rust code
 	$(EXEC) cargo fmt --all
@@ -242,9 +237,6 @@ validate-manifest: ## Check that Cargo.lock matches the manifests
 check-crate-isolation: ## Check that every crate builds alone, with each feature
 	$(EXEC) $(HACK_CMD)
 
-validate-sqlx-metadata: setup-test-db ## Check that the offline query metadata in .sqlx is current
-	$(EXEC) $(TEST_ENV) scripts/check-sqlx-metadata.sh $(SQLX_CHECK_CMD)
-
 check-requirements: ## Check that the service configuration is valid
 	$(EXEC) $(CHECK_CONFIG_CMD)
 
@@ -266,10 +258,10 @@ unit-tests: ## Run the unit tests and the documentation tests
 doc-tests: ## Run the documentation tests
 	$(EXEC) $(DOCTEST_CMD)
 
-integration-tests: ensure-deps setup-test-db ## Run the integration tests against PostgreSQL and LocalStack
+integration-tests: ensure-deps ## Run the integration tests against LocalStack and Kafka
 	$(EXEC) $(TEST_ENV) $(INTEGRATION_CMD)
 
-e2e-tests: ensure-deps setup-test-db ## Run the Gherkin end-to-end tests
+e2e-tests: ensure-deps ## Run the Gherkin end-to-end tests
 	$(EXEC) $(TEST_ENV) $(E2E_CMD)
 
 all-tests: unit-tests integration-tests e2e-tests ## Run unit, integration and end-to-end tests
@@ -285,7 +277,7 @@ bats: ## Run the Makefile tests
 # ---------------------------------------------------------------------------------------------------------------
 .PHONY: tests-with-coverage coverage-xml coverage-html mutation-tests mutation-tests-diff
 
-tests-with-coverage: ensure-deps setup-test-db ## Run the unit and integration tests with coverage and enforce 100% lines and functions
+tests-with-coverage: ensure-deps ## Run the unit and integration tests with coverage and enforce 100% lines and functions
 	mkdir -p target/coverage
 	$(EXEC) $(COVERAGE_CLEAN_CMD)
 	$(EXEC) $(TEST_ENV) $(COVERAGE_RUN_CMD)
@@ -293,23 +285,23 @@ tests-with-coverage: ensure-deps setup-test-db ## Run the unit and integration t
 	$(EXEC) $(COVERAGE_HTML_CMD)
 	$(EXEC) $(COVERAGE_GATE_CMD)
 
-coverage-xml: ensure-deps setup-test-db ## Write target/coverage/coverage.xml (Cobertura) and lcov.info without enforcing the floor
+coverage-xml: ensure-deps ## Write target/coverage/coverage.xml (Cobertura) and lcov.info without enforcing the floor
 	mkdir -p target/coverage
 	$(EXEC) $(COVERAGE_CLEAN_CMD)
 	$(EXEC) $(TEST_ENV) $(COVERAGE_RUN_CMD)
 	$(EXEC) $(COVERAGE_XML_CMD)
 	$(EXEC) $(COVERAGE_LCOV_CMD)
 
-coverage-html: ensure-deps setup-test-db ## Write the HTML coverage report to target/coverage/html
+coverage-html: ensure-deps ## Write the HTML coverage report to target/coverage/html
 	mkdir -p target/coverage
 	$(EXEC) $(COVERAGE_CLEAN_CMD)
 	$(EXEC) $(TEST_ENV) $(COVERAGE_RUN_CMD)
 	$(EXEC) $(COVERAGE_HTML_CMD)
 
-mutation-tests: ensure-deps setup-test-db ## Run mutation testing over all production code (fails on a surviving or timed-out mutant)
+mutation-tests: ensure-deps ## Run mutation testing over all production code (fails on a surviving or timed-out mutant)
 	$(EXEC) $(TEST_ENV) $(MUTANTS_CMD)
 
-mutation-tests-diff: ensure-deps setup-test-db ## Run mutation testing over the code changed against base_ref
+mutation-tests-diff: ensure-deps ## Run mutation testing over the code changed against base_ref
 	$(EXEC) $(TEST_ENV) scripts/mutation-diff.sh $(base_ref) -- $(MUTANTS_CMD)
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -389,31 +381,6 @@ lint-load-tests: ## Lint and format-check the load-test JavaScript
 	$(NODE_RUN) sh -c '$(PNPM_INSTALL) && corepack pnpm exec eslint . && corepack pnpm exec prettier --check --config /repo/.prettierrc.yml . "!results/**" "!pnpm-lock.yaml"'
 
 # ---------------------------------------------------------------------------------------------------------------
-# Database
-# ---------------------------------------------------------------------------------------------------------------
-.PHONY: migrate migrate-rollback create-migration setup-test-db setup-load-test-db sqlx-prepare
-
-migrate: ensure-database ## Apply all pending migrations to the development database
-	$(EXEC) cargo run --locked --quiet -p service -- migrate
-
-migrate-rollback: ensure-database ## Revert the most recently applied migration
-	$(EXEC) cargo run --locked --quiet -p service -- migrate revert
-
-create-migration: ## Create a reversible migration pair: name=<snake_case_description>
-	@test -n "$(name)" || { echo 'Usage: make create-migration name=<snake_case_description>' >&2; exit 2; }
-	$(EXEC) sqlx migrate add -r $(name)
-
-setup-test-db: ensure-database ## Drop, create and migrate the test database
-	$(EXEC) $(TEST_ENV) scripts/setup-test-db.sh
-
-setup-load-test-db: ## Drop, create and migrate the database of the isolated load-test environment
-	$(REQUIRE_DOCKER)
-	scripts/setup-load-test-db.sh
-
-sqlx-prepare: setup-test-db ## Regenerate the offline query metadata in .sqlx from the freshly migrated test database
-	$(EXEC) $(TEST_ENV) cargo sqlx prepare --workspace -- --all-targets --all-features
-
-# ---------------------------------------------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------------------------------------------
 .PHONY: check-security check-security-offline secrets-scan image-scan
@@ -442,7 +409,6 @@ docs-check: ## Check that commands, paths and lists cited in the documentation e
 	mkdir -p target/reports/docs-check
 	$(EXEC) cargo run --locked --quiet -p service -- --help > target/reports/docs-check/root.txt
 	$(EXEC) cargo run --locked --quiet -p service -- serve --help > target/reports/docs-check/serve.txt
-	$(EXEC) cargo run --locked --quiet -p service -- migrate --help > target/reports/docs-check/migrate.txt
 	$(EXEC) cargo run --locked --quiet -p service -- healthcheck --help > target/reports/docs-check/healthcheck.txt
 	scripts/check-docs.sh --service-help target/reports/docs-check
 
@@ -548,7 +514,7 @@ ci-preflight: ## Stage 1 of make ci: configuration, invariants, secrets, reposit
 ci-static-analysis: ## Stage 2 of make ci: formatting, manifest, analysis, complexity, security, docs
 	$(call STAGE_RECIPE,$(CI_STATIC_ANALYSIS_TARGETS))
 
-ci-tests: ## Stage 3 of make ci: test database, query metadata, coverage, doc tests, end-to-end tests
+ci-tests: ## Stage 3 of make ci: coverage, doc tests, end-to-end tests
 	$(call STAGE_RECIPE,$(CI_TESTS_TARGETS))
 
 ci-contracts: ## Stage 4 of make ci: contract snapshots, OpenAPI lint and diff, GraphQL diff

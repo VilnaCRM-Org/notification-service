@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # Tests of the security gates and of the hardening claims (architecture-delivery.md "CLI Tests (Bats)", file
 # make_security.bats, DD-21, "Containers and Compose"): gates G9 and G10, the inspection of the production image,
-# the inspection of the rendered production reference (NFR12, FR91) and of the database readiness probe (NFR33).
+# the inspection of the rendered production reference (NFR12, FR91).
 # JSON is read with json_query of the helper (the pinned Node image), so the host needs no jq.
 #
 # Passing runs of the two gates are not repeated (DD-02). The key pair of G9 is generated at test time and is
@@ -82,7 +82,7 @@ image_content_findings() {
 
 # `docker compose config` of the production reference with the given variables set and no .env file read.
 render_production_reference() {
-  env -u DATABASE_URL -u AWS_REGION "$@" docker compose --env-file /dev/null \
+  env -u AWS_REGION "$@" docker compose --env-file /dev/null \
     -f docker-compose.yml -f docker-compose.prod.yml config --format json
 }
 
@@ -334,9 +334,9 @@ LISTING
   require_docker
   local image status
   image="$(production_image)"
-  # The liveness probe does not need the database or LocalStack: the connections are opened lazily.
+  # The liveness probe does not need LocalStack: the connections are opened lazily.
   container="$(docker run --detach --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-    -e APP_ENV=prod -e DATABASE_URL=postgres://app:unused@127.0.0.1:1/app -e AWS_REGION=us-east-1 \
+    -e APP_ENV=prod -e AWS_REGION=us-east-1 \
     -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:1 \
     "${image}")"
   run docker inspect --format '{{json .HostConfig}}' "${container}"
@@ -360,63 +360,32 @@ LISTING
 
 @test "the production reference renders with limits, read-only root, dropped capabilities, no-new-privileges and restart policies" {
   require_docker
-  run render_production_reference DATABASE_URL=postgres://app:unused@db.example.invalid:5432/app AWS_REGION=eu-west-1
+  run render_production_reference AWS_REGION=eu-west-1
   assert_success
   local rendered="${output}"
   run json_query 'data.services.app.deploy.resources.limits.cpus === 1
     && data.services.app.deploy.resources.limits.memory === "268435456"
     && data.services.app.deploy.resources.limits.pids === 256' <<<"${rendered}"
   assert_success
-  run json_query 'data.services.migrate.deploy.resources.limits.cpus === 0.5
-    && data.services.migrate.deploy.resources.limits.memory === "134217728"' <<<"${rendered}"
-  assert_success
-  # Both services, in one query: read-only root, every capability dropped, no-new-privileges.
-  run json_query '["app", "migrate"].every((name) => data.services[name].read_only === true
-    && JSON.stringify(data.services[name].cap_drop) === JSON.stringify(["ALL"])
-    && JSON.stringify(data.services[name].security_opt) === JSON.stringify(["no-new-privileges:true"]))' <<<"${rendered}"
+  # Read-only root, every capability dropped, no-new-privileges.
+  run json_query 'data.services.app.read_only === true
+    && JSON.stringify(data.services.app.cap_drop) === JSON.stringify(["ALL"])
+    && JSON.stringify(data.services.app.security_opt) === JSON.stringify(["no-new-privileges:true"])' <<<"${rendered}"
   assert_success
   run json_query 'data.services.app.environment.APP_ENV === "prod"
     && !("AWS_ENDPOINT_URL_SQS" in data.services.app.environment)' <<<"${rendered}"
   assert_success
-  # The restart policies (FR91): the service restarts unless it was stopped and gets 15 s to drain; the one-shot
-  # migration never restarts.
-  run json_query 'data.services.app.restart === "unless-stopped" && data.services.app.stop_grace_period === "15s"
-    && data.services.migrate.restart === "no"' <<<"${rendered}"
-  assert_success
-}
-
-@test "the database readiness probe uses the configured user and database, at most 10 s apart, with 10 retries" {
-  require_docker
-  run env DB_USER=bats_probe_user DB_NAME=bats_probe_db docker compose --env-file /dev/null -f docker-compose.yml \
-    config --format json
-  assert_success
-  local rendered="${output}"
-  # pg_isready reports success for any role name, so only the rendered command shows that the probe asks for the
-  # role and the database of the container, which take the two configured values.
-  run json_query 'data.services.database.environment.POSTGRES_USER === "bats_probe_user"
-    && data.services.database.environment.POSTGRES_DB === "bats_probe_db"' <<<"${rendered}"
-  assert_success
-  run json_query 'data.services.database.healthcheck.test[0] === "CMD-SHELL"
-    && /^pg_isready -U "[$]+POSTGRES_USER" -d "[$]+POSTGRES_DB"$/.test(data.services.database.healthcheck.test[1])' \
+  # The restart policy (FR91): the service restarts unless it was stopped and gets 15 s to drain.
+  run json_query 'data.services.app.restart === "unless-stopped" && data.services.app.stop_grace_period === "15s"' \
     <<<"${rendered}"
-  assert_success
-  # Compose prints durations as Go durations (5s, 1m0s); the interval must be at most 10 s.
-  run json_query '(() => {
-    const match = /^(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$/.exec(data.services.database.healthcheck.interval);
-    const seconds = match ? Number(match[1] || 0) * 60 + Number(match[2] || 0) : Infinity;
-    return seconds > 0 && seconds <= 10 && data.services.database.healthcheck.retries === 10;
-  })()' <<<"${rendered}"
   assert_success
 }
 
 @test "the production reference rendered with --env-file /dev/null fails and names each required variable" {
   require_docker
   # Compose stops at the first missing variable and its order is not fixed, so each case leaves exactly one
-  # required variable unset.
-  run render_production_reference AWS_REGION=eu-west-1
-  assert_failure
-  assert_output --partial 'DATABASE_URL is required'
-  run render_production_reference DATABASE_URL=postgres://app:unused@db.example.invalid:5432/app
+  # required variable unset. AWS_REGION is the only one.
+  run render_production_reference
   assert_failure
   assert_output --partial 'AWS_REGION is required'
 }

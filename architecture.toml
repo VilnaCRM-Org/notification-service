@@ -64,7 +64,6 @@ external = [
     "aws-sdk-sqs",
     "krafka",
     "moka",
-    "sqlx",
     "thiserror",
     "tokio",
     "tracing",
