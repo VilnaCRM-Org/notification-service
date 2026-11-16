@@ -12,17 +12,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// Every variable of a valid configuration that has no default: the database and the region.
-pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 2] = [
-    (
-        "DATABASE_URL",
-        "postgres://app:local-dev-only@127.0.0.1:5432/app",
-    ),
-    ("AWS_REGION", "us-east-1"),
-];
-
-/// URL that nothing listens on: the "unreachable database" case. No container is stopped.
-pub(crate) const DEAD_DATABASE_URL: &str = "postgres://app:unused@127.0.0.1:1/app";
+/// Every variable of a valid configuration that has no default: the region.
+pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 1] = [("AWS_REGION", "us-east-1")];
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
@@ -95,21 +86,6 @@ pub(crate) fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
 
-/// The URL of the database a `#[sqlx::test]` gave the test: its name from the server, the rest
-/// from `DATABASE_URL`.
-pub(crate) async fn database_url(pool: &sqlx::PgPool) -> String {
-    let name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let base = from_environment("DATABASE_URL")
-        .expect("DATABASE_URL is not set; run the tests through `make`")
-        .into_string()
-        .unwrap();
-    let (server, _database) = base.rsplit_once('/').unwrap();
-    format!("{server}/{name}")
-}
-
 /// A listener on a free loopback port that accepts connections (the kernel does) and never
 /// answers: the peer connects and then waits.
 #[expect(
@@ -129,14 +105,17 @@ pub(crate) fn stack_variable(name: &str) -> String {
         .unwrap()
 }
 
-/// The variables that let `serve` start against the compose services: the AWS ones of the test
-/// stack and the given database URL, with long budgets so that a request that must succeed does
-/// not depend on how fast a loaded machine opens its first connection (request > probe >=
-/// acquire and operation, as the configuration requires).
-pub(crate) fn stack_with(database_url: &str) -> Vec<(&'static str, String)> {
+/// The variables that let `serve` start against the compose services: the AWS ones and the Kafka
+/// broker of the test stack (its topic `notifications` is the default), with long budgets so that
+/// a request that must succeed does not depend on how fast a loaded machine opens its first
+/// connection (request > probe >= operation, as the configuration requires).
+pub(crate) fn stack() -> Vec<(&'static str, String)> {
     vec![
-        ("DATABASE_URL", database_url.to_owned()),
         ("AWS_REGION", stack_variable("AWS_REGION")),
+        (
+            "KAFKA_BOOTSTRAP_SERVERS",
+            stack_variable("KAFKA_BOOTSTRAP_SERVERS"),
+        ),
         (
             "AWS_ENDPOINT_URL_SQS",
             stack_variable("AWS_ENDPOINT_URL_SQS"),
@@ -146,7 +125,6 @@ pub(crate) fn stack_with(database_url: &str) -> Vec<(&'static str, String)> {
             "AWS_SECRET_ACCESS_KEY",
             stack_variable("AWS_SECRET_ACCESS_KEY"),
         ),
-        ("DATABASE_ACQUIRE_TIMEOUT", "30s".to_owned()),
         ("SQS_CONNECT_TIMEOUT", "10s".to_owned()),
         ("SQS_OPERATION_TIMEOUT", "30s".to_owned()),
         ("HEALTH_PROBE_TIMEOUT", "40s".to_owned()),
@@ -164,7 +142,8 @@ pub(crate) struct Answer {
 }
 
 impl Answer {
-    fn parse(raw: &str) -> Self {
+    /// The answer whose raw bytes, read up to the end of the connection, are `raw`.
+    pub(crate) fn parse(raw: &str) -> Self {
         let (head, body) = raw.split_once("\r\n\r\n").unwrap();
         let status = head.split(' ').nth(1).unwrap().parse().unwrap();
         Self {
@@ -173,6 +152,14 @@ impl Answer {
             body: body.to_owned(),
         }
     }
+}
+
+/// The log lines with `message`.
+pub(crate) fn messages_of<'a>(lines: &'a [Value], message: &str) -> Vec<&'a Value> {
+    lines
+        .iter()
+        .filter(|line| line["message"] == message)
+        .collect()
 }
 
 /// A running `service serve` process with its standard output read as JSON lines.
@@ -192,6 +179,13 @@ pub(crate) struct Server {
 
 /// How long a test waits for the next line of a service before it fails.
 const LINE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The request id of the requests that wait for readiness, so that a test can tell their log
+/// entries from those of the requests it checks.
+pub(crate) const READINESS: &str = "readiness-wait";
+
+/// How long a test waits for a service to become ready.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Reads the lines of `stdout` on a thread; the channel closes when the process closes it.
 fn lines_of(stdout: BufReader<std::process::ChildStdout>) -> Receiver<String> {
@@ -226,7 +220,7 @@ impl Finished {
 }
 
 /// Starts `service serve` on `127.0.0.1` with an ephemeral port and waits for its `listening`
-/// entry. `variables` complete the configuration (`DATABASE_URL`, `AWS_REGION`, ..).
+/// entry. `variables` complete the configuration (`AWS_REGION`, ..).
 pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
     let mut all = vec![("APP_PORT", "0"), ("APP_HOST", "127.0.0.1")];
     all.extend_from_slice(variables);
@@ -278,10 +272,6 @@ impl Server {
     }
 
     /// Sends one request and reads the whole answer (the connection is closed after it).
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "integration tests open the sockets their subject talks to"
-    )]
     pub(crate) fn request(
         &self,
         method: &str,
@@ -289,30 +279,25 @@ impl Server {
         headers: &[(&str, &str)],
         body: &str,
     ) -> Answer {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        let extra = headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}"))
-            .collect::<Vec<_>>()
-            .join("\r\n");
-        let extra = if extra.is_empty() {
-            extra
-        } else {
-            format!("{extra}\r\n")
-        };
-        let length = body.len();
-        let head = format!(
-            "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra}content-length: {length}\r\n\r\n{body}"
-        );
-        stream.write_all(head.as_bytes()).unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        Answer::parse(&raw)
+        request_to(self.port, method, path, headers, body)
     }
 
     /// Sends a `GET`.
     pub(crate) fn get(&self, path: &str) -> Answer {
         self.request("GET", path, &[], "")
+    }
+
+    /// Polls `GET /api/events/status` (request id [`READINESS`]) until the node reports `ready`,
+    /// for at most 10 s: the probe of the event stream passes from then on. The blocking poll runs
+    /// on the blocking pool, so the runtime of the calling test stays free; the future holds the
+    /// port only, not the server, whose receiver of log lines is not `Sync`.
+    pub(crate) fn wait_until_ready(&self) -> impl Future<Output = ()> + Send + use<> {
+        let port = self.port;
+        async move {
+            tokio::task::spawn_blocking(move || poll_until_ready(port))
+                .await
+                .unwrap_or_else(|failed| std::panic::resume_unwind(failed.into_panic()));
+        }
     }
 
     /// Opens a connection and sends a request head without its final blank line: the request is
@@ -380,6 +365,65 @@ impl Server {
             lines,
             stderr,
         }
+    }
+}
+
+/// Sends one request to the service on `port` and reads the whole answer (the connection is
+/// closed after it). Every write and every read waits at most [`LINE_TIMEOUT`], so a service that
+/// accepts the connection and never answers fails the test instead of hanging it.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "integration tests open the sockets their subject talks to"
+)]
+fn request_to(port: u16, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Answer {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_write_timeout(Some(LINE_TIMEOUT)).unwrap();
+    stream.set_read_timeout(Some(LINE_TIMEOUT)).unwrap();
+    let extra = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    let extra = if extra.is_empty() {
+        extra
+    } else {
+        format!("{extra}\r\n")
+    };
+    let length = body.len();
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n{extra}content-length: {length}\r\n\r\n{body}"
+    );
+    stream
+        .write_all(head.as_bytes())
+        .unwrap_or_else(|error| panic!("{method} {path} was not sent: {error}"));
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .unwrap_or_else(|error| panic!("{method} {path} was not answered: {error}"));
+    Answer::parse(&raw)
+}
+
+/// Polls `GET /api/events/status` of the service on `port` (request id [`READINESS`]) until the
+/// node reports `ready`, for at most [`READY_TIMEOUT`]; each request is bounded by [`request_to`].
+fn poll_until_ready(port: u16) {
+    let started = tokio::time::Instant::now();
+    loop {
+        let answer = request_to(
+            port,
+            "GET",
+            "/api/events/status",
+            &[("x-request-id", READINESS)],
+            "",
+        );
+        if answer.body.contains(r#""state":"ready""#) {
+            return;
+        }
+        assert!(
+            started.elapsed() < READY_TIMEOUT,
+            "the node did not become ready: {}",
+            answer.body
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 

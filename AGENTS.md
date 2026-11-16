@@ -15,7 +15,6 @@ This file tells AI coding assistants how to work in this repository: a Rust serv
 - Keep Domain crates free of frameworks and I/O. `make architecture` fails when a layer or a bounded context reaches across a boundary.
 - Regenerate the contract snapshots and update `workspace.dsl` in the same change that alters a contract or adds, removes or relates a crate.
 - Follow the commit and pull-request title form `type(#issue): subject` described in `CONTRIBUTING.md`.
-- Never edit a migration that has been applied; add a new migration instead.
 - Install the git hooks with `make install-hooks` and never bypass them (`--no-verify`); releases and `CHANGELOG.md` are produced by the release job from the commit history, never by hand.
 - Do not write `#[allow]`. A lint suppression is an `#[expect]` with a reason, and only where the lint policy permits it. The same holds for an inline directive of shellcheck, hadolint, yamllint, markdownlint, ESLint or zizmor: it names exactly one rule and carries a reason, after it where the linter allows one or on the comment line above (G31 rule (g), `make validate-invariants`).
 
@@ -42,8 +41,6 @@ make check-security
 make unused-dependencies
 make check-requirements
 make docs-check
-make setup-test-db
-make validate-sqlx-metadata
 make tests-with-coverage
 make doc-tests
 make e2e-tests
@@ -70,3 +67,19 @@ When you finish, state which targets you ran and their result, which targets you
 ## Skills
 
 The skills are listed in [`.claude/skills/README.md`](.claude/skills/README.md), the only skill inventory.
+
+<!-- rust-backend-sdlc:begin -->
+
+## rust-backend-sdlc governance (managed block — do not edit between markers)
+
+The rust-backend-sdlc plugin writes this block and restores it when its setup command runs again. The values it refers to live in the project profile `.claude/rust-sdlc.yml`, which is committed together with this block.
+
+- Skill triage: before implementation or review work, every plugin skill receives a recorded verdict, EXECUTE with evidence or NOT APPLICABLE with a reason. The rule is: every skill verdict recorded, no silent skips. A full skill body is loaded only on EXECUTE.
+- Repository rules first: `AGENTS.md` and the skills listed in `.claude/skills/README.md` win over a plugin skill of the same name; the plugin skill adds only its loop, its evidence format and its escalation block.
+- Tighten-only quality bars: the `quality.*` keys of the profile may only equal or tighten the values of the gates, and a file listed in `protected-config.toml` is never changed to make a check pass.
+- Execution through make: every tool runs through the target that the `make.*` keys of the profile map; the order of the checks is the verification section of `AGENTS.md`.
+- Commits and pull-request titles use the form type(#issue): subject, and the git hooks are never bypassed.
+- Protected configuration is escalated to a maintainer with the approval label, never edited by an agent.
+- Plugin commands, named here in prose: /rs-sdlc drives a feature from issue to finished pull request; /rs-sdlc-setup restores this block; /rs-sdlc-new-service, /rs-sdlc-new-context, /rs-sdlc-issue, /rs-sdlc-plan, /rs-sdlc-implement, /rs-sdlc-review, /rs-sdlc-qa and /rs-sdlc-finish-pr run one step each.
+
+<!-- rust-backend-sdlc:end -->

@@ -44,7 +44,6 @@ Every gate target below is a Make target, run as `make <target>`; `make ci-list`
 | G27 | valid model, its three views, its components match the workspace and a relationship for every dependency between them | `validate-architecture-model` | `scripts/validate-architecture-model.sh` |
 | G28 | pull-request title matches the commit rule | CI only: needs the pull request | `scripts/check-commit-message.sh` |
 | G29 | every crate builds alone, with each feature | `check-crate-isolation` | `make/gates.mk` |
-| G30 | 0 differences from generated query metadata | `validate-sqlx-metadata` | `make/gates.mk` |
 | G31 | 0 repository-invariant violations | `validate-invariants` | `scripts/check-invariants.sh` |
 
 ## Rules

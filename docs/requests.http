@@ -3,6 +3,7 @@
 # Start the service first (make start), then send a request.
 
 @baseUrl = http://localhost:8081
+@wsUrl = ws://localhost:8081
 
 ### Liveness probe: 200 with the body "pong"
 GET {{baseUrl}}/ping
@@ -10,45 +11,39 @@ GET {{baseUrl}}/ping
 ### Health check: 204 without a body, or a 500 problem document that lists the failing dependencies
 GET {{baseUrl}}/api/health
 
-### List the resources, newest first; page starts at 1, itemsPerPage is 1 to 100 (a bare JSON array)
-GET {{baseUrl}}/api/example_api_resources?page=1&itemsPerPage=30
+### List the subscribable event types (EVENT_TYPES), in byte order; page starts at 1, itemsPerPage is 1 to 100 (a bare JSON array)
+GET {{baseUrl}}/api/event-types?page=1&itemsPerPage=30
 
-### Create a resource: 201 with the resource and a location header; 422 when validation fails
-POST {{baseUrl}}/api/example_api_resources
-Content-Type: application/json
+### Event stream status of the answering instance: 200 in every life stage (state, reason, reader position, window, subscribers; 64-bit values as strings)
+GET {{baseUrl}}/api/events/status
 
-{
-  "name": "Example name",
-  "description": "Example description"
-}
+### Event stream (SSE) of the listed event types: 200 text/event-stream that stays open, one frame per event, a comment line ":" after STREAM_KEEP_ALIVE without a frame; 400 for a missing types or an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down
+# The protocol of both streaming routes is specified in docs/streaming-protocol.md; neither route is in the OpenAPI document.
+# Each frame is "id: <id>", "event: <type>" and "data: <event>", where <event> is {"id":"<uuid>","type":"<type>","occurredAt":"<time>","data":<data>}; deduplicate by its "id".
+# Resume after the last id received with the Last-Event-ID header or the lastEventId parameter (the header wins); 0 replays every retained event.
+GET {{baseUrl}}/api/events/stream?types=user.created,order.paid
+Accept: text/event-stream
+Last-Event-ID: 0
 
-### Retrieve one resource by identifier: 200, 400 for an invalid identifier, 404 when it does not exist
-# Replace the identifier with the id returned by the create request.
-GET {{baseUrl}}/api/example_api_resources/01a1c6b5-cb86-7134-868a-7608036facfe
+### Event stream (WebSocket) of the listed event types: 101 that upgrades the connection; types is optional, and the client adds and removes types at run time with the text frames {"action":"subscribe","types":["order.paid"]} and {"action":"unsubscribe","types":["order.paid"]}
+# Each event is one text frame {"id":"<id>","type":"<type>","data":<event>}; an invalid command gets one frame {"error":"<reason>"} and the connection stays open; a ping every STREAM_KEEP_ALIVE; close code 1001 at shutdown, 1011 when a replay cannot read Kafka.
+# Before the upgrade, in this order: 403 for an Origin header that CORS_ALLOWED_ORIGINS does not allow, 400 for an unreadable query, 422 for invalid types, 400 for an invalid cursor, 503 while the node is shutting down, starting or at its subscriber capacity, then the 4xx of a request that is not a valid upgrade, each as a problem. Resume as on the SSE route (Last-Event-ID wins over lastEventId); the cursor replays only the types of this request (without types the socket starts live), so a reconnecting client names its whole set of types here.
+# JetBrains IDEs open the socket with WEBSOCKET; other clients use any WebSocket tool on the same URL.
+WEBSOCKET {{wsUrl}}/api/events/ws?types=user.created&lastEventId=0
 
-### GraphQL query: one page of resources (page and itemsPerPage have defaults)
+### GraphQL query: one page of the subscribable event types (page and itemsPerPage have defaults 1 and 30)
 POST {{baseUrl}}/api/graphql
 Content-Type: application/json
 
 {
-  "query": "query ($page: Int!, $itemsPerPage: Int!) { exampleApiResources(page: $page, itemsPerPage: $itemsPerPage) { id name description } }",
+  "query": "query ($page: Int!, $itemsPerPage: Int!) { eventTypes(page: $page, itemsPerPage: $itemsPerPage) { name } }",
   "variables": { "page": 1, "itemsPerPage": 30 }
 }
 
-### GraphQL query: one resource by id (null when it does not exist)
+### GraphQL query: the event stream status, the same values as GET /api/events/status
 POST {{baseUrl}}/api/graphql
 Content-Type: application/json
 
 {
-  "query": "query ($id: ID!) { exampleApiResource(id: $id) { id name description } }",
-  "variables": { "id": "01a1c6b5-cb86-7134-868a-7608036facfe" }
-}
-
-### GraphQL mutation: create a resource
-POST {{baseUrl}}/api/graphql
-Content-Type: application/json
-
-{
-  "query": "mutation ($input: CreateExampleApiResourceInput!) { createExampleApiResource(input: $input) { id name description } }",
-  "variables": { "input": { "name": "Example name", "description": "Example description" } }
+  "query": "{ eventStreamStatus { state reason brokerReachable position endOffset lag windowFirst windowLast subscribers rejectedRecords retentionLosses replayCapped } }"
 }

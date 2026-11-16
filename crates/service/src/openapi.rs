@@ -10,7 +10,7 @@ use crate::http::AppState;
 ///
 /// It changes only in a pull request that changes the contract: the major number when a breaking
 /// change is approved, the minor number when operations or fields are added.
-pub const API_VERSION: &str = "1.0.0";
+pub const API_VERSION: &str = "2.0.0";
 
 /// Static metadata of the document; title, description, contact URL and version are set in
 /// [`api_router`].
@@ -22,7 +22,7 @@ pub const API_VERSION: &str = "1.0.0";
     ),
     servers((url = "/", description = "Current host")),
     tags(
-        (name = "ExampleApiResource", description = "Template example resource endpoints."),
+        (name = "EventStream", description = "Event catalog and event stream status endpoints."),
         (name = "HealthCheck", description = "Runtime health-check endpoints."),
     )
 )]
@@ -59,7 +59,7 @@ pub fn api_router() -> OpenApiRouter<AppState> {
     }
     OpenApiRouter::with_openapi(document)
         .nest("/api", health_check_application::router())
-        .nest("/api", some_module_application::http::router())
+        .nest("/api", event_stream_application::http::router())
 }
 
 /// The document.

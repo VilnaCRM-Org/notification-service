@@ -28,21 +28,24 @@ fn app(probes: Vec<StubProbe>) -> Router {
     router.with_state(state)
 }
 
+/// Every dependency the service probes, in registration order.
+const DEPENDENCIES: [Dependency; 3] = [
+    Dependency::Cache,
+    Dependency::MessageBroker,
+    Dependency::EventStream,
+];
+
 fn probes(failing: &[Dependency]) -> Vec<StubProbe> {
-    [
-        Dependency::Database,
-        Dependency::Cache,
-        Dependency::MessageBroker,
-    ]
-    .into_iter()
-    .map(|dependency| {
-        if failing.contains(&dependency) {
-            StubProbe::failing(dependency)
-        } else {
-            StubProbe::healthy(dependency)
-        }
-    })
-    .collect()
+    DEPENDENCIES
+        .into_iter()
+        .map(|dependency| {
+            if failing.contains(&dependency) {
+                StubProbe::failing(dependency)
+            } else {
+                StubProbe::healthy(dependency)
+            }
+        })
+        .collect()
 }
 
 async fn get_health(app: Router) -> Response {
@@ -75,8 +78,8 @@ async fn healthy_probes_answer_204_with_an_empty_body() {
 #[tokio::test]
 async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
     let response = get_health(app(probes(&[
-        Dependency::Database,
         Dependency::MessageBroker,
+        Dependency::EventStream,
     ])))
     .await;
 
@@ -96,23 +99,23 @@ async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
             "type": "/problems/dependency-unavailable",
             "title": "Internal Server Error",
             "status": 500,
-            "detail": "Database is not available; Message broker is not available",
+            "detail": "Message broker is not available; Event stream is not ready",
             "failures": [
-                {"dependency": "database", "message": "Database is not available"},
                 {"dependency": "message_broker", "message": "Message broker is not available"},
+                {"dependency": "event_stream", "message": "Event stream is not ready"},
             ],
         })
     );
 }
 
 #[rstest]
-#[case::database(&[Dependency::Database])]
 #[case::cache(&[Dependency::Cache])]
 #[case::message_broker(&[Dependency::MessageBroker])]
-#[case::database_and_cache(&[Dependency::Database, Dependency::Cache])]
-#[case::database_and_message_broker(&[Dependency::Database, Dependency::MessageBroker])]
+#[case::event_stream(&[Dependency::EventStream])]
 #[case::cache_and_message_broker(&[Dependency::Cache, Dependency::MessageBroker])]
-#[case::all(&[Dependency::Database, Dependency::Cache, Dependency::MessageBroker])]
+#[case::cache_and_event_stream(&[Dependency::Cache, Dependency::EventStream])]
+#[case::message_broker_and_event_stream(&[Dependency::MessageBroker, Dependency::EventStream])]
+#[case::every_dependency(&DEPENDENCIES)]
 #[tokio::test]
 async fn the_500_body_holds_exactly_the_messages_of_the_failing_dependencies(
     #[case] failing: &[Dependency],
@@ -149,13 +152,9 @@ async fn the_500_body_holds_exactly_the_messages_of_the_failing_dependencies(
             "failures": failures,
         })
     );
-    for healthy in [
-        Dependency::Database,
-        Dependency::Cache,
-        Dependency::MessageBroker,
-    ]
-    .into_iter()
-    .filter(|dependency| !failing.contains(dependency))
+    for healthy in DEPENDENCIES
+        .into_iter()
+        .filter(|dependency| !failing.contains(dependency))
     {
         assert!(!text.contains(healthy.failure_message()), "{text}");
         assert!(!text.contains(healthy.identifier()), "{text}");
@@ -166,7 +165,7 @@ async fn the_500_body_holds_exactly_the_messages_of_the_failing_dependencies(
 #[tokio::test(start_paused = true)]
 async fn a_hanging_probe_answers_the_problem_without_the_timeout() {
     let probes = vec![
-        StubProbe::healthy(Dependency::Database),
+        StubProbe::healthy(Dependency::EventStream),
         StubProbe::hanging(Dependency::Cache),
         StubProbe::healthy(Dependency::MessageBroker),
     ];
@@ -190,7 +189,7 @@ fn the_route_documents_the_health_operation() {
     assert_eq!(operation["summary"], "Checks the health of the service.");
     assert_eq!(
         operation["description"],
-        "Returns 204 when the database, the cache and the message broker respond. Returns a 500 problem document that lists every failing dependency otherwise."
+        "Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise."
     );
     let responses = operation["responses"].as_object().unwrap();
     assert_eq!(responses.len(), 3);

@@ -1,0 +1,25 @@
+[package]
+name = "event-stream-infrastructure"
+description = "Bounded context event-stream, infrastructure layer: adapters for the ports of the domain layer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+event-stream-domain.workspace = true
+krafka.workspace = true
+shared-domain.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+krafka = { workspace = true, features = ["test-broker"] }
+rstest.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

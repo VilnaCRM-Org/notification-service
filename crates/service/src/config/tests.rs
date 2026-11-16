@@ -4,10 +4,6 @@ use super::*;
 
 fn valid() -> ServeArgs {
     ServeArgs {
-        database: DatabaseArgs {
-            url: Some("postgres://app:secret@localhost:5432/app".to_owned()),
-            ..DatabaseArgs::default()
-        },
         aws_region: Some("us-east-1".to_owned()),
         ..ServeArgs::default()
     }
@@ -41,13 +37,6 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(config.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(config.port, 8081);
     assert_eq!(config.log_level, "info");
-    assert_eq!(
-        config.database.url,
-        "postgres://app:secret@localhost:5432/app"
-    );
-    assert_eq!(config.database.max_connections, 10);
-    assert_eq!(config.database.acquire_timeout, Duration::from_secs(2));
-    assert_eq!(config.database.statement_timeout, Duration::from_secs(5));
     assert_eq!(config.sqs.region, "us-east-1");
     assert_eq!(config.sqs.endpoint_url, None);
     assert_eq!(config.sqs.connect_timeout, Duration::from_millis(500));
@@ -57,6 +46,36 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(config.request_timeout, Duration::from_secs(10));
     assert_eq!(config.max_body_bytes, 65_536);
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(10));
+    assert_eq!(
+        config.kafka,
+        KafkaSettings {
+            bootstrap_servers: "localhost:9092".to_owned(),
+            topic: "notifications".to_owned(),
+            client_id: "notification-service".to_owned(),
+            security: KafkaSecurity::Plaintext,
+            request_timeout: Duration::from_secs(3),
+            connect_timeout: Duration::from_secs(2),
+            fetch_wait: Duration::from_millis(500),
+        }
+    );
+    assert_eq!(
+        config.streams,
+        StreamConfig {
+            catalog: EventCatalog::default(),
+            max_data_bytes: 65_536,
+            window_max_events: 100_000,
+            window_max_bytes: 67_108_864,
+            start_events: 100_000,
+            replay_max_events: 1_000_000,
+            replay_permits: 4,
+            retry_delay: Duration::from_secs(1),
+            stale_after: Duration::from_secs(10),
+            buffer: 256,
+            max_subscribers: 100_000,
+            keep_alive: Duration::from_secs(15),
+        }
+    );
+    assert_eq!(config.allowed_origins, AllowedOrigins::NoOrigin);
 }
 
 #[test]
@@ -66,12 +85,6 @@ fn every_variable_accepts_a_valid_value() {
         app_host: some("127.0.0.1"),
         app_port: some("9000"),
         log_level: some("service=debug,warn"),
-        database: DatabaseArgs {
-            url: some("postgresql://u:p@db:5433/name"),
-            max_connections: some("25"),
-            acquire_timeout: some("1s"),
-            statement_timeout: some("750ms"),
-        },
         aws_region: some("eu-west-1"),
         aws_endpoint_url_sqs: some("http://localhost:4566"),
         aws_access_key_id: some("key"),
@@ -83,6 +96,33 @@ fn every_variable_accepts_a_valid_value() {
         http_request_timeout: some("1m"),
         http_max_body_bytes: some("2048"),
         shutdown_grace_period: some("15s"),
+        event_types: some("user.created,order.paid"),
+        kafka: KafkaArgs {
+            bootstrap_servers: some("a:9092,b:9093"),
+            topic: some("events.v1"),
+            security_protocol: some("sasl_ssl"),
+            sasl_mechanism: some("SCRAM-SHA-256"),
+            sasl_username: some("reader"),
+            sasl_password: some("s3cret-value"),
+            client_id: some("node-a"),
+            request_timeout: some("5s"),
+            connect_timeout: some("5s"),
+            fetch_max_wait: some("1s"),
+            retry_delay: some("2s"),
+        },
+        streams: StreamArgs {
+            max_data_bytes: some("1024"),
+            window_max_events: some("10"),
+            window_max_bytes: some("3000000"),
+            window_start_events: some("0"),
+            replay_max_events: some("20"),
+            replay_permits: some("8"),
+            tail_stale_after: some("30s"),
+            subscriber_buffer: some("16"),
+            max_subscribers: some("50"),
+            keep_alive: some("20s"),
+        },
+        cors_allowed_origins: some("https://app.example.com"),
     };
 
     let config = Config::from_args(args).unwrap();
@@ -91,13 +131,6 @@ fn every_variable_accepts_a_valid_value() {
     assert_eq!(config.host, IpAddr::from([127, 0, 0, 1]));
     assert_eq!(config.port, 9000);
     assert_eq!(config.log_level, "service=debug,warn");
-    assert_eq!(config.database.url, "postgresql://u:p@db:5433/name");
-    assert_eq!(config.database.max_connections, 25);
-    assert_eq!(config.database.acquire_timeout, Duration::from_secs(1));
-    assert_eq!(
-        config.database.statement_timeout,
-        Duration::from_millis(750)
-    );
     assert_eq!(config.sqs.region, "eu-west-1");
     assert_eq!(
         config.sqs.endpoint_url.as_deref(),
@@ -110,6 +143,41 @@ fn every_variable_accepts_a_valid_value() {
     assert_eq!(config.request_timeout, Duration::from_secs(60));
     assert_eq!(config.max_body_bytes, 2048);
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(15));
+    assert_eq!(
+        config.streams.catalog,
+        catalog(&["order.paid", "user.created"])
+    );
+    assert_eq!(
+        config.kafka,
+        KafkaSettings {
+            bootstrap_servers: "a:9092,b:9093".to_owned(),
+            topic: "events.v1".to_owned(),
+            client_id: "node-a".to_owned(),
+            security: KafkaSecurity::SaslSsl(SaslCredentials {
+                mechanism: SaslMechanism::ScramSha256,
+                username: "reader".to_owned(),
+                password: "s3cret-value".to_owned(),
+            }),
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+            fetch_wait: Duration::from_secs(1),
+        }
+    );
+    assert_eq!(config.streams.max_data_bytes, 1024);
+    assert_eq!(config.streams.window_max_events, 10);
+    assert_eq!(config.streams.window_max_bytes, 3_000_000);
+    assert_eq!(config.streams.start_events, 0);
+    assert_eq!(config.streams.replay_max_events, 20);
+    assert_eq!(config.streams.replay_permits, 8);
+    assert_eq!(config.streams.retry_delay, Duration::from_secs(2));
+    assert_eq!(config.streams.stale_after, Duration::from_secs(30));
+    assert_eq!(config.streams.buffer, 16);
+    assert_eq!(config.streams.max_subscribers, 50);
+    assert_eq!(config.streams.keep_alive, Duration::from_secs(20));
+    assert_eq!(
+        config.allowed_origins,
+        AllowedOrigins::List(vec![HeaderValue::from_static("https://app.example.com")])
+    );
 }
 
 #[rstest]
@@ -227,16 +295,6 @@ fn log_level_rejects_invalid_directives(#[case] raw: &str) {
 }
 
 #[test]
-fn the_database_url_is_required() {
-    let args = ServeArgs {
-        database: DatabaseArgs::default(),
-        ..valid()
-    };
-
-    assert_eq!(problems(args), [("DATABASE_URL", "is required".to_owned())]);
-}
-
-#[test]
 fn a_blank_required_variable_is_reported_as_empty() {
     let args = ServeArgs {
         aws_region: some("  "),
@@ -249,76 +307,9 @@ fn a_blank_required_variable_is_reported_as_empty() {
     );
 }
 
-#[rstest]
-#[case("mysql://user:hunter2@h/db")]
-#[case("not a url")]
-#[case("http://localhost/db")]
-#[case("")]
-fn the_database_url_must_be_a_postgres_url_and_is_never_echoed(#[case] raw: &str) {
-    let args = ServeArgs {
-        database: DatabaseArgs {
-            url: some(raw),
-            ..DatabaseArgs::default()
-        },
-        ..valid()
-    };
-
-    let found = problems(args);
-
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].0, "DATABASE_URL");
-    assert!(!found[0].1.contains("hunter2"));
-}
-
-#[rstest]
-#[case("1", 1)]
-#[case("100", 100)]
-fn database_max_connections_accepts_its_bounds(#[case] raw: &str, #[case] expected: u32) {
-    let args = ServeArgs {
-        database: DatabaseArgs {
-            max_connections: some(raw),
-            ..valid().database
-        },
-        ..valid()
-    };
-
-    assert_eq!(
-        Config::from_args(args).unwrap().database.max_connections,
-        expected
-    );
-}
-
-#[rstest]
-#[case("0")]
-#[case("101")]
-#[case("-1")]
-#[case("many")]
-fn database_max_connections_rejects_values_outside_the_range(#[case] raw: &str) {
-    let args = ServeArgs {
-        database: DatabaseArgs {
-            max_connections: some(raw),
-            ..valid().database
-        },
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "DATABASE_MAX_CONNECTIONS",
-            "must be an integer from 1 to 100".to_owned()
-        )]
-    );
-}
-
 #[test]
 fn an_unparsable_duration_names_its_variable() {
     let args = ServeArgs {
-        database: DatabaseArgs {
-            acquire_timeout: some("soon"),
-            statement_timeout: some("5"),
-            ..valid().database
-        },
         sqs_connect_timeout: some(""),
         sqs_operation_timeout: some("-2s"),
         health_probe_timeout: some("fast"),
@@ -335,8 +326,6 @@ fn an_unparsable_duration_names_its_variable() {
             .map(|(variable, _)| *variable)
             .collect::<Vec<_>>(),
         [
-            "DATABASE_ACQUIRE_TIMEOUT",
-            "DATABASE_STATEMENT_TIMEOUT",
             "SQS_CONNECT_TIMEOUT",
             "SQS_OPERATION_TIMEOUT",
             "HEALTH_PROBE_TIMEOUT",
@@ -403,23 +392,6 @@ fn the_sqs_endpoint_rejects_everything_else(#[case] raw: &str) {
             "AWS_ENDPOINT_URL_SQS",
             "must be an http:// or https:// URL".to_owned()
         )]
-    );
-}
-
-#[test]
-fn the_migrate_wait_timeout_defaults_to_thirty_seconds() {
-    let args = MigrateArgs {
-        database: valid().database,
-        wait_timeout: None,
-        action: None,
-    };
-
-    let settings = MigrateSettings::from_args(&args).unwrap();
-
-    assert_eq!(settings.wait_timeout, Duration::from_secs(30));
-    assert_eq!(
-        settings.database.url,
-        "postgres://app:secret@localhost:5432/app"
     );
 }
 
@@ -539,12 +511,8 @@ fn a_secret_without_a_key_id_names_the_missing_key_id() {
     );
 }
 
-fn timeouts(acquire: &str, operation: &str, probe: &str, request: &str) -> ServeArgs {
+fn timeouts(operation: &str, probe: &str, request: &str) -> ServeArgs {
     ServeArgs {
-        database: DatabaseArgs {
-            acquire_timeout: some(acquire),
-            ..valid().database
-        },
         sqs_operation_timeout: some(operation),
         health_probe_timeout: some(probe),
         http_request_timeout: some(request),
@@ -553,25 +521,14 @@ fn timeouts(acquire: &str, operation: &str, probe: &str, request: &str) -> Serve
 }
 
 #[test]
-fn the_probe_timeout_may_equal_the_acquire_and_operation_timeouts() {
-    assert!(Config::from_args(timeouts("3s", "3s", "3s", "4s")).is_ok());
-}
-
-#[test]
-fn the_probe_timeout_below_the_acquire_timeout_is_reported() {
-    assert_eq!(
-        problems(timeouts("4s", "2s", "3s", "10s")),
-        [(
-            "HEALTH_PROBE_TIMEOUT",
-            "must not be shorter than DATABASE_ACQUIRE_TIMEOUT".to_owned()
-        )]
-    );
+fn the_probe_timeout_may_equal_the_operation_timeout() {
+    assert!(Config::from_args(timeouts("3s", "3s", "4s")).is_ok());
 }
 
 #[test]
 fn the_probe_timeout_below_the_operation_timeout_is_reported() {
     assert_eq!(
-        problems(timeouts("2s", "4s", "3s", "10s")),
+        problems(timeouts("4s", "3s", "10s")),
         [(
             "HEALTH_PROBE_TIMEOUT",
             "must not be shorter than SQS_OPERATION_TIMEOUT".to_owned()
@@ -582,68 +539,18 @@ fn the_probe_timeout_below_the_operation_timeout_is_reported() {
 #[test]
 fn the_request_timeout_must_exceed_the_probe_timeout() {
     assert_eq!(
-        problems(timeouts("2s", "2s", "3s", "3s")),
+        problems(timeouts("2s", "3s", "3s")),
         [(
             "HTTP_REQUEST_TIMEOUT",
             "must be longer than HEALTH_PROBE_TIMEOUT".to_owned()
         )]
     );
-    assert!(Config::from_args(timeouts("2s", "2s", "3s", "3001ms")).is_ok());
-}
-
-#[rstest]
-#[case::zero("0s")]
-#[case::bare_zero("0")]
-#[case::below_a_millisecond("500us")]
-#[case::above_the_range("30d")]
-#[case::just_above_the_range("24d 1s")]
-fn a_statement_timeout_outside_one_millisecond_to_24_days_is_rejected(#[case] value: &str) {
-    let args = ServeArgs {
-        database: DatabaseArgs {
-            statement_timeout: some(value),
-            ..valid().database
-        },
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "DATABASE_STATEMENT_TIMEOUT",
-            "must be a duration from 1ms to 24d".to_owned()
-        )]
-    );
-}
-
-#[rstest]
-#[case::lower_bound("1ms", Duration::from_millis(1))]
-#[case::upper_bound("24d", Duration::from_hours(24 * 24))]
-#[case::default_like("5s", Duration::from_secs(5))]
-fn a_statement_timeout_inside_the_range_is_accepted(
-    #[case] value: &str,
-    #[case] expected: Duration,
-) {
-    let args = ServeArgs {
-        database: DatabaseArgs {
-            statement_timeout: some(value),
-            ..valid().database
-        },
-        ..valid()
-    };
-
-    let config = Config::from_args(args).unwrap();
-
-    assert_eq!(config.database.statement_timeout, expected);
+    assert!(Config::from_args(timeouts("2s", "3s", "3001ms")).is_ok());
 }
 
 #[test]
 fn a_timeout_above_its_prd_ceiling_is_accepted() {
     let args = ServeArgs {
-        database: DatabaseArgs {
-            acquire_timeout: some("1m"),
-            statement_timeout: some("10m"),
-            ..valid().database
-        },
         sqs_operation_timeout: some("1m"),
         health_probe_timeout: some("2m"),
         http_request_timeout: some("5m"),
@@ -654,7 +561,7 @@ fn a_timeout_above_its_prd_ceiling_is_accepted() {
 
     let config = Config::from_args(args).unwrap();
 
-    assert_eq!(config.database.acquire_timeout, Duration::from_secs(60));
+    assert_eq!(config.sqs.operation_timeout, Duration::from_secs(60));
     assert_eq!(config.health_probe_timeout, Duration::from_secs(120));
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(600));
 }
@@ -675,11 +582,8 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
     let args = ServeArgs {
         app_env: some("staging"),
         app_port: some("99999"),
-        database: DatabaseArgs {
-            url: some("mysql://user:hunter2@h/db"),
-            ..DatabaseArgs::default()
-        },
         aws_region: None,
+        aws_endpoint_url_sqs: some("ftp://user:hunter2@h/queue"),
         aws_access_key_id: some("key"),
         ..ServeArgs::default()
     };
@@ -695,8 +599,8 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
         [
             "APP_ENV",
             "APP_PORT",
-            "DATABASE_URL",
             "AWS_REGION",
+            "AWS_ENDPOINT_URL_SQS",
             "AWS_SECRET_ACCESS_KEY"
         ]
     );
@@ -712,31 +616,127 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
     );
 }
 
+#[test]
+fn event_types_is_reported_after_the_limits() {
+    let args = ServeArgs {
+        shutdown_grace_period: some("later"),
+        event_types: some(""),
+        ..valid()
+    };
+
+    assert_eq!(
+        problems(args),
+        [
+            (
+                "SHUTDOWN_GRACE_PERIOD",
+                "must be a duration such as 500ms, 2s or 1m".to_owned()
+            ),
+            ("EVENT_TYPES", EVENT_TYPES_REASON.to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn event_types_is_reported_before_the_rules_between_variables() {
+    let args = ServeArgs {
+        event_types: some(""),
+        ..timeouts("4s", "3s", "10s")
+    };
+
+    assert_eq!(
+        problems(args),
+        [
+            ("EVENT_TYPES", EVENT_TYPES_REASON.to_owned()),
+            (
+                "HEALTH_PROBE_TIMEOUT",
+                "must not be shorter than SQS_OPERATION_TIMEOUT".to_owned()
+            ),
+        ]
+    );
+}
+
+fn catalog(names: &[&str]) -> EventCatalog {
+    EventCatalog::new(
+        names
+            .iter()
+            .map(|name| EventType::new((*name).to_owned()).unwrap())
+            .collect(),
+    )
+}
+
+fn with_event_types(raw: &str) -> ServeArgs {
+    ServeArgs {
+        event_types: some(raw),
+        ..valid()
+    }
+}
+
+/// `count` distinct valid names, joined by commas.
+fn distinct_names(count: usize) -> String {
+    (0..count)
+        .map(|index| format!("t{index}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+const EVENT_TYPES_REASON: &str = "must be a comma-separated list of 1 to 1000 event type names";
+
+#[test]
+fn event_types_keeps_each_name_once_in_byte_order() {
+    let config = Config::from_args(with_event_types(
+        "user.created,order.paid,order-paid,order_paid,order.paid",
+    ))
+    .unwrap();
+
+    assert_eq!(
+        config.streams.catalog,
+        catalog(&["order-paid", "order.paid", "order_paid", "user.created"])
+    );
+}
+
+#[rstest]
+#[case::one("a", 1)]
+#[case::a_thousand(&distinct_names(1_000), 1_000)]
+#[case::a_thousand_and_a_repeat(&format!("{},t0", distinct_names(1_000)), 1_000)]
+fn event_types_accepts_1_to_1000_distinct_names(#[case] raw: &str, #[case] count: usize) {
+    let config = Config::from_args(with_event_types(raw)).unwrap();
+
+    let seen: usize = (1..=10_u32)
+        .map(|page| {
+            config
+                .streams
+                .catalog
+                .page(shared_domain::PageRequest::new(page, 100).unwrap())
+                .len()
+        })
+        .sum();
+    assert_eq!(seen, count);
+}
+
+#[rstest]
+#[case::empty_value("")]
+#[case::empty_entry("a,,b")]
+#[case::trailing_comma("a,")]
+#[case::leading_comma(",a")]
+#[case::invalid_name("a,User.created")]
+#[case::blank_name("a, b")]
+#[case::too_long(&"a".repeat(129))]
+#[case::a_thousand_and_one(&distinct_names(1_001))]
+fn event_types_rejects_anything_else_without_echoing_it(#[case] raw: &str) {
+    let reported = problems(with_event_types(raw));
+
+    assert_eq!(reported, [("EVENT_TYPES", EVENT_TYPES_REASON.to_owned())]);
+}
+
 type Mutator = fn(&mut ServeArgs);
 
 /// One row per variable of `ServeArgs`: the variable, a way to make it the only problem, and the
 /// variable that the problem names.
-const FIELDS: [(&str, Mutator, &str); 19] = [
+const FIELDS: [(&str, Mutator, &str); 38] = [
     ("APP_ENV", |a| a.app_env = some("x"), "APP_ENV"),
     ("APP_HOST", |a| a.app_host = some("x"), "APP_HOST"),
     ("APP_PORT", |a| a.app_port = some("x"), "APP_PORT"),
     ("LOG_LEVEL", |a| a.log_level = some("x=y"), "LOG_LEVEL"),
-    ("DATABASE_URL", |a| a.database.url = None, "DATABASE_URL"),
-    (
-        "DATABASE_MAX_CONNECTIONS",
-        |a| a.database.max_connections = some("x"),
-        "DATABASE_MAX_CONNECTIONS",
-    ),
-    (
-        "DATABASE_ACQUIRE_TIMEOUT",
-        |a| a.database.acquire_timeout = some("x"),
-        "DATABASE_ACQUIRE_TIMEOUT",
-    ),
-    (
-        "DATABASE_STATEMENT_TIMEOUT",
-        |a| a.database.statement_timeout = some("x"),
-        "DATABASE_STATEMENT_TIMEOUT",
-    ),
     ("AWS_REGION", |a| a.aws_region = None, "AWS_REGION"),
     (
         "AWS_ENDPOINT_URL_SQS",
@@ -788,6 +788,113 @@ const FIELDS: [(&str, Mutator, &str); 19] = [
         |a| a.shutdown_grace_period = some("x"),
         "SHUTDOWN_GRACE_PERIOD",
     ),
+    ("EVENT_TYPES", |a| a.event_types = some(""), "EVENT_TYPES"),
+    (
+        "KAFKA_BOOTSTRAP_SERVERS",
+        |a| a.kafka.bootstrap_servers = some("x"),
+        "KAFKA_BOOTSTRAP_SERVERS",
+    ),
+    ("KAFKA_TOPIC", |a| a.kafka.topic = some(""), "KAFKA_TOPIC"),
+    (
+        "KAFKA_SECURITY_PROTOCOL",
+        |a| a.kafka.security_protocol = some("x"),
+        "KAFKA_SECURITY_PROTOCOL",
+    ),
+    (
+        "KAFKA_SASL_MECHANISM",
+        |a| a.kafka.sasl_mechanism = some("PLAIN"),
+        "KAFKA_SASL_MECHANISM",
+    ),
+    (
+        "KAFKA_SASL_USERNAME",
+        |a| a.kafka.sasl_username = some("u"),
+        "KAFKA_SASL_USERNAME",
+    ),
+    (
+        "KAFKA_SASL_PASSWORD",
+        |a| a.kafka.sasl_password = some("p"),
+        "KAFKA_SASL_PASSWORD",
+    ),
+    (
+        "KAFKA_CLIENT_ID",
+        |a| a.kafka.client_id = some(""),
+        "KAFKA_CLIENT_ID",
+    ),
+    (
+        "KAFKA_REQUEST_TIMEOUT",
+        |a| a.kafka.request_timeout = some("x"),
+        "KAFKA_REQUEST_TIMEOUT",
+    ),
+    (
+        "KAFKA_CONNECT_TIMEOUT",
+        |a| a.kafka.connect_timeout = some("x"),
+        "KAFKA_CONNECT_TIMEOUT",
+    ),
+    (
+        "KAFKA_FETCH_MAX_WAIT",
+        |a| a.kafka.fetch_max_wait = some("x"),
+        "KAFKA_FETCH_MAX_WAIT",
+    ),
+    (
+        "KAFKA_RETRY_DELAY",
+        |a| a.kafka.retry_delay = some("x"),
+        "KAFKA_RETRY_DELAY",
+    ),
+    (
+        "EVENT_MAX_DATA_BYTES",
+        |a| a.streams.max_data_bytes = some("x"),
+        "EVENT_MAX_DATA_BYTES",
+    ),
+    (
+        "EVENT_WINDOW_MAX_EVENTS",
+        |a| a.streams.window_max_events = some("x"),
+        "EVENT_WINDOW_MAX_EVENTS",
+    ),
+    (
+        "EVENT_WINDOW_MAX_BYTES",
+        |a| a.streams.window_max_bytes = some("x"),
+        "EVENT_WINDOW_MAX_BYTES",
+    ),
+    (
+        "EVENT_WINDOW_START_EVENTS",
+        |a| a.streams.window_start_events = some("x"),
+        "EVENT_WINDOW_START_EVENTS",
+    ),
+    (
+        "EVENT_REPLAY_MAX_EVENTS",
+        |a| a.streams.replay_max_events = some("x"),
+        "EVENT_REPLAY_MAX_EVENTS",
+    ),
+    (
+        "EVENT_REPLAY_PERMITS",
+        |a| a.streams.replay_permits = some("x"),
+        "EVENT_REPLAY_PERMITS",
+    ),
+    (
+        "EVENT_TAIL_STALE_AFTER",
+        |a| a.streams.tail_stale_after = some("x"),
+        "EVENT_TAIL_STALE_AFTER",
+    ),
+    (
+        "SUBSCRIBER_BUFFER",
+        |a| a.streams.subscriber_buffer = some("x"),
+        "SUBSCRIBER_BUFFER",
+    ),
+    (
+        "MAX_SUBSCRIBERS",
+        |a| a.streams.max_subscribers = some("x"),
+        "MAX_SUBSCRIBERS",
+    ),
+    (
+        "STREAM_KEEP_ALIVE",
+        |a| a.streams.keep_alive = some("x"),
+        "STREAM_KEEP_ALIVE",
+    ),
+    (
+        "CORS_ALLOWED_ORIGINS",
+        |a| a.cors_allowed_origins = some("x"),
+        "CORS_ALLOWED_ORIGINS",
+    ),
 ];
 
 #[test]
@@ -811,3 +918,8 @@ fn every_field_of_serve_args_is_consumed_by_from_args() {
         assert_eq!(variables(args), [reported], "{variable} is not consumed");
     }
 }
+
+mod env_file;
+mod kafka;
+mod origins;
+mod streams;

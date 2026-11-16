@@ -2,8 +2,11 @@
 //!
 //! Every setting is an `Option<String>` bound to its environment variable, so clap never rejects a
 //! value: [`crate::config::Config::from_args`] parses and validates all of them and names the
-//! variable of every problem. `--help` names each variable and never prints a value.
+//! variable of every problem. `--help` names each variable and never prints a value, and the
+//! `Debug` output prints the value of a set secret as `<redacted>`. A secret flag takes the next
+//! token as its value even when it starts with `-`, so a usage error never names a secret.
 
+use std::fmt;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
@@ -22,8 +25,6 @@ pub struct Cli {
 pub enum Command {
     /// Validate the configuration, start logging, serve until SIGTERM or SIGINT, then drain.
     Serve(ServeArgs),
-    /// Wait for the database and apply the pending migrations, or revert the last one.
-    Migrate(MigrateArgs),
     /// Validate the configuration of `serve` without opening a socket or contacting a dependency.
     CheckConfig(ServeArgs),
     /// Write the REST API contract (YAML) to a file or to standard output.
@@ -34,44 +35,8 @@ pub enum Command {
     Healthcheck(HealthcheckArgs),
 }
 
-/// What `service migrate` does besides applying the pending migrations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
-pub enum MigrateAction {
-    /// Revert the most recently applied migration.
-    Revert,
-}
-
-/// Settings of the PostgreSQL pool.
-#[derive(Debug, Clone, Default, Args)]
-pub struct DatabaseArgs {
-    /// `postgres://` or `postgresql://` URL of the database (required).
-    #[arg(long = "database-url", env = "DATABASE_URL", hide_env_values = true)]
-    pub url: Option<String>,
-    /// Upper bound of open connections, 1 to 100 (default 10).
-    #[arg(
-        long = "database-max-connections",
-        env = "DATABASE_MAX_CONNECTIONS",
-        hide_env_values = true
-    )]
-    pub max_connections: Option<String>,
-    /// How long a caller waits for a free connection (default 2s).
-    #[arg(
-        long = "database-acquire-timeout",
-        env = "DATABASE_ACQUIRE_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub acquire_timeout: Option<String>,
-    /// `statement_timeout` of every connection (default 5s).
-    #[arg(
-        long = "database-statement-timeout",
-        env = "DATABASE_STATEMENT_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub statement_timeout: Option<String>,
-}
-
 /// Settings of `serve` and `check-config`: every service variable.
-#[derive(Debug, Clone, Default, Args)]
+#[derive(Clone, Default, Args)]
 pub struct ServeArgs {
     /// Deployment environment: `dev`, `test` or `prod` (default `prod`).
     #[arg(long = "app-env", env = "APP_ENV", hide_env_values = true)]
@@ -85,9 +50,6 @@ pub struct ServeArgs {
     /// `tracing` filter directives of the log output (default `info`).
     #[arg(long = "log-level", env = "LOG_LEVEL", hide_env_values = true)]
     pub log_level: Option<String>,
-    /// Settings of the PostgreSQL pool.
-    #[command(flatten)]
-    pub database: DatabaseArgs,
     /// AWS region of the message broker (required).
     #[arg(long = "aws-region", env = "AWS_REGION", hide_env_values = true)]
     pub aws_region: Option<String>,
@@ -102,11 +64,14 @@ pub struct ServeArgs {
     #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, hide = true)]
     pub aws_access_key_id: Option<String>,
     /// Secret access key; only validated as a pair with the key id, the AWS SDK reads it itself.
+    // The token after the flag is always the value, also when it starts with `-`, so a usage error
+    // never names the key.
     #[arg(
         long,
         env = "AWS_SECRET_ACCESS_KEY",
         hide_env_values = true,
-        hide = true
+        hide = true,
+        allow_hyphen_values = true
     )]
     pub aws_secret_access_key: Option<String>,
     /// Timeout of establishing an SQS connection (default 500ms).
@@ -158,24 +123,250 @@ pub struct ServeArgs {
         hide_env_values = true
     )]
     pub shutdown_grace_period: Option<String>,
-}
-
-/// Settings of `migrate` and `migrate revert`.
-#[derive(Debug, Clone, Args)]
-pub struct MigrateArgs {
-    /// Settings of the PostgreSQL pool.
+    /// Comma-separated names of the subscribable event types, 1 to 1000 distinct names (default:
+    /// none).
+    #[arg(long = "event-types", env = "EVENT_TYPES", hide_env_values = true)]
+    pub event_types: Option<String>,
+    /// Settings of the Kafka connection.
     #[command(flatten)]
-    pub database: DatabaseArgs,
-    /// How long to wait for the database, one attempt per second (default 30s).
+    pub kafka: KafkaArgs,
+    /// Limits of the event stream.
+    #[command(flatten)]
+    pub streams: StreamArgs,
+    /// `*`, or comma-separated origins such as `https://app.example.com` whose pages may use the
+    /// service (default: none).
     #[arg(
-        long = "wait-timeout",
-        env = "DATABASE_WAIT_TIMEOUT",
+        long = "cors-allowed-origins",
+        env = "CORS_ALLOWED_ORIGINS",
         hide_env_values = true
     )]
-    pub wait_timeout: Option<String>,
-    /// Revert instead of apply.
-    #[command(subcommand)]
-    pub action: Option<MigrateAction>,
+    pub cors_allowed_origins: Option<String>,
+}
+
+/// Settings of the Kafka connection of the event stream.
+#[derive(Clone, Default, Args)]
+pub struct KafkaArgs {
+    /// Comma-separated `host:port` addresses of the brokers, 1 to 16 (default `localhost:9092`).
+    #[arg(
+        long = "kafka-bootstrap-servers",
+        env = "KAFKA_BOOTSTRAP_SERVERS",
+        hide_env_values = true
+    )]
+    pub bootstrap_servers: Option<String>,
+    /// Topic of the events (default `notifications`).
+    #[arg(long = "kafka-topic", env = "KAFKA_TOPIC", hide_env_values = true)]
+    pub topic: Option<String>,
+    /// `plaintext`, `ssl`, `sasl_plaintext` or `sasl_ssl` (default `plaintext`).
+    #[arg(
+        long = "kafka-security-protocol",
+        env = "KAFKA_SECURITY_PROTOCOL",
+        hide_env_values = true
+    )]
+    pub security_protocol: Option<String>,
+    /// `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512`; only with a SASL protocol.
+    #[arg(
+        long = "kafka-sasl-mechanism",
+        env = "KAFKA_SASL_MECHANISM",
+        hide_env_values = true
+    )]
+    pub sasl_mechanism: Option<String>,
+    /// SASL user name; only with a SASL protocol.
+    #[arg(
+        long = "kafka-sasl-username",
+        env = "KAFKA_SASL_USERNAME",
+        hide_env_values = true
+    )]
+    pub sasl_username: Option<String>,
+    /// SASL password; only with a SASL protocol, never printed.
+    // The token after the flag is always the value, also when it starts with `-`, so a usage error
+    // never names the password.
+    #[arg(
+        long = "kafka-sasl-password",
+        env = "KAFKA_SASL_PASSWORD",
+        hide_env_values = true,
+        allow_hyphen_values = true
+    )]
+    pub sasl_password: Option<String>,
+    /// Client id of every Kafka connection, 1 to 128 characters (default `notification-service`).
+    #[arg(
+        long = "kafka-client-id",
+        env = "KAFKA_CLIENT_ID",
+        hide_env_values = true
+    )]
+    pub client_id: Option<String>,
+    /// Request time-out of the client, `1s` to `30s` (default 3s).
+    #[arg(
+        long = "kafka-request-timeout",
+        env = "KAFKA_REQUEST_TIMEOUT",
+        hide_env_values = true
+    )]
+    pub request_timeout: Option<String>,
+    /// Connect time-out of the client, `100ms` to `30s` and not longer than the request time-out
+    /// (default 2s).
+    #[arg(
+        long = "kafka-connect-timeout",
+        env = "KAFKA_CONNECT_TIMEOUT",
+        hide_env_values = true
+    )]
+    pub connect_timeout: Option<String>,
+    /// Long-poll wait of the tail, `50ms` to `5s` (default 500ms).
+    #[arg(
+        long = "kafka-fetch-max-wait",
+        env = "KAFKA_FETCH_MAX_WAIT",
+        hide_env_values = true
+    )]
+    pub fetch_max_wait: Option<String>,
+    /// Pause after a failed round of the tail, `100ms` to `1m` (default 1s).
+    #[arg(
+        long = "kafka-retry-delay",
+        env = "KAFKA_RETRY_DELAY",
+        hide_env_values = true
+    )]
+    pub retry_delay: Option<String>,
+}
+
+/// Every field as the derived `Debug` prints it, except the value of a set `AWS_SECRET_ACCESS_KEY`,
+/// which is printed as `<redacted>`.
+impl fmt::Debug for ServeArgs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServeArgs")
+            .field("app_env", &self.app_env)
+            .field("app_host", &self.app_host)
+            .field("app_port", &self.app_port)
+            .field("log_level", &self.log_level)
+            .field("aws_region", &self.aws_region)
+            .field("aws_endpoint_url_sqs", &self.aws_endpoint_url_sqs)
+            .field("aws_access_key_id", &self.aws_access_key_id)
+            .field(
+                "aws_secret_access_key",
+                &Redacted(self.aws_secret_access_key.as_deref()),
+            )
+            .field("sqs_connect_timeout", &self.sqs_connect_timeout)
+            .field("sqs_operation_timeout", &self.sqs_operation_timeout)
+            .field("sqs_max_attempts", &self.sqs_max_attempts)
+            .field("health_probe_timeout", &self.health_probe_timeout)
+            .field("http_request_timeout", &self.http_request_timeout)
+            .field("http_max_body_bytes", &self.http_max_body_bytes)
+            .field("shutdown_grace_period", &self.shutdown_grace_period)
+            .field("event_types", &self.event_types)
+            .field("kafka", &self.kafka)
+            .field("streams", &self.streams)
+            .field("cors_allowed_origins", &self.cors_allowed_origins)
+            .finish()
+    }
+}
+
+/// Every field as the derived `Debug` prints it, except the value of a set `KAFKA_SASL_PASSWORD`,
+/// which is printed as `<redacted>`.
+impl fmt::Debug for KafkaArgs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("KafkaArgs")
+            .field("bootstrap_servers", &self.bootstrap_servers)
+            .field("topic", &self.topic)
+            .field("security_protocol", &self.security_protocol)
+            .field("sasl_mechanism", &self.sasl_mechanism)
+            .field("sasl_username", &self.sasl_username)
+            .field("sasl_password", &Redacted(self.sasl_password.as_deref()))
+            .field("client_id", &self.client_id)
+            .field("request_timeout", &self.request_timeout)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("fetch_max_wait", &self.fetch_max_wait)
+            .field("retry_delay", &self.retry_delay)
+            .finish()
+    }
+}
+
+/// The `Debug` stand-in of an optional secret: it prints like the `Option` it wraps, with
+/// `<redacted>` in place of a set value, so a reader still sees whether the secret is set.
+struct Redacted<'secret>(Option<&'secret str>);
+
+impl fmt::Debug for Redacted<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(_) => formatter
+                .debug_tuple("Some")
+                .field(&format_args!("<redacted>"))
+                .finish(),
+            None => formatter.write_str("None"),
+        }
+    }
+}
+
+/// Limits of the event stream.
+#[derive(Debug, Clone, Default, Args)]
+pub struct StreamArgs {
+    /// Largest record value in bytes, 1 to 1048576 (default 65536).
+    #[arg(
+        long = "event-max-data-bytes",
+        env = "EVENT_MAX_DATA_BYTES",
+        hide_env_values = true
+    )]
+    pub max_data_bytes: Option<String>,
+    /// Events in the memory window, 1 to 10000000 (default 100000).
+    #[arg(
+        long = "event-window-max-events",
+        env = "EVENT_WINDOW_MAX_EVENTS",
+        hide_env_values = true
+    )]
+    pub window_max_events: Option<String>,
+    /// Bytes in the memory window, 2097152 to 17179869184 (default 67108864).
+    #[arg(
+        long = "event-window-max-bytes",
+        env = "EVENT_WINDOW_MAX_BYTES",
+        hide_env_values = true
+    )]
+    pub window_max_bytes: Option<String>,
+    /// Offsets below the end of the topic read at start, 0 to 10000000 (default 100000).
+    #[arg(
+        long = "event-window-start-events",
+        env = "EVENT_WINDOW_START_EVENTS",
+        hide_env_values = true
+    )]
+    pub window_start_events: Option<String>,
+    /// Offsets below the tail a replay may reach, 1 to 100000000 (default 1000000).
+    #[arg(
+        long = "event-replay-max-events",
+        env = "EVENT_REPLAY_MAX_EVENTS",
+        hide_env_values = true
+    )]
+    pub replay_max_events: Option<String>,
+    /// Concurrent replay reads of the node, 1 to 64 (default 4).
+    #[arg(
+        long = "event-replay-permits",
+        env = "EVENT_REPLAY_PERMITS",
+        hide_env_values = true
+    )]
+    pub replay_permits: Option<String>,
+    /// Age at which the readiness probe of the tail fails, `1s` to `5m` (default 10s).
+    #[arg(
+        long = "event-tail-stale-after",
+        env = "EVENT_TAIL_STALE_AFTER",
+        hide_env_values = true
+    )]
+    pub tail_stale_after: Option<String>,
+    /// Queued events per subscriber, 1 to 65536 (default 256).
+    #[arg(
+        long = "subscriber-buffer",
+        env = "SUBSCRIBER_BUFFER",
+        hide_env_values = true
+    )]
+    pub subscriber_buffer: Option<String>,
+    /// Subscribers of the node, 1 to 1000000 (default 100000).
+    #[arg(
+        long = "max-subscribers",
+        env = "MAX_SUBSCRIBERS",
+        hide_env_values = true
+    )]
+    pub max_subscribers: Option<String>,
+    /// Keep-alive, WebSocket ping, send bound and write deadline, `1s` to `5m` (default 15s).
+    #[arg(
+        long = "stream-keep-alive",
+        env = "STREAM_KEEP_ALIVE",
+        hide_env_values = true
+    )]
+    pub keep_alive: Option<String>,
 }
 
 /// Arguments of `openapi-export` and `graphql-export`.

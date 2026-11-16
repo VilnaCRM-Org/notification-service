@@ -4,7 +4,7 @@
 # Usage: with-load-test-stack.sh -- <command...>
 # Builds the production image unless BUILD_IMAGE=0, starts the project $LOAD_TEST_PROJECT (default:
 # <directory name>-load) from docker-compose.yml plus docker-compose.load_test.override.yml, waits for health,
-# prepares its database (setup-load-test-db.sh), exports API_HOST=localhost and API_PORT=$LOAD_TEST_APP_PORT and
+# exports API_HOST=localhost and API_PORT=$LOAD_TEST_APP_PORT and
 # runs the command. When the command fails, the logs of the project are printed to standard error before the
 # project is removed, so that a failed run keeps the service's side of the story (a 500 carries no detail by
 # design). The project is removed with its volumes on every exit path.
@@ -49,7 +49,6 @@ if [ "$BUILD_IMAGE" != 0 ]; then
 fi
 
 compose up --detach --wait --wait-timeout 120 --no-build || unhealthy
-scripts/setup-load-test-db.sh || unhealthy
 
 export API_HOST=localhost
 export API_PORT="$LOAD_TEST_APP_PORT"

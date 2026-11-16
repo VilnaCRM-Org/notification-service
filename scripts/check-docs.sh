@@ -16,8 +16,8 @@
 #   (4) the block between <!-- verification:start --> and <!-- verification:end --> in AGENTS.md must equal the
 #       output of `make ci-list`, and no other numbered list or fenced block may cite three or more gate targets
 #       (the markers exempt a block in AGENTS.md only);
-#   (5) docs/environment.md must list exactly the union of: the variables in the help of `service serve`,
-#       `migrate` and `healthcheck`; the variables interpolated in the compose files and the variables that their
+#   (5) docs/environment.md must list exactly the union of: the variables in the help of `service serve` and
+#       `healthcheck`; the variables interpolated in the compose files and the variables that their
 #       top-level `secrets:` read with `environment:`; the names assigned or
 #       referenced in .env and .env.test; the variables that the Makefile and make/*.mk declare with `?=`; the keys
 #       of [env] in .cargo/config.toml;
@@ -33,7 +33,7 @@
 # therefore not slash commands. Test files and fixtures are never read.
 #
 # The script starts no cargo command. The help texts of the binary are read from <dir> of --service-help
-# (root.txt, serve.txt, migrate.txt and healthcheck.txt, written by the recipe of `make docs-check`). "Tracked" means
+# (root.txt, serve.txt and healthcheck.txt, written by the recipe of `make docs-check`). "Tracked" means
 # `git ls-files`; a root without a .git entry is read as the set of all its files.
 #
 # Exit status: 0 no violation; 1 violations; 2 usage error or a tool or input that could not run.
@@ -78,7 +78,7 @@ done
 root="$(cd "${root}" && pwd)"
 [[ -d "${help_dir}" ]] || could_not_run "the help directory ${help_dir} does not exist"
 help_dir="$(cd "${help_dir}" && pwd)"
-for name in root serve migrate healthcheck; do
+for name in root serve healthcheck; do
   [[ -f "${help_dir}/${name}.txt" ]] || could_not_run "${help_dir}/${name}.txt is missing (run make docs-check)"
 done
 
@@ -450,7 +450,7 @@ else
   awk '/^\| Name \|/ {inside = 1; next} !/^\|/ {inside = 0} inside && match($0, /^\| `[A-Za-z_][A-Za-z0-9_]*` \|/) {print substr($0, 4, RLENGTH - 6)}' \
     "${root}/docs/environment.md" | sort -u >"${work}/env-documented"
   {
-    for name in serve migrate healthcheck; do
+    for name in serve healthcheck; do
       grep -oE '\[env: [A-Za-z_][A-Za-z0-9_]*\]' "${help_dir}/${name}.txt" | sed -E 's/^\[env: (.*)\]$/\1/' || true
     done
     for file in docker-compose.yml docker-compose.override.yml docker-compose.prod.yml docker-compose.load_test.override.yml; do

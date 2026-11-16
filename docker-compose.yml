@@ -12,20 +12,20 @@ services:
     image: ${APP_IMAGE:-service:prod}
     build: *build
     depends_on:
-      migrate:
-        condition: service_completed_successfully
       localstack:
+        condition: service_healthy
+      kafka:
         condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-prod}
       APP_PORT: '8081'
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgres://${DB_USER:-app}:${DB_PASSWORD:-local-dev-only}@database:5432/${DB_NAME:-app}
       AWS_REGION: ${AWS_REGION:-us-east-1}
       # Literal emulator placeholders: credentials of the host shell never reach a local container.
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
       AWS_ENDPOINT_URL_SQS: http://localstack:4566
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
     ports:
       - '${APP_PORT:-8081}:8081'
     healthcheck:
@@ -37,42 +37,6 @@ services:
       start_interval: 1s
     restart: unless-stopped
     stop_grace_period: 15s
-
-  migrate:
-    <<: *hardening
-    image: ${APP_IMAGE:-service:prod}
-    build: *build
-    command: ['migrate']
-    depends_on:
-      database:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgres://${DB_USER:-app}:${DB_PASSWORD:-local-dev-only}@database:5432/${DB_NAME:-app}
-    restart: 'no'
-
-  database:
-    # The one image without a digest: its tag is DB_VERSION, and a digest would override the tag.
-    image: postgres:${DB_VERSION:-16}-alpine
-    environment:
-      POSTGRES_DB: ${DB_NAME:-app}
-      POSTGRES_USER: ${DB_USER:-app}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-local-dev-only}
-      # From PostgreSQL 18 the image keeps the cluster in /var/lib/postgresql/<major>/docker and refuses a
-      # mount at /var/lib/postgresql/data. Naming the old path keeps the data in db_data for every DB_VERSION.
-      # A change of the major version still needs a fresh volume or pg_upgrade.
-      PGDATA: /var/lib/postgresql/data
-    ports:
-      - '127.0.0.1:${DB_PORT:-5432}:5432'
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 10s
-      start_interval: 1s
-    restart: unless-stopped
 
   localstack:
     image: localstack/localstack:3.4.0@sha256:54fcf172f6ff70909e1e26652c3bb4587282890aff0d02c20aa7695469476ac0
@@ -92,6 +56,44 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  kafka:
+    image: apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40
+    environment:
+      # One KRaft node that is broker and controller. PLAINTEXT serves the compose network (the app), INTERNAL
+      # the broker's own tools and health check, EXTERNAL the host through docker-compose.kafka-host.yml.
+      KAFKA_NODE_ID: '1'
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:9094,CONTROLLER://:9093,EXTERNAL://:9095
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,INTERNAL://localhost:9094,EXTERNAL://localhost:9095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: '1'
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: '1'
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: '0'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      # The image writes its log to /tmp otherwise; the volume keeps the topic and its records across restarts.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      # Creates the topic the service reads and is healthy only when it exists with exactly one partition.
+      test:
+        - CMD-SHELL
+        - >-
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --create --if-not-exists
+          --topic notifications --partitions 1 --replication-factor 1 > /dev/null
+          && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9094 --describe --topic notifications
+          | grep -Eq 'PartitionCount:[[:space:]]*1[[:space:]]'
+      interval: 10s
+      timeout: 30s
+      retries: 10
+      start_period: 60s
+      start_interval: 5s
+    restart: unless-stopped
+
 volumes:
-  db_data:
   localstack_data:
+  kafka_data:

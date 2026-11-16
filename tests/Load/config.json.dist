@@ -18,6 +18,40 @@
         "duration": { "rise": 3, "plateau": 10, "fall": 3 }
       },
       "spike": { "threshold": 5000, "rps": 200, "vus": 200, "duration": { "rise": 5, "fall": 5 } }
+    },
+    "subscriptions": {
+      "smoke": {
+        "threshold": 500,
+        "deliveryThreshold": 2000,
+        "rps": 10,
+        "vus": 60,
+        "duration": 10,
+        "hold": 5
+      },
+      "average": {
+        "threshold": 200,
+        "deliveryThreshold": 2000,
+        "rps": 20,
+        "vus": 120,
+        "duration": { "rise": 3, "plateau": 10, "fall": 3 },
+        "hold": 5
+      },
+      "stress": {
+        "threshold": 1000,
+        "deliveryThreshold": 2000,
+        "rps": 100,
+        "vus": 600,
+        "duration": { "rise": 3, "plateau": 10, "fall": 3 },
+        "hold": 5
+      },
+      "spike": {
+        "threshold": 5000,
+        "deliveryThreshold": 2000,
+        "rps": 150,
+        "vus": 800,
+        "duration": { "rise": 5, "fall": 5 },
+        "hold": 5
+      }
     }
   }
 }

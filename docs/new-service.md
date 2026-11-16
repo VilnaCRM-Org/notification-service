@@ -29,7 +29,9 @@ These files name the template and belong to the service from the start; the temp
 
 ## 4. Keep or remove the example context
 
-The template ships one example bounded context under the directory crates/company-subdomain with its migration, snapshots and end-to-end features. Keep it while you learn the layout, then remove the crates, the three paths in `[workspace].members`, the `[workspace.dependencies]` entries, the example migration, the example feature files, the wiring in the `service` crate and the components in `workspace.dsl`. Run `make ci` afterwards: every gate must pass without the example. The Bats suite never depends on the example context, so it keeps passing.
+The template ships one example bounded context, with a PostgreSQL adapter, its migration, its routes in the snapshots and its end-to-end features. Keep it while you learn the layout, then remove the crates, the three paths in `[workspace].members`, the `[workspace.dependencies]` entries, the example migration, the example feature files, the wiring in the `service` crate and the components in `workspace.dsl`. Run `make ci` afterwards: every gate must pass without the example. The Bats suite never depends on the example context, so it keeps passing.
+
+This service has removed the example context, and PostgreSQL with it ([ADR 0020](adr/0020-postgresql-is-removed.md)): it has no database, no migration and no database target, and its bounded context `notification/event-stream` shows the layout instead. A template change that touches the example context or the database does not apply here; the sync guide lists the paths this service keeps ignored for that reason.
 
 ## 5. Add a bounded context
 
@@ -43,10 +45,9 @@ Then wire the context into the service:
 
 1. Add `[workspace.dependencies]` path entries for the new crates when the first crate depends on them.
 2. Write the code layer by layer (domain, application, infrastructure) and put its fakes in `test-support`.
-3. Wire it in the `service` crate: adapters in `Adapters`, handlers in `bootstrap::router`, a state field in `AppState`, its router in `openapi::api_router` and its GraphQL roots in `graphql::schema`.
+3. Wire it in the `service` crate: adapters in `Adapters`, handlers in `bootstrap::application`, a state field in `AppState`, its router in `openapi::api_router` and its GraphQL roots in `graphql::schema`.
 4. Add the components to `workspace.dsl`; until then the architecture-model gate fails.
-5. Add a migration with `make create-migration name=<snake_case_description>`, apply it with `make migrate`, run `make sqlx-prepare` and commit `.sqlx/` with the migration.
-6. Regenerate the contract snapshots with `make generate-openapi-spec` and `make generate-graphql-spec` in the same change.
+5. Regenerate the contract snapshots with `make generate-openapi-spec` and `make generate-graphql-spec` in the same change.
 
 `architecture.toml` and every other protected item stay untouched, except for the labelled change below.
 
@@ -69,10 +70,10 @@ A service adds to these files, and the template sync ignores them so that the ad
 | `crates/internal/health-check/domain/src/value_object/dependency.rs` and `crates/internal/health-check/infrastructure/src/probe.rs` | a dependency and the module declaration of its probe; a probe that needs a new client crate also changes `crates/internal/health-check/infrastructure/Cargo.toml`, which the template synchronises, so list that file by its full path in your `.templatesyncignore` in the same pull request, or the next sync removes the dependency |
 | `crates/service/Cargo.toml` and the bootstrap, command-line, configuration, routes, OpenAPI and GraphQL schema modules of that crate | wiring, commands, configuration, routes and schema roots of its contexts |
 | `tests/support/`, `tests/e2e/` | test doubles, world and step definitions |
-| `crates/service/src/http/router/tests.rs` and `crates/service/tests/integration/{bootstrap,migrate,serve,panic}.rs` | the tests that construct `Adapters` and call the routes, the table and the migration of the example context; keep them in step with your wiring |
+| `crates/service/src/http/router/tests.rs` and `crates/service/tests/integration/{bootstrap,serve,panic}.rs` | the tests that construct `Adapters` and call the routes; keep them in step with your wiring |
 | files changed through an extension seam (see `docs/extension-seams.md`) | the change the seam describes; the template does not ignore these files, so add each synchronised path you change, in full from the root of the repository, to your `.templatesyncignore` in the same pull request and apply later template changes to it by hand |
 
-`Makefile` and `docs/make-targets.md` are synchronised, not ignored; a service adds targets through the fragment of section 6 instead.
+In the template, `Makefile` and `docs/make-targets.md` are synchronised, not ignored; a service adds targets through the fragment of section 6 instead. This service ignores both nevertheless and applies template changes to them by hand, as the sync guide explains.
 
 ## 8. Secrets, variables and labels to create
 

@@ -1,6 +1,6 @@
 [package]
 name = "shared-infrastructure"
-description = "Shared kernel, infrastructure layer: in-process buses, cache, clock, identifiers, persistence and messaging adapters"
+description = "Shared kernel, infrastructure layer: in-process buses, cache, clock, identifiers and messaging adapters"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,6 @@ aws-config.workspace = true
 aws-sdk-sqs.workspace = true
 moka.workspace = true
 shared-domain.workspace = true
-sqlx.workspace = true
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v7"] }
 

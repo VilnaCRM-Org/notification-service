@@ -13,14 +13,15 @@ autotests = false
 axum.workspace = true
 clap.workspace = true
 cucumber.workspace = true
+futures-util.workspace = true
 health-check-domain.workspace = true
 http-body-util.workspace = true
+krafka.workspace = true
 serde_json.workspace = true
 service.workspace = true
-shared-infrastructure.workspace = true
-sqlx.workspace = true
 test-support.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tower.workspace = true
 
 [[test]]

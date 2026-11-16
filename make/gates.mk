@@ -11,7 +11,6 @@ HACK_CMD         = cargo hack check --workspace --each-feature --locked
 DENY_CMD         = cargo deny --locked $(DENY_ARGS) check
 DENY_OFFLINE_CMD = cargo deny --locked --offline check bans licenses sources
 SHEAR_CMD        = cargo shear --locked
-SQLX_CHECK_CMD   = cargo sqlx prepare --workspace --check -- --all-targets --all-features --locked
 CHECK_CONFIG_CMD = cargo run --locked --quiet -p service -- check-config
 UNIT_CMD         = cargo nextest run --locked --workspace --lib --bins
 DOCTEST_CMD      = cargo test --locked --workspace --doc

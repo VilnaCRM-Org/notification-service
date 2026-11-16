@@ -58,7 +58,7 @@ async fn a_valid_operation_is_200_json() {
 }
 
 #[rstest]
-#[case::first_operation("A", json!({ "a": { "name": "Mutation" } }))]
+#[case::first_operation("A", json!({ "a": { "name": "EventType" } }))]
 #[case::second_operation("B", json!({ "b": "Query" }))]
 #[tokio::test]
 async fn variables_and_the_operation_name_are_honoured(
@@ -68,7 +68,7 @@ async fn variables_and_the_operation_name_are_honoured(
     let body = json!({
         "query": "query A($name: String!) { a: __type(name: $name) { name } } query B { b: __typename }",
         "operationName": operation_name,
-        "variables": { "name": "Mutation" },
+        "variables": { "name": "EventType" },
     });
 
     let response = send(post_json(&body.to_string())).await;

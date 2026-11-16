@@ -8,8 +8,9 @@ pub mod fixture;
 pub mod id;
 pub mod log;
 pub mod probe;
-pub mod repository;
 pub mod seed;
+pub mod static_topic;
+pub mod topic;
 
 /// Runs a future that completes without waiting for anything, such as the doubles of this crate.
 #[cfg(test)]

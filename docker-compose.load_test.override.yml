@@ -6,9 +6,38 @@ services:
     ports: !override
       - '127.0.0.1:${LOAD_TEST_APP_PORT:-18081}:8081'
     restart: 'no'
-  database:
-    ports: !reset []
-    restart: 'no'
   localstack:
     ports: !reset []
+    restart: 'no'
+  kafka:
+    ports: !reset []
+    restart: 'no'
+  # The publisher of the K6 scenario `subscriptions` (FR-37): one event of type `load.test` every 100 ms, whose
+  # data carries its send time `sentAtMs` in epoch milliseconds. The service has no publishing route; the stack
+  # writes the events with the console producer of the broker's own image. `$$` is a literal `$` for the shell.
+  load-test-publisher:
+    image: apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ['bash', '-c']
+    command:
+      - >-
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --describe --topic notifications
+        > /dev/null 2>&1; do sleep 1; done;
+        while true; do
+        printf '{"id":"%s","type":"load.test","occurredAt":"%s","data":{"sentAtMs":%s}}\n'
+        "$$(cat /proc/sys/kernel/random/uuid)" "$$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$(date +%s%3N)";
+        sleep 0.1;
+        done | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server kafka:9092 --topic notifications
+        --producer-property linger.ms=0 --producer-property acks=all
+    environment:
+      # The Kafka tools create their log directory at start; the root file system is read-only.
+      LOG_DIR: /tmp
+    # Ends at once when the stack is removed instead of waiting for the stop grace period.
+    init: true
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
     restart: 'no'

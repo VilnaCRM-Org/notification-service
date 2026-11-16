@@ -55,17 +55,18 @@ run_hook() {
   assert_equal "${missing}" ""
 }
 
-@test "FR62: the 42 PHP target names are targets of make help" {
-  # The 42 names of prd.md FR62, in its order: the targets of the PHP template that keep their name and capability.
+@test "FR62: the 40 PHP target names are targets of make help" {
+  # The names of prd.md FR62, in its order: the targets of the PHP template that keep their name and capability,
+  # without setup-test-db and setup-load-test-db, which went with the database (the service stores nothing).
   local names=(
-    help start up build stop down sh logs new-logs purge clean install update setup-test-db setup-load-test-db
+    help start up build stop down sh logs new-logs purge clean install update
     validate-configuration check-requirements check-security unit-tests integration-tests all-tests test bats
     tests-with-coverage coverage-html coverage-xml generate-openapi-spec generate-graphql-spec validate-openapi-spec
     openapi-diff schemathesis-validate smoke-load-tests average-load-tests stress-load-tests spike-load-tests load-tests
     execute-load-tests-script aws-load-tests aws-load-tests-cleanup ci all ci-sequential
   )
   local helped name missing=''
-  assert_equal "${#names[@]}" 42
+  assert_equal "${#names[@]}" 40
   assert_equal "$(printf '%s\n' "${names[@]}" | sort | uniq -d)" ''
   run --separate-stderr make --no-print-directory help
   assert_success
@@ -78,19 +79,20 @@ run_hook() {
   [[ -z "${missing}" ]] || fail "FR62: PHP target names missing from make help:${missing}"
 }
 
-@test "FR55(a): features/health_check.feature is the PHP template file" {
-  # The SHA-256 of features/health_check.feature of the PHP template. The end-to-end gate runs that file unmodified
-  # (FR55(a), NFR30), so it changes only together with the PHP template; a service adds scenarios in a file of its own.
-  local file=features/health_check.feature expected=0ab4c4a9555c85800eeafd6136a368ed634a1166bb4d3190f43e7bc66bdb2818
+@test "FR55(a): features/health_check.feature is the PHP template file without its database scenario" {
+  # The SHA-256 of features/health_check.feature of the PHP template without the scenario "database is unavailable"
+  # (the service has no database). The end-to-end gate runs that file (FR55(a), NFR30), so it changes only together
+  # with the PHP template; a service adds scenarios in a file of its own.
+  local file=features/health_check.feature expected=67eba235193e7b19d91467687d2dd6367dee05ca969dbf5c6d533ab165a7a1e0
   local actual reason
-  reason="FR55(a), NFR30: ${file} must stay identical to the PHP template's file and changes only together with it"
+  reason="FR55(a), NFR30: ${file} must stay the PHP template's file without its database scenario and changes only together with it"
   [[ -f "${file}" ]] || fail "${reason}; the file is missing"
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "${file}" | cut -d ' ' -f 1)"
   else
     actual="$(shasum -a 256 "${file}" | cut -d ' ' -f 1)"
   fi
-  [[ "${actual}" == "${expected}" ]] || fail "${reason}; its sha256 is ${actual}, the PHP file's is ${expected}"
+  [[ "${actual}" == "${expected}" ]] || fail "${reason}; its sha256 is ${actual}, the expected one is ${expected}"
 }
 
 @test "FR97: .coderabbit.yaml is the PHP template file with the request-changes workflow" {
@@ -140,7 +142,7 @@ run_hook() {
   # shellcheck disable=SC2016 # the dollar sign belongs to the recipe text
   assert_line 'for stage in ci-preflight ci-static-analysis ci-tests ci-contracts ci-mutation ci-delivery ci-cli; do make --no-print-directory $stage; done'
   # The first gate of every stage, in the order of the stages.
-  local gates=(validate-configuration format-check setup-test-db validate-contract-snapshots mutation-tests-diff build-prod-image bats)
+  local gates=(validate-configuration format-check tests-with-coverage validate-contract-snapshots mutation-tests-diff build-prod-image bats)
   local previous=0 gate line
   for gate in "${gates[@]}"; do
     line="$(awk -v gate="make --no-print-directory ${gate}" '$0 == gate {print NR; exit}' <<<"${output}")"
@@ -580,7 +582,7 @@ PROBE
     bash -c "source tests/CLI/bats/test_helper.bash && isolate_make_environment && make --no-print-directory -f Makefile -f \"\$1\" probe" \
     _ "${tmp}/probe.mk"
   assert_success
-  assert_line 'outer: BATS_ARGS=[] BATS_PATH=[tests/CLI/bats] CI_STAGES=[ci-preflight ci-static-analysis ci-tests ci-contracts ci-mutation ci-delivery ci-cli] DEPS=[database localstack] base_ref=[origin/main]'
+  assert_line 'outer: BATS_ARGS=[] BATS_PATH=[tests/CLI/bats] CI_STAGES=[ci-preflight ci-static-analysis ci-tests ci-contracts ci-mutation ci-delivery ci-cli] DEPS=[localstack] base_ref=[origin/main]'
   assert_line 'kept: BUILD_IMAGE=[0] DOCKER=[/nonexistent/docker] DOCKER_COMPOSE=[nonexistent compose] APP_IMAGE=[a:b] DEV_IMAGE=[c:d] LOAD_TEST_PROJECT=[lp]'
   assert_line 'kept: COMPOSE_PROJECT_NAME=[cpn] RUN_IN_CONTAINER=[1] DB_PORT=[1111] LOCALSTACK_PORT=[2222]'
   assert_line 'flags: [] level=[0]'

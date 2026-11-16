@@ -10,7 +10,6 @@ use world::AppWorld;
 
 #[tokio::main]
 async fn main() {
-    world::drop_leftover_databases().await;
     AppWorld::cucumber()
         .max_concurrent_scenarios(8)
         // Every skipped step fails the run, also in a scenario, rule or feature tagged `@allow.skipped`, which
@@ -19,7 +18,7 @@ async fn main() {
         .after(|_feature, _rule, _scenario, _event, world| {
             Box::pin(async move {
                 if let Some(world) = world {
-                    world.drop_database().await;
+                    world.end_event_stream().await;
                 }
             })
         })

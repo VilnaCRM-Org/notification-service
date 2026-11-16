@@ -1,22 +1,22 @@
 [![SWUbanner](https://raw.githubusercontent.com/vshymanskyy/StandWithUkraine/main/banner2-direct.svg)](https://supportukrainenow.org/)
 
-# Rust Service Template
+# VilnaCRM Notification Service
 
-[![Quality](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/quality.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/quality.yml)
-[![Tests](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/tests.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/tests.yml)
-[![Contracts](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/contracts.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/contracts.yml)
-[![Security](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/security.yml/badge.svg)](https://github.com/VilnaCRM-Org/rust-service-template/actions/workflows/security.yml)
-[![codecov](https://codecov.io/gh/VilnaCRM-Org/rust-service-template/graph/badge.svg)](https://codecov.io/gh/VilnaCRM-Org/rust-service-template)
-[![Latest release](https://img.shields.io/github/v/release/VilnaCRM-Org/rust-service-template)](https://github.com/VilnaCRM-Org/rust-service-template/releases/latest)
-[![License](https://img.shields.io/github/license/VilnaCRM-Org/rust-service-template)](LICENSE)
+[![Quality](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/quality.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/quality.yml)
+[![Tests](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/tests.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/tests.yml)
+[![Contracts](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/contracts.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/contracts.yml)
+[![Security](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/security.yml/badge.svg)](https://github.com/VilnaCRM-Org/notification-service/actions/workflows/security.yml)
+[![codecov](https://codecov.io/gh/VilnaCRM-Org/notification-service/graph/badge.svg)](https://codecov.io/gh/VilnaCRM-Org/notification-service)
+[![Latest release](https://img.shields.io/github/v/release/VilnaCRM-Org/notification-service)](https://github.com/VilnaCRM-Org/notification-service/releases/latest)
+[![License](https://img.shields.io/github/license/VilnaCRM-Org/notification-service)](LICENSE)
 
-`rust-service-template` is the VilnaCRM baseline for backend services written in Rust. It is the Rust counterpart of `php-service-template`: a Cargo workspace with one crate per bounded-context layer, a REST and GraphQL API on axum, PostgreSQL through sqlx, contract snapshots, architecture guards, quality gates behind one command surface, and guidance for AI coding assistants. A downstream service inherits the platform concerns instead of rebuilding them.
+Real-time event delivery hub for VilnaCRM frontends over Server-Sent Events and WebSocket
 
 ## Baseline
 
 - Rust 1.99.1, pinned in `rust-toolchain.toml`, in a workspace with domain, application and infrastructure crates per bounded context
 - REST and GraphQL endpoints with generated OpenAPI and GraphQL contract snapshots under `.github/`
-- PostgreSQL with migrations and compile-time checked queries
+- No database: the events live in one Kafka topic that every node reads, and the service stores nothing
 - An architecture gate (`make architecture`) that keeps domain crates free of frameworks
 - Unit, integration, end-to-end, mutation and load tests
 - A Make command surface that runs natively or in containers
@@ -85,7 +85,7 @@ The k6 scenarios live in `tests/Load/`. `make load-tests` runs them locally, and
 - [`docs/new-service.md`](docs/new-service.md) — creating a service from the template
 - [`docs/environment.md`](docs/environment.md) — environment variables
 - [`docs/make-targets.md`](docs/make-targets.md) — Make targets
-- [`docs/operations.md`](docs/operations.md) — migrations, probes, logs and shutdown
+- [`docs/operations.md`](docs/operations.md) — probes, logs and shutdown
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures
 - [`docs/extension-seams.md`](docs/extension-seams.md) — where a service extends the template
 - [`docs/load-testing.md`](docs/load-testing.md) — load tests

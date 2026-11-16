@@ -4,24 +4,32 @@
     reason = "the MergedObject derive expands to code that triggers this lint"
 )]
 
-use async_graphql::{EmptySubscription, MergedObject, SDLExportOptions, Schema, SchemaBuilder};
-use some_module_application::graphql::{ExampleApiResourceMutation, ExampleApiResourceQuery};
+use async_graphql::{
+    EmptyMutation, EmptySubscription, MergedObject, SDLExportOptions, Schema, SchemaBuilder,
+};
+use event_stream_application::graphql::EventStreamQuery;
 
 /// Query root.
 #[derive(Debug, MergedObject, Default)]
-pub struct Query(ExampleApiResourceQuery);
+pub struct Query(EventStreamQuery);
 
-/// Mutation root.
-#[derive(Debug, MergedObject, Default)]
-pub struct Mutation(ExampleApiResourceMutation);
+/// The schema type of the service: no mutation and no subscription.
+pub type ApiSchema = Schema<Query, EmptyMutation, EmptySubscription>;
 
-/// The schema type of the service: no subscription.
-pub type ApiSchema = Schema<Query, Mutation, EmptySubscription>;
+/// The deepest field nesting a document may select; the standard introspection query of the
+/// explorer still fits.
+pub const MAX_DEPTH: usize = 16;
 
-/// A builder for the schema; the caller adds the state of every context with `.data(..)`.
+/// The highest complexity a document may reach: every selected field counts one.
+pub const MAX_COMPLEXITY: usize = 1000;
+
+/// A builder for the schema, bounded in depth and complexity; the caller adds the state of every
+/// context with `.data(..)`.
 #[must_use]
-pub fn builder() -> SchemaBuilder<Query, Mutation, EmptySubscription> {
-    Schema::build(Query::default(), Mutation::default(), EmptySubscription)
+pub fn builder() -> SchemaBuilder<Query, EmptyMutation, EmptySubscription> {
+    Schema::build(Query::default(), EmptyMutation, EmptySubscription)
+        .limit_depth(MAX_DEPTH)
+        .limit_complexity(MAX_COMPLEXITY)
 }
 
 /// The schema definition language of the schema, sorted so that it is byte-stable (AD-17).

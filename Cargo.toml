@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/company-subdomain/some-module/application",
-    "crates/company-subdomain/some-module/domain",
-    "crates/company-subdomain/some-module/infrastructure",
     "crates/internal/health-check/application",
     "crates/internal/health-check/domain",
     "crates/internal/health-check/infrastructure",
+    "crates/notification/event-stream/application",
+    "crates/notification/event-stream/domain",
+    "crates/notification/event-stream/infrastructure",
     "crates/service",
     "crates/shared/application",
     "crates/shared/domain",
@@ -24,11 +24,14 @@ rust-version = "1.99.1"
 license = "CC0-1.0"
 publish = false
 # Service identity: the OpenAPI title is "<description> API" and the contact URL is `repository`.
-description = "Rust Service Template"
-repository = "https://github.com/VilnaCRM-Org/rust-service-template"
+description = "VilnaCRM Notification Service"
+repository = "https://github.com/VilnaCRM-Org/notification-service"
 
 [workspace.dependencies]
 # Workspace crates
+event-stream-application = { path = "crates/notification/event-stream/application" }
+event-stream-domain = { path = "crates/notification/event-stream/domain" }
+event-stream-infrastructure = { path = "crates/notification/event-stream/infrastructure" }
 health-check-application = { path = "crates/internal/health-check/application" }
 health-check-domain = { path = "crates/internal/health-check/domain" }
 health-check-infrastructure = { path = "crates/internal/health-check/infrastructure" }
@@ -36,9 +39,6 @@ service = { path = "crates/service" }
 shared-application = { path = "crates/shared/application" }
 shared-domain = { path = "crates/shared/domain" }
 shared-infrastructure = { path = "crates/shared/infrastructure" }
-some-module-application = { path = "crates/company-subdomain/some-module/application" }
-some-module-domain = { path = "crates/company-subdomain/some-module/domain" }
-some-module-infrastructure = { path = "crates/company-subdomain/some-module/infrastructure" }
 test-support = { path = "tests/support" }
 
 # Runtime
@@ -52,22 +52,16 @@ aws-sdk-sqs = { version = "1.120.0", default-features = false, features = [
     "rt-tokio",
     "default-https-client",
 ] }
-axum = { version = "0.8.9", features = ["macros"] }
+axum = { version = "0.8.9", features = ["macros", "ws"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 humantime = "2.4.0"
+krafka = { version = "=0.32.0", default-features = false, features = ["rustls-aws-lc-rs"] }
 moka = { version = "0.12.16", features = ["future"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-sqlx = { version = "0.9.0", default-features = false, features = [
-    "runtime-tokio",
-    "tls-rustls-aws-lc-rs",
-    "postgres",
-    "macros",
-    "migrate",
-    "uuid",
-] }
+socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
     "macros",
@@ -90,11 +84,11 @@ validator = { version = "0.21.0", features = ["derive"] }
 # Tests
 aws-smithy-mocks = "0.3.0"
 cucumber = "0.23.0"
-fake = { version = "5.1.0", features = ["uuid"] }
 http-body-util = "0.1.5"
 proptest = "1.12.0"
 rand = "0.10.3"
 rstest = "0.28.0"
+tokio-tungstenite = "0.29.0"
 
 # Tooling (xtask)
 cargo_metadata = "0.23.1"

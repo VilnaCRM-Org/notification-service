@@ -4,7 +4,7 @@ Pick one primary skill per intent. The index is [README.md](README.md); how to u
 
 ## Decision Tree
 
-- Add or change an endpoint, field, command, query, subscriber or migration: `api-resource-development`.
+- Add or change an endpoint, field, command, query or subscriber: `api-resource-development`.
 - Run the checks or find out which skill owns a red gate: `verification-workflow`.
 - A function is too long, too complex, too nested or has too many arguments: `complexity-management`.
 - The architecture check fails or code moves between layers or contexts: `architecture-boundary-fixer`.
@@ -29,6 +29,5 @@ Pick one primary skill per intent. The index is [README.md](README.md); how to u
 - Run every tool through `make`.
 - Keep framework concerns out of Domain crates.
 - Regenerate contract snapshots and update `workspace.dsl` in the same change as the code.
-- Never edit a migration that has reached `main`.
 - Never add `#[allow]`.
 - Close out with what was run, what was not run and why.

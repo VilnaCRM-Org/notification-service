@@ -1,6 +1,7 @@
 //! Step definitions of the Gherkin suite.
 
-mod example_api_resource;
+mod event_catalog;
+mod event_stream;
 mod graphql;
 mod health_check;
 mod http;

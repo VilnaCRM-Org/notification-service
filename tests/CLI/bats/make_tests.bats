@@ -1,9 +1,8 @@
 #!/usr/bin/env bats
 # Tests of the test-level targets and their negative tests (architecture-delivery.md "CLI Tests (Bats)", file
-# make_tests.bats): gates G11 to G15 and G30, the seed of a failing randomised test (FR51) and the `setup-test-db`
-# target.
+# make_tests.bats): gates G11 to G15 and the seed of a failing randomised test (FR51).
 #
-# Every plant goes into the leaf crate `xtask`, into `features/` or into `.sqlx/`, so only little is rebuilt; the
+# Every plant goes into the leaf crate `xtask` or into `features/`, so only little is rebuilt; the
 # documentation example goes into the test-support crate and the randomised test into the integration tests of the
 # health-check probes, a template-owned test binary that depends on the seeded generator of test-support. Make
 # reports every failed recipe with its own status 2, so these tests assert "non-zero" and the tool's own output.
@@ -24,119 +23,6 @@ setup() {
 
 teardown() {
   restore_planted
-  if [[ -n "${marker_database:-}" ]]; then
-    server_sql "$(scripts/with-env.sh .env -- printenv DB_USER)" "drop database if exists ${marker_database} with (force)" >/dev/null 2>&1 || true
-  fi
-  if [[ -n "${marker_table:-}" ]]; then
-    dev_sql "drop table if exists ${marker_table}" >/dev/null 2>&1 || true
-  fi
-}
-
-# Runs a statement on the maintenance database of the server of the compose project ($1: user, $2: statement).
-server_sql() {
-  "${DOCKER:-docker}" compose exec -T database psql --quiet --no-psqlrc --tuples-only --no-align -U "$1" -d postgres -c "$2"
-}
-
-# Runs a statement against the development database `app` in the database container of the compose project.
-dev_sql() {
-  "${DOCKER:-docker}" compose exec -T database psql --quiet --no-psqlrc --tuples-only --no-align -U app -d app -c "$1"
-}
-
-# --- setup-test-db -----------------------------------------------------------------------------------------
-
-@test "setup-test-db creates app_test and leaves the development database untouched" {
-  require_docker
-  marker_table="bats_marker_$$"
-  run make --no-print-directory ensure-database
-  assert_success
-  run dev_sql "create table ${marker_table} (id integer); insert into ${marker_table} values (7)"
-  assert_success
-
-  run make --no-print-directory setup-test-db
-  assert_success
-
-  run "${DOCKER:-docker}" compose exec -T database psql --quiet --no-psqlrc --tuples-only --no-align -U app -d postgres \
-    -c "select count(*) from pg_database where datname = 'app_test'"
-  assert_success
-  assert_output '1'
-  run dev_sql "select id from ${marker_table}"
-  assert_success
-  assert_output '7'
-}
-
-@test "setup-test-db refuses a database whose name does not end in _test, with status 2 and before it runs sqlx" {
-  local url
-  mkdir -p "${BATS_TEST_TMPDIR}/bin"
-  printf '#!/bin/sh\necho sqlx-was-called >>"%s/sqlx.calls"\n' "${BATS_TEST_TMPDIR}" >"${BATS_TEST_TMPDIR}/bin/sqlx"
-  chmod +x "${BATS_TEST_TMPDIR}/bin/sqlx"
-  for url in 'postgres://app:x@localhost:5432/app' 'postgres://app:x@localhost:5432/app_test_old' \
-    'postgres://app:x@localhost:5432/app?options=_test' 'postgres://app:x@localhost:5432' \
-    'postgres://app:x@localhost:5432/' 'postgres://app:x@localhost:5432/_test'; do
-    DATABASE_URL="${url}" PATH="${BATS_TEST_TMPDIR}/bin:${PATH}" run scripts/setup-test-db.sh
-    assert_failure 2
-    assert_output --partial 'refusing to reset the database'
-    assert_output --partial 'must end in _test'
-  done
-  assert_file_not_exists "${BATS_TEST_TMPDIR}/sqlx.calls"
-  run env -u DATABASE_URL PATH="${BATS_TEST_TMPDIR}/bin:${PATH}" scripts/setup-test-db.sh
-  assert_failure 2
-  assert_output --partial 'DATABASE_URL is not set'
-}
-
-@test "setup-test-db passes the name guard for a URL that ends in _test and reaches the reachability check" {
-  # Nothing listens on port 1; the stub of sleep makes the ten attempts instant.
-  mkdir -p "${BATS_TEST_TMPDIR}/bin"
-  printf '#!/bin/sh\nexit 0\n' >"${BATS_TEST_TMPDIR}/bin/sleep"
-  printf '#!/bin/sh\nexit 0\n' >"${BATS_TEST_TMPDIR}/bin/sqlx"
-  chmod +x "${BATS_TEST_TMPDIR}/bin/sleep" "${BATS_TEST_TMPDIR}/bin/sqlx"
-  DATABASE_URL='postgres://app:x@127.0.0.1:1/x_test?sslmode=disable' PATH="${BATS_TEST_TMPDIR}/bin:${PATH}" run scripts/setup-test-db.sh
-  assert_failure 2
-  refute_output --partial 'refusing to reset'
-  assert_output --partial 'the database did not accept connections after 10 attempts'
-}
-
-@test "the test targets take DATABASE_URL from .env.test even when the caller exports another one, and keep every other caller value" {
-  printf '%s\n' '.RECIPEPREFIX = >' 'probe:' "> @\$(TEST_ENV) printenv APP_ENV DATABASE_URL" >"${BATS_TEST_TMPDIR}/probe.mk"
-  DATABASE_URL=postgres://dev:dev@localhost:5432/app run make --no-print-directory -f Makefile -f "${BATS_TEST_TMPDIR}/probe.mk" probe
-  assert_success
-  assert_line --index 0 'test'
-  assert_line --index 1 --regexp '^postgres://[^@]+@[^/]+/[A-Za-z0-9_]+_test$'
-  # A caller value of any other variable still wins over both files.
-  APP_ENV=prod DATABASE_URL=postgres://dev:dev@localhost:5432/app run make --no-print-directory -f Makefile -f "${BATS_TEST_TMPDIR}/probe.mk" probe
-  assert_success
-  assert_line --index 0 'prod'
-  assert_line --index 1 --regexp '_test$'
-  # The files follow DB_PORT, so a private stack needs no DATABASE_URL of its own.
-  DB_PORT=25999 DATABASE_URL=postgres://dev:dev@localhost:5432/app run make --no-print-directory -f Makefile -f "${BATS_TEST_TMPDIR}/probe.mk" probe
-  assert_success
-  assert_line --index 1 --regexp ':25999/[A-Za-z0-9_]+_test$'
-}
-
-@test "setup-test-db leaves the database of a development DATABASE_URL in the caller's environment untouched" {
-  require_docker
-  require_host_mode "the exported DATABASE_URL does not reach the container"
-  local dev_db="bats_dev_${BASHPID}_${RANDOM}" user url
-  user="$(scripts/with-env.sh .env -- printenv DB_USER)"
-  run make --no-print-directory ensure-database
-  assert_success
-  marker_database="${dev_db}"
-  run server_sql "${user}" "create database ${dev_db}"
-  assert_success
-  url="$(scripts/with-env.sh .env -- bash -c "printf '%s' \"postgres://\${DB_USER}:\${DB_PASSWORD}@\${DB_HOST}:\${DB_PORT}/\$1\"" _ "${dev_db}")"
-  run "${DOCKER:-docker}" compose exec -T database psql --quiet --no-psqlrc --tuples-only --no-align -U "${user}" -d "${dev_db}" \
-    -c "create table bats_marker (id integer); insert into bats_marker values (7)"
-  assert_success
-
-  DATABASE_URL="${url}" run make --no-print-directory setup-test-db
-  assert_success
-
-  run "${DOCKER:-docker}" compose exec -T database psql --quiet --no-psqlrc --tuples-only --no-align -U "${user}" -d "${dev_db}" \
-    -c "select id from bats_marker"
-  assert_success
-  assert_output '7'
-  run server_sql "${user}" "select count(*) from pg_database where datname = 'app_test'"
-  assert_success
-  assert_output '1'
 }
 
 # --- G11: unit tests ---------------------------------------------------------------------------------------
@@ -404,46 +290,4 @@ EOF
   run grep -c 'fn planted' target/mutants.diff
   assert_output '1'
   assert_equal "$(cat target/mutants.diff)" "${plain}"
-}
-
-# --- G30: query metadata -----------------------------------------------------------------------------------
-
-# bats test_tags=slow
-@test "G30: a missing file of .sqlx makes validate-sqlx-metadata fail" {
-  require_docker
-  local -a files=(.sqlx/query-*.json)
-  plant_keep "${files[0]}"
-  rm -- "${files[0]}"
-  run make --no-print-directory validate-sqlx-metadata
-  assert_failure
-  assert_output --partial '.sqlx is missing one or more queries'
-}
-
-# bats test_tags=slow
-@test "G30: a file of .sqlx that no query generates makes validate-sqlx-metadata fail" {
-  require_docker
-  local -a files=(.sqlx/query-*.json)
-  local name
-  name="query-$(printf 'f%.0s' {1..64}).json"
-  plant_new ".sqlx/${name}" "${files[0]}"
-  run make --no-print-directory validate-sqlx-metadata
-  assert_failure
-  assert_output --partial 'potentially unused queries found in .sqlx'
-  assert_output --partial 'check-sqlx-metadata.sh: .sqlx holds a query file that no current query generates'
-}
-
-# bats test_tags=slow
-@test "G30: check-sqlx-metadata.sh prints its usage, keeps a failing status and fails on the unused-query warning" {
-  run -2 scripts/check-sqlx-metadata.sh
-  assert_output 'usage: check-sqlx-metadata.sh <command>...'
-
-  run -7 scripts/check-sqlx-metadata.sh bash -c 'echo "query data is missing"; exit 7'
-  assert_output 'query data is missing'
-
-  run -1 scripts/check-sqlx-metadata.sh bash -c 'echo "warning: potentially unused queries found in .sqlx"'
-  assert_line 'warning: potentially unused queries found in .sqlx'
-  assert_line 'check-sqlx-metadata.sh: .sqlx holds a query file that no current query generates; remove it or run make sqlx-prepare'
-
-  run -0 scripts/check-sqlx-metadata.sh bash -c 'echo "query data is up to date"'
-  assert_output 'query data is up to date'
 }

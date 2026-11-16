@@ -6,8 +6,7 @@ FROM rust:1.99.1-slim-trixie@sha256:f6c4a35d21dbb3c89d7a8d056c193e94fc09037f2b58
 WORKDIR /app
 ENV CARGO_TERM_COLOR=always \
     CARGO_NET_RETRY=10 \
-    CARGO_INCREMENTAL=0 \
-    SQLX_OFFLINE=true
+    CARGO_INCREMENTAL=0
 
 FROM base AS chef
 ARG CARGO_CHEF_VERSION=0.1.78
@@ -23,7 +22,7 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 # Dependency layer: rebuilt only when a manifest or Cargo.lock changes.
 RUN cargo chef cook --release --locked --package service --recipe-path recipe.json
-# Application layer. `.sqlx/` and `migrations/` arrive with this COPY.
+# Application layer: the sources arrive with this COPY.
 COPY . .
 RUN cargo build --release --locked --package service --bin service \
  && install -D target/release/service /out/service
@@ -54,7 +53,7 @@ ENV CARGO_INCREMENTAL=1 \
     BATS_LIB_PATH=/opt/bats/lib \
     PATH=/opt/bats/core/bin:/usr/local/cargo/bin:${PATH}
 EXPOSE 8081
-CMD ["watchexec", "--restart", "--stop-signal", "SIGTERM", "--watch", "crates", "--watch", "migrations", "--watch", "Cargo.toml", "--watch", "Cargo.lock", "--", "cargo", "run", "--locked", "-p", "service", "--", "serve"]
+CMD ["watchexec", "--restart", "--stop-signal", "SIGTERM", "--watch", "crates", "--watch", "Cargo.toml", "--watch", "Cargo.lock", "--", "cargo", "run", "--locked", "-p", "service", "--", "serve"]
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab AS prod
 LABEL org.opencontainers.image.licenses="CC0-1.0"

@@ -1,6 +1,6 @@
 //! `service healthcheck` against a running service and against a port nothing listens on.
 
-use crate::support::{DEAD_DATABASE_URL, Scratch, serve, silent_listener};
+use crate::support::{Scratch, serve, silent_listener};
 
 fn exit_code(scratch: &Scratch, arguments: &[&str], port: &str) -> Option<i32> {
     scratch.run(arguments, &[("APP_PORT", port)]).status.code()
@@ -9,13 +9,7 @@ fn exit_code(scratch: &Scratch, arguments: &[&str], port: &str) -> Option<i32> {
 #[test]
 fn succeeds_against_a_running_service_and_fails_with_nothing_listening() {
     let scratch = Scratch::new();
-    let server = serve(
-        &scratch,
-        &[
-            ("DATABASE_URL", DEAD_DATABASE_URL),
-            ("AWS_REGION", "us-east-1"),
-        ],
-    );
+    let server = serve(&scratch, &[("AWS_REGION", "us-east-1")]);
     let port = server.port.to_string();
     let alive = exit_code(&scratch, &["healthcheck"], &port);
     let flag = scratch
@@ -71,11 +65,7 @@ fn probes_the_address_the_service_listens_on() {
     let scratch = Scratch::new();
     let server = serve(
         &scratch,
-        &[
-            ("DATABASE_URL", DEAD_DATABASE_URL),
-            ("AWS_REGION", "us-east-1"),
-            ("APP_HOST", "127.0.0.2"),
-        ],
+        &[("AWS_REGION", "us-east-1"), ("APP_HOST", "127.0.0.2")],
     );
     let port = server.port.to_string();
     let with_host = |host: &str| {
@@ -114,11 +104,7 @@ fn an_unspecified_listener_is_probed_on_the_loopback_interface() {
     let scratch = Scratch::new();
     let server = serve(
         &scratch,
-        &[
-            ("DATABASE_URL", DEAD_DATABASE_URL),
-            ("AWS_REGION", "us-east-1"),
-            ("APP_HOST", "0.0.0.0"),
-        ],
+        &[("AWS_REGION", "us-east-1"), ("APP_HOST", "0.0.0.0")],
     );
     let port = server.port.to_string();
 

@@ -1,26 +1,26 @@
 openapi: 3.1.0
 info:
-  title: Rust Service Template API
-  description: This API provides endpoints to manage Rust Service Template data within VilnaCRM.
+  title: VilnaCRM Notification Service API
+  description: This API provides endpoints to manage VilnaCRM Notification Service data within VilnaCRM.
   contact:
     name: VilnaCRM Support
-    url: https://github.com/VilnaCRM-Org/rust-service-template
+    url: https://github.com/VilnaCRM-Org/notification-service
     email: support@vilnacrm.com
   license:
     name: CC0-1.0
     url: https://creativecommons.org/publicdomain/zero/1.0/
-  version: 1.0.0
+  version: 2.0.0
 servers:
 - url: /
   description: Current host
 paths:
-  /api/example_api_resources:
+  /api/event-types:
     get:
       tags:
-      - ExampleApiResource
-      summary: Retrieves the collection of ExampleApiResource resources.
-      description: Returns one page of resources, newest first.
-      operationId: api_example_api_resources_get
+      - EventStream
+      summary: Retrieves the collection of EventType resources.
+      description: Returns one page of the subscribable event types, in byte order of their names.
+      operationId: api_event_types_get
       parameters:
       - name: page
         in: query
@@ -43,13 +43,13 @@ paths:
           minimum: 1
       responses:
         '200':
-          description: ExampleApiResource collection
+          description: EventType collection
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/ExampleApiResource'
+                  $ref: '#/components/schemas/EventType'
         '400':
           description: Invalid query parameter.
           content:
@@ -68,94 +68,20 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-    post:
-      tags:
-      - ExampleApiResource
-      summary: Creates an ExampleApiResource resource.
-      description: Validates the input, stores the resource and returns it.
-      operationId: api_example_api_resources_post
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateExampleApiResourceRequest'
-        required: true
-      responses:
-        '201':
-          description: ExampleApiResource resource created
-          headers:
-            location:
-              schema:
-                type: string
-              description: Path of the created resource.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExampleApiResource'
-        '400':
-          description: Invalid input.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '413':
-          description: Request body too large.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '415':
-          description: Unsupported media type.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '422':
-          description: Validation failed.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        default:
-          description: Problem response.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-  /api/example_api_resources/{id}:
+  /api/events/status:
     get:
       tags:
-      - ExampleApiResource
-      summary: Retrieves an ExampleApiResource resource.
-      description: Returns the resource identified by id.
-      operationId: api_example_api_resources_id_get
-      parameters:
-      - name: id
-        in: path
-        description: ExampleApiResource identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
+      - EventStream
+      summary: Retrieves the event stream status.
+      description: Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.
+      operationId: api_events_status_get
       responses:
         '200':
-          description: ExampleApiResource resource
+          description: EventStreamStatus resource
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ExampleApiResource'
-        '400':
-          description: Invalid identifier.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '404':
-          description: Resource not found.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
+                $ref: '#/components/schemas/EventStreamStatus'
         default:
           description: Problem response.
           content:
@@ -167,7 +93,7 @@ paths:
       tags:
       - HealthCheck
       summary: Checks the health of the service.
-      description: Returns 204 when the database, the cache and the message broker respond. Returns a 500 problem document that lists every failing dependency otherwise.
+      description: Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.
       operationId: api_health_get
       responses:
         '204':
@@ -186,28 +112,6 @@ paths:
                 $ref: '#/components/schemas/Problem'
 components:
   schemas:
-    CreateExampleApiResourceRequest:
-      type: object
-      description: Body of the create operation.
-      required:
-      - name
-      - description
-      properties:
-        description:
-          type: string
-          description: Free-text description of the resource.
-          example: Example description
-          maxLength: 1024
-          minLength: 1
-          pattern: ^[^\u0000]*$
-        name:
-          type: string
-          description: Display name of the resource.
-          example: Example name
-          maxLength: 255
-          minLength: 1
-          pattern: ^[^\u0000]*$
-      additionalProperties: false
     DependencyFailure:
       type: object
       description: One dependency that did not answer its probe.
@@ -217,34 +121,105 @@ components:
       properties:
         dependency:
           type: string
-          description: '`database`, `cache` or `message_broker`.'
+          description: '`cache`, `message_broker` or `event_stream`.'
         message:
           type: string
           description: Failure message of the probe.
-    ExampleApiResource:
+    EventStreamStatus:
       type: object
-      description: Template example resource.
+      description: |-
+        The status of the event stream on the answering instance: its reader, its memory window and
+        its subscribers. The 64-bit counters and positions are decimal strings; an unknown value is
+        `null`.
       required:
-      - id
-      - name
-      - description
+      - state
+      - reason
+      - brokerReachable
+      - position
+      - endOffset
+      - lag
+      - windowFirst
+      - windowLast
+      - subscribers
+      - rejectedRecords
+      - retentionLosses
+      - replayCapped
       properties:
-        description:
+        brokerReachable:
+          type: boolean
+          description: Whether the last read of the topic watermarks succeeded.
+        endOffset:
+          type:
+          - string
+          - 'null'
+          description: End of the topic at the last successful watermark read; `null` before it.
+          example: '42'
+        lag:
+          type:
+          - string
+          - 'null'
+          description: Events between the position and the end of the topic; `null` while either is unknown.
+          example: '0'
+        position:
+          type:
+          - string
+          - 'null'
+          description: Id of the last event read from the topic; `null` before the first read.
+          example: '42'
+        reason:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Why the service is not ready yet, only while starting: `broker-unreachable`,
+            `topic-not-found`, `partition-count` or `catching-up`.
+          example: catching-up
+        rejectedRecords:
           type: string
-          description: Free-text description of the resource.
-          maxLength: 1024
-          minLength: 1
-          pattern: ^[^\u0000]*$
-        id:
+          description: Invalid records skipped by the reader.
+          example: '0'
+        replayCapped:
           type: string
-          format: uuid
-          description: Identifier of the resource.
+          description: Replays that reached their cap.
+          example: '0'
+        retentionLosses:
+          type: string
+          description: Jumps to the start of the topic because retention removed unread events.
+          example: '0'
+        state:
+          type: string
+          description: 'Life stage: `starting`, `ready` or `shutting-down`.'
+          example: ready
+        subscribers:
+          type: integer
+          description: Number of open subscriptions served here.
+          example: 0
+          minimum: 0
+        windowFirst:
+          type:
+          - string
+          - 'null'
+          description: 'Floor of the memory window: events after it can be resumed from memory.'
+          example: '0'
+        windowLast:
+          type:
+          - string
+          - 'null'
+          description: Id of the newest event held in the memory window.
+          example: '42'
+    EventType:
+      type: object
+      description: A subscribable event type.
+      required:
+      - name
+      properties:
         name:
           type: string
-          description: Display name of the resource.
-          maxLength: 255
+          description: Name of the event type.
+          example: user.created
+          maxLength: 128
           minLength: 1
-          pattern: ^[^\u0000]*$
+          pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
     Problem:
       type: object
       description: An RFC 9457 problem document.
@@ -298,7 +273,7 @@ components:
           type: string
           description: Wire name of the invalid field.
 tags:
-- name: ExampleApiResource
-  description: Template example resource endpoints.
+- name: EventStream
+  description: Event catalog and event stream status endpoints.
 - name: HealthCheck
   description: Runtime health-check endpoints.

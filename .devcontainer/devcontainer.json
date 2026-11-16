@@ -21,7 +21,7 @@
     "source=devcontainer-cargo-home,target=/cargo,type=volume",
     "source=cargo-target-${devcontainerId},target=/cargo-target,type=volume"
   ],
-  "forwardPorts": [8081, 5432, 4566, 8080],
+  "forwardPorts": [8081, 4566, 8080],
   "postCreateCommand": "make install-hooks && make doctor",
   "customizations": {
     "vscode": {

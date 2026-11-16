@@ -4,23 +4,21 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode, header};
-use health_check_domain::{Dependency, HealthProbe};
+use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use test_support::clock::FixedClock;
-use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
-use test_support::repository::InMemoryExampleApiResourceRepository;
+use test_support::static_topic::StaticTopic;
 
-use crate::bootstrap::{Adapters, event_bus, router};
+use crate::background::Running;
+use crate::bootstrap::tests::wiring::{adapters_on, paced_on};
+use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
 use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
 use crate::http::security_headers::DEFAULT_CONTENT_SECURITY_POLICY;
 use tower::ServiceExt as _;
-
-const MISSING_ID: &str = "00000000-0000-7000-8000-0000000000ff";
 
 /// Method, path, body, expected status and expected content security policy.
 type Route<'a> = (Method, String, Option<&'a str>, StatusCode, &'a str);
@@ -32,39 +30,32 @@ struct Answer {
 }
 
 fn config(app_env: &str) -> Config {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
         aws_region: Some("us-east-1".to_owned()),
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     Config::from_args(args).unwrap()
 }
 
 fn adapters() -> Adapters {
-    let probes: Vec<Arc<dyn HealthProbe>> = vec![
-        Arc::new(StubProbe::healthy(Dependency::Database)),
-        Arc::new(StubProbe::healthy(Dependency::Cache)),
-        Arc::new(StubProbe::healthy(Dependency::MessageBroker)),
-    ];
-    Adapters {
-        repository: Arc::new(InMemoryExampleApiResourceRepository::new()),
-        probes,
-        event_bus: event_bus(),
-        clock: Arc::new(FixedClock::at(std::time::SystemTime::UNIX_EPOCH)),
-        uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),
-    }
+    let topic = StaticTopic::empty();
+    adapters_on(&topic, Box::new(topic.clone()))
 }
 
 async fn send_to(app: &Router, request: Request<Body>) -> Answer {
-    let response = app.clone().oneshot(request).await.unwrap();
-    let (parts, body) = response.into_parts();
-    let bytes = body.collect().await.unwrap().to_bytes();
-    Answer {
-        status: parts.status,
-        headers: parts.headers,
-        body: String::from_utf8_lossy(&bytes).into_owned(),
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let (parts, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes();
+        Answer {
+            status: parts.status,
+            headers: parts.headers,
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn send(app_env: &str, request: Request<Body>) -> Answer {
@@ -96,27 +87,25 @@ fn assert_common_headers(answer: &Answer, policy: &str, route: &str) {
 
 #[tokio::test]
 async fn every_route_carries_the_request_id_and_the_security_headers() {
-    let graphql = r#"{"query":"{ exampleApiResources { id } }"}"#;
-    let create = r#"{"name":"Name","description":"Description"}"#;
-    let resource = format!("/api/example_api_resources/{MISSING_ID}");
+    let graphql = r#"{"query":"{ eventTypes { name } }"}"#;
     let routes: Vec<Route<'_>> = vec![
         (
-            Method::POST,
-            "/api/example_api_resources".into(),
-            Some(create),
-            StatusCode::CREATED,
-            DEFAULT_CONTENT_SECURITY_POLICY,
-        ),
-        (
             Method::GET,
-            resource,
+            "/api/event-types".into(),
             None,
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
             DEFAULT_CONTENT_SECURITY_POLICY,
         ),
         (
             Method::GET,
-            "/api/example_api_resources".into(),
+            "/api/event-types?page=0".into(),
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            DEFAULT_CONTENT_SECURITY_POLICY,
+        ),
+        (
+            Method::GET,
+            "/api/events/status".into(),
             None,
             StatusCode::OK,
             DEFAULT_CONTENT_SECURITY_POLICY,
@@ -135,11 +124,13 @@ async fn every_route_carries_the_request_id_and_the_security_headers() {
             StatusCode::OK,
             EXPLORER_CONTENT_SECURITY_POLICY,
         ),
+        // The tail of a router without its background work never runs, so the probe of the event
+        // stream fails and the health answer is the 500 problem.
         (
             Method::GET,
             "/api/health".into(),
             None,
-            StatusCode::NO_CONTENT,
+            StatusCode::INTERNAL_SERVER_ERROR,
             DEFAULT_CONTENT_SECURITY_POLICY,
         ),
         (
@@ -193,7 +184,7 @@ async fn every_route_carries_the_request_id_and_the_security_headers() {
         ),
         (
             Method::DELETE,
-            "/api/example_api_resources".into(),
+            "/api/event-types".into(),
             None,
             StatusCode::METHOD_NOT_ALLOWED,
             DEFAULT_CONTENT_SECURITY_POLICY,
@@ -224,11 +215,7 @@ async fn an_unknown_route_is_the_404_problem() {
 
 #[tokio::test]
 async fn a_wrong_method_is_the_405_problem_with_the_allowed_methods() {
-    let answer = send(
-        "test",
-        request(Method::DELETE, "/api/example_api_resources", None),
-    )
-    .await;
+    let answer = send("test", request(Method::DELETE, "/api/event-types", None)).await;
 
     assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(
@@ -242,14 +229,14 @@ async fn a_wrong_method_is_the_405_problem_with_the_allowed_methods() {
         .map(str::trim)
         .collect();
     allowed.sort_unstable();
-    assert_eq!(allowed, ["GET", "HEAD", "POST"]);
+    assert_eq!(allowed, ["GET", "HEAD"]);
     let body: Value = serde_json::from_str(&answer.body).unwrap();
     assert_eq!(body["status"], 405);
 }
 
 #[tokio::test]
 async fn a_panicking_probe_is_the_bare_500_problem() {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Cache)));
     let app = router(adapters, &config("test")).unwrap();
 
     let answer = send_to(&app, request(Method::GET, "/api/health", None)).await;
@@ -271,13 +258,12 @@ async fn a_body_over_the_limit_is_the_413_problem() {
     let mut config = config("test");
     config.max_body_bytes = 1024;
     let app = router(adapters(), &config).unwrap();
-    let body = format!(r#"{{"name":"{}","description":"d"}}"#, "x".repeat(2048));
+    let body = format!(
+        r#"{{"query":"{{ eventTypes {{ name }} }}","padding":"{}"}}"#,
+        "x".repeat(2048)
+    );
 
-    let answer = send_to(
-        &app,
-        request(Method::POST, "/api/example_api_resources", Some(&body)),
-    )
-    .await;
+    let answer = send_to(&app, request(Method::POST, "/api/graphql", Some(&body))).await;
 
     assert_eq!(answer.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(
@@ -292,7 +278,7 @@ async fn a_request_over_its_budget_is_the_503_problem() {
     let mut config = config("test");
     config.request_timeout = Duration::from_secs(1);
     config.health_probe_timeout = Duration::from_secs(60);
-    let adapters = adapters().with_probe(Arc::new(StubProbe::hanging(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::hanging(Dependency::Cache)));
     let app = router(adapters, &config).unwrap();
 
     let answer = send_to(&app, request(Method::GET, "/api/health", None)).await;
@@ -338,12 +324,13 @@ async fn the_other_routes_behave_the_same_in_every_mode() {
     let probes = [
         (Method::GET, "/ping", None),
         (Method::GET, "/api/health", None),
-        (Method::GET, "/api/example_api_resources", None),
+        (Method::GET, "/api/event-types", None),
+        (Method::GET, "/api/events/status", None),
         (Method::GET, "/api/unknown", None),
         (
             Method::POST,
             "/api/graphql",
-            Some(r#"{"query":"{ exampleApiResources { id } }"}"#),
+            Some(r#"{"query":"{ eventTypes { name } }"}"#),
         ),
     ];
     for (method, path, body) in probes {
@@ -379,7 +366,7 @@ async fn no_response_is_compressed_and_no_other_protocol_is_advertised() {
     let app = router(adapters(), &config("test")).unwrap();
     for path in [
         "/ping",
-        "/api/example_api_resources",
+        "/api/event-types",
         "/api/docs/swagger-ui-bundle.js",
         "/api/unknown",
     ] {
@@ -542,4 +529,484 @@ fn the_extractor_check_accepts_the_allowed_extractors() {
         ValidatedJson(j): ValidatedJson<J>) -> Response {}";
 
     assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+}
+
+const ORIGIN: &str = "https://app.example.com";
+/// The `Sec-WebSocket-Key` of the test handshakes: sixteen zero bytes in base64, a valid key that
+/// no secrets scanner takes for a credential.
+const HANDSHAKE_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAA==";
+
+fn config_with_origins(origins: crate::config::AllowedOrigins) -> Config {
+    let mut config = config("test");
+    config.allowed_origins = origins;
+    config
+}
+
+fn from_origin(
+    method: Method,
+    path: &str,
+    body: Option<&str>,
+    origin: Option<&str>,
+) -> Request<Body> {
+    let mut request = request(method, path, body);
+    if let Some(origin) = origin {
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+    }
+    request
+}
+
+/// The probe of the cache behind a kind of answer.
+type CacheProbe = fn(Dependency) -> StubProbe;
+
+/// A probe of the cache that makes the health route the 500 problem.
+const PANICKING: CacheProbe = StubProbe::panicking;
+
+/// A probe of the cache that keeps the health route past the request budget.
+const HANGING: CacheProbe = StubProbe::hanging;
+
+/// Method, path, body, status and the probe of the cache of a request to one kind of answer.
+type Kind = (
+    Method,
+    &'static str,
+    Option<&'static str>,
+    StatusCode,
+    CacheProbe,
+);
+
+/// A request to each kind of answer: a success, GraphQL, the 404, 405, 422 and 500 problems, the
+/// 503 problem of the event stream of an unstarted hub and the 503 problem of the request budget.
+fn answers_of_every_kind() -> Vec<Kind> {
+    vec![
+        (
+            Method::GET,
+            "/api/event-types",
+            None,
+            StatusCode::OK,
+            PANICKING,
+        ),
+        (
+            Method::POST,
+            "/api/graphql",
+            Some(r#"{"query":"{ eventTypes { name } }"}"#),
+            StatusCode::OK,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/unknown",
+            None,
+            StatusCode::NOT_FOUND,
+            PANICKING,
+        ),
+        (
+            Method::DELETE,
+            "/api/event-types",
+            None,
+            StatusCode::METHOD_NOT_ALLOWED,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/event-types?page=0",
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/health",
+            None,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/events/stream?types=a",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/health",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+            HANGING,
+        ),
+    ]
+}
+
+/// The router of `config` whose probe of the cache is `probe`; its event stream never starts.
+fn probed_router(probe: CacheProbe, config: &Config) -> Router {
+    let adapters = adapters().with_probe(Arc::new(probe(Dependency::Cache)));
+    router(adapters, config).unwrap()
+}
+
+/// The request budget of the answers of every kind.
+const REQUEST_BUDGET: Duration = Duration::from_secs(1);
+
+/// `config` with [`REQUEST_BUDGET`] and a health probe timeout far above it, so that a hanging
+/// probe of the cache ends in the 503 problem of the budget; the tests run on paused time.
+fn budgeted(mut config: Config) -> Config {
+    config.request_timeout = REQUEST_BUDGET;
+    config.health_probe_timeout = Duration::from_secs(60);
+    config
+}
+
+/// The body of an answer with the generated request id blanked out wherever it is repeated, so
+/// that two answers to the same request compare equal.
+fn comparable_body(answer: &Answer) -> String {
+    let id = answer.headers["x-request-id"].to_str().unwrap();
+    answer.body.replace(id, "<request-id>")
+}
+
+/// The headers of an answer as sorted name and value pairs, without the named ones.
+fn comparable_headers(headers: &HeaderMap, without: &[&str]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(name, _)| !without.contains(&name.as_str()))
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_owned()))
+        .collect();
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Asserts that two answers have the same status, the same body and the same headers apart from
+/// the generated request id and the named headers.
+fn assert_same_answer(left: &Answer, right: &Answer, without: &[&str], route: &str) {
+    assert_eq!(left.status, right.status, "{route}");
+    assert_eq!(comparable_body(left), comparable_body(right), "{route}");
+    let mut ignored = vec!["x-request-id"];
+    ignored.extend_from_slice(without);
+    assert_eq!(
+        comparable_headers(&left.headers, &ignored),
+        comparable_headers(&right.headers, &ignored),
+        "{route}"
+    );
+}
+
+fn has_cors_headers(headers: &HeaderMap) -> bool {
+    headers
+        .keys()
+        .any(|name| name.as_str().starts_with("access-control-"))
+        || headers.contains_key(header::VARY)
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_allowed_origins_no_answer_changes() {
+    let without_origins = budgeted(config("test"));
+
+    for (method, path, body, status, probe) in answers_of_every_kind() {
+        let route = format!("{method} {path} {status}");
+        let app = probed_router(probe, &without_origins);
+        let with = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
+        let without = send_to(&app, from_origin(method.clone(), path, body, None)).await;
+        assert_eq!(without.status, status, "{route}");
+        assert!(!has_cors_headers(&with.headers), "{route}");
+        assert!(!has_cors_headers(&without.headers), "{route}");
+        assert_same_answer(&with, &without, &[], &route);
+    }
+    let app = probed_router(PANICKING, &without_origins);
+    let preflight = |path: &str| {
+        Request::options(path)
+            .header(header::ORIGIN, ORIGIN)
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+            .body(Body::empty())
+            .unwrap()
+    };
+    let known = send_to(&app, preflight("/api/event-types")).await;
+    assert_eq!(known.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert!(!has_cors_headers(&known.headers));
+    let unknown = send_to(&app, preflight("/api/unknown")).await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+    assert!(!has_cors_headers(&unknown.headers));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_allowed_origin_gets_the_cors_headers_on_every_kind_of_answer() {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let allowing = budgeted(config_with_origins(origins));
+    let without_origins = budgeted(config("test"));
+
+    for (method, path, body, status, probe) in answers_of_every_kind() {
+        let route = format!("{method} {path} {status}");
+        let app = probed_router(probe, &allowing);
+        let unset = probed_router(probe, &without_origins);
+        let baseline = send_to(&unset, from_origin(method.clone(), path, body, None)).await;
+        let allowed = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
+        assert_eq!(allowed.status, status, "{route}");
+        assert_same_answer(
+            &allowed,
+            &baseline,
+            &["vary", "access-control-allow-origin"],
+            &route,
+        );
+        assert_eq!(
+            allowed.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            ORIGIN,
+            "{route}"
+        );
+        assert!(
+            allowed.headers[header::VARY]
+                .to_str()
+                .unwrap()
+                .contains("origin"),
+            "{route}"
+        );
+        assert_common_headers(&allowed, DEFAULT_CONTENT_SECURITY_POLICY, &route);
+
+        let other = send_to(
+            &app,
+            from_origin(
+                method.clone(),
+                path,
+                body,
+                Some("https://other.example.com"),
+            ),
+        )
+        .await;
+        assert_eq!(other.status, status, "{route}");
+        assert!(
+            !other
+                .headers
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "{route}"
+        );
+
+        let without = send_to(&app, from_origin(method.clone(), path, body, None)).await;
+        assert_eq!(without.status, status, "{route}");
+        assert!(
+            !without
+                .headers
+                .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            "{route}"
+        );
+        // The CORS layer adds `vary` to every answer so that a cache keeps the answers to
+        // different origins apart; nothing else of an answer without `Origin` changes.
+        assert_same_answer(&without, &baseline, &["vary"], &route);
+    }
+}
+
+#[tokio::test]
+async fn a_preflight_is_answered_by_the_router_for_every_path() {
+    for origins in [
+        crate::config::AllowedOrigins::Any,
+        crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]),
+    ] {
+        let app = router(adapters(), &config_with_origins(origins.clone())).unwrap();
+        for path in ["/api/event-types", "/api/unknown"] {
+            let request = Request::options(path)
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap();
+
+            let answer = send_to(&app, request).await;
+
+            assert_eq!(answer.status, StatusCode::OK, "{origins:?} {path}");
+            assert_eq!(answer.body, "", "{path}");
+            assert_eq!(answer.headers[header::ACCESS_CONTROL_MAX_AGE], "600");
+            assert!(answer.headers.contains_key("x-request-id"), "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_websocket_handshake_from_a_refused_origin_is_the_403_problem() {
+    let app = router(adapters(), &config("test")).unwrap();
+    let request = Request::get("/api/event-types")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
+}
+
+#[tokio::test]
+async fn the_cors_layer_wraps_the_refusal_of_a_websocket_handshake() {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let app = router(adapters(), &config_with_origins(origins)).unwrap();
+    let request = Request::get("/api/event-types")
+        .header(header::ORIGIN, "https://other.example.com")
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    // The CORS layer adds `vary` only to the answers that pass through it, so the 403 carries it
+    // only when the CORS layer is outside the origin check of the handshake.
+    assert!(
+        answer.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+    assert!(
+        !answer
+            .headers
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
+}
+
+#[tokio::test]
+async fn the_event_stream_of_an_unstarted_hub_is_the_503_problem_with_the_common_headers() {
+    let answer = send(
+        "test",
+        request(Method::GET, "/api/events/stream?types=user.created", None),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the node is starting");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "stream");
+}
+
+/// The bound of the start and the shutdown of a started application.
+const LIMIT: Duration = Duration::from_secs(10);
+
+/// The router of the application of `config` on an empty static topic, whose tail is paced with
+/// the fetch wait of `config`, with its background work running, once its status route reports
+/// `ready` (bounded by [`LIMIT`]; the polls are spaced by a timer, so paused time advances).
+async fn started(config: &Config) -> (Router, Running) {
+    let topic = StaticTopic::empty();
+    let (adapters, _fetches) = paced_on(&topic, config.kafka.fetch_wait);
+    let application = application(adapters, config).unwrap();
+    let running = application.background.spawn();
+    let app = application.router;
+    tokio::time::timeout(LIMIT, async {
+        while !send_to(&app, request(Method::GET, "/api/events/status", None))
+            .await
+            .body
+            .contains(r#""state":"ready""#)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the node becomes ready");
+    (app, running)
+}
+
+/// The status and the headers of the answer to `request`, whose body is dropped unread: the body
+/// of a subscription does not end.
+async fn head(app: &Router, request: Request<Body>) -> Answer {
+    let response = tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap();
+    Answer {
+        status: response.status(),
+        headers: response.headers().clone(),
+        body: String::new(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_event_stream_of_a_started_application_opens_with_the_cors_headers_of_an_allowed_origin()
+ {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let (app, running) = started(&config_with_origins(origins)).await;
+    let path = "/api/events/stream?types=user.created";
+
+    let allowed = head(&app, from_origin(Method::GET, path, None, Some(ORIGIN))).await;
+    let other = head(
+        &app,
+        from_origin(Method::GET, path, None, Some("https://other.example.com")),
+    )
+    .await;
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+
+    assert_eq!(allowed.status, StatusCode::OK);
+    assert_eq!(allowed.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(allowed.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+    assert!(
+        allowed.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+    assert_common_headers(&allowed, DEFAULT_CONTENT_SECURITY_POLICY, "sse");
+    assert_eq!(other.status, StatusCode::OK);
+    assert_eq!(other.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert!(
+        !other
+            .headers
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+    assert!(
+        other.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+}
+
+#[test]
+fn the_streaming_routes_are_served_but_not_in_the_openapi_document() {
+    let document = serde_json::to_value(crate::openapi::document()).unwrap();
+
+    let paths = document["paths"].as_object().unwrap();
+    assert!(paths.contains_key("/api/events/status"));
+    assert!(
+        paths
+            .keys()
+            .all(|path| !path.contains("stream") && !path.ends_with("/ws")),
+        "{paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_websocket_route_of_an_unstarted_hub_is_the_503_problem_with_the_common_headers() {
+    let answer = send(
+        "test",
+        request(Method::GET, "/api/events/ws?types=user.created", None),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the node is starting");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "ws");
+}
+
+#[tokio::test]
+async fn a_websocket_handshake_of_the_event_stream_from_a_refused_origin_is_the_403_before_its_checks()
+ {
+    let app = router(adapters(), &config("test")).unwrap();
+    let request = Request::get("/api/events/ws?types=User.Created&lastEventId=x")
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "ws 403");
 }

@@ -47,7 +47,6 @@ tools=(
   "cargo-deny|CARGO_DENY_VERSION|cargo deny --version|"
   "cargo-shear|CARGO_SHEAR_VERSION|cargo shear --version|"
   "cargo-hack|CARGO_HACK_VERSION|cargo hack --version|"
-  "sqlx-cli|SQLX_CLI_VERSION|sqlx --version|--no-default-features --features postgres,rustls"
   "clippy-sarif|CLIPPY_SARIF_VERSION|clippy-sarif --version|"
   "taplo-cli|TAPLO_VERSION|taplo --version|"
   "typos-cli|TYPOS_VERSION|typos --version|"
@@ -141,12 +140,8 @@ install_tool() {
   else
     echo "${crate} ${version}: cargo-binstall is not available; building with cargo install" >&2
   fi
-  local locked=(--locked)
-  if [[ "${crate}" == "sqlx-cli" ]]; then
-    locked=()
-  fi
   # shellcheck disable=SC2086 # extra is a word list by construction
-  cargo install "${locked[@]}" --version "${version}" ${extra} "${crate}"
+  cargo install --locked --version "${version}" ${extra} "${crate}"
 }
 
 main() {

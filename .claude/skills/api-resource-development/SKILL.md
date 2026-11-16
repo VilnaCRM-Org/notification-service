@@ -1,36 +1,33 @@
 ---
 name: api-resource-development
-description: Use when adding or changing a REST or GraphQL operation, a command, a query, an event subscriber or a migration of a bounded context.
+description: Use when adding or changing a REST or GraphQL operation, a command, a query or an event subscriber of a bounded context.
 ---
 
 # API Resource Development
 
 ## Use This Skill When
 
-- A REST endpoint, GraphQL field, command, query, event subscriber or migration is added or changed.
+- A REST endpoint, GraphQL field, command, query or event subscriber is added or changed.
 - A new bounded context is needed for a new resource.
 
 ## Commands
 
 - `make new-context group=<group> context=<context>` creates the three crates of a context.
-- `make create-migration name=<snake_case_description>` creates a reversible migration pair.
-- `make migrate` applies pending migrations to the development database.
-- `make sqlx-prepare` refreshes `.sqlx/` after a query or migration changes.
 - `make generate-openapi-spec` and `make generate-graphql-spec` refresh the contract snapshots.
 - `make unit-tests` and `make e2e-tests` prove the behaviour.
 
 ## Rules
 
-- Copy the shape of the example slice under `crates/company-subdomain/some-module/`:
-  - domain, in `domain/src/`: `aggregate.rs`, `event.rs`, `error.rs`, `repository.rs`, `value_object/`;
-  - application, in `application/src/`: `command/`, `query/`, `subscriber/`, `http/dto.rs`, `http/handler.rs`, `graphql.rs`, `error.rs`;
-  - infrastructure, in `infrastructure/src/`: `persistence.rs`, with its integration tests under `infrastructure/tests/integration/`.
-- Follow the recipes of the section "Recipes" below: add a REST endpoint, a GraphQL field, a command, a query, an event subscriber, a migration, a bounded context, a health probe.
+- The service has no database ([ADR 0020](../../../docs/adr/0020-postgresql-is-removed.md)). A context keeps its state in memory or in an external system behind a port of its Domain crate; it adds no database, migration or query metadata.
+- Copy the shape of the slice under `crates/notification/event-stream/`:
+  - domain, in `domain/src/`: `event.rs`, `error.rs`, `port.rs` (the ports that an adapter implements), `value_object/`;
+  - application, in `application/src/`: `query/`, `http/dto.rs`, `http/handler.rs`, `graphql.rs`, `error.rs`;
+  - infrastructure, in `infrastructure/src/`: the adapter behind the ports (`kafka.rs`), with its integration tests under `infrastructure/tests/integration/`.
+- Follow the recipes of the section "Recipes" below: add a REST endpoint, a GraphQL field, a command, a query, an event subscriber, a bounded context, a health probe.
 - Extract request data with `ApiPath`, `ValidatedQuery`, `ValidatedJson` or `ApiJson` only; bare `Path`, `Query` and `Json` answer with plain text errors.
 - Commands return no data: generate the id before dispatch and read the result through a query.
 - A handler gets a unit test with `FakeCommandBus` or `FakeQueryBus`, and a scenario goes into a file under `features/`.
-- Register new handlers in `service::bootstrap::router` and new subscribers in `service::bootstrap::event_bus`.
-- Never edit a migration that has reached `main`; add a new one.
+- Register new handlers in `service::bootstrap::application` and new subscribers in `service::bootstrap::event_bus`.
 - When `make check-requirements` fails (gate G6): it runs `service check-config`, which validates every variable of `serve` (from the environment, then `.env`) without opening a socket or contacting a dependency, and prints one line `<VARIABLE>: <reason>` per problem with status 2. Usual causes: a variable that `crates/service/src/config.rs` requires has no value in `.env`, or a value has the wrong form (a URL scheme, a duration without a unit, a number outside its range). Fix the value in `.env` or the rule in `crates/service/src/config.rs`, keep its row in `docs/environment.md` in step, and re-run `make check-requirements`.
 - Regenerate both contract snapshots in the same change as the code.
 
@@ -50,14 +47,14 @@ These recipes live in this skill, which the template sync delivers, so they stay
 **Add a GraphQL field.**
 
 1. Add the method to the context's `Query` or `Mutation` type in `graphql.rs`. It calls the same command or query as REST and converts errors with `problem_to_error`.
-2. A new context adds its root structs to the tuple of `Query` and `Mutation` in `crates/service/src/graphql/schema.rs` and its state with `.data(..)` in `crates/service/src/bootstrap.rs`.
+2. A new context adds its root structs to the tuple of `Query` (and of `Mutation`) in `crates/service/src/graphql/schema.rs` and its state with `.data(..)` in `crates/service/src/bootstrap.rs`. The schema of this service has no mutation root yet: the first `Mutation` type replaces `EmptyMutation` there.
 3. Regenerate `.github/graphql-spec/spec` with `make generate-graphql-spec` in the same change.
 
 **Add a command.**
 
 1. Create `command/<name>.rs`: the command struct, `impl Command` with `Error` set to the context's application error and `NAME` set to the type name, and the handler struct with its ports as `Arc<dyn Port>`, `new` and an inherent `async fn` with the logic. The `CommandHandler` impl only delegates.
-2. The handler loads or creates one aggregate, saves it, then publishes `pull_domain_events()`. A publication failure is logged per failing subscriber and never fails the command.
-3. Register it with `.register(..)?` in the private `register_commands` of `crates/service/src/bootstrap.rs` (a query: `register_queries`), which `bootstrap::router` calls.
+2. The handler loads or creates one aggregate, stores it through a port of its Domain crate, then publishes `pull_domain_events()`. A publication failure is logged per failing subscriber and never fails the command.
+3. Register it with `.register(..)?` on an `InMemoryCommandBus` in `crates/service/src/bootstrap.rs` (a query: in `register_queries`), which `bootstrap::application` calls. This service has no command yet, so the first one adds the command bus: a private `register_commands` next to `register_queries`, and the bus in the state of its context.
 4. Extend the wiring test in `crates/service/src/bootstrap/tests.rs`.
 
 **Add a query.** Same as a command, in `query/<name>.rs`, with `Output` set to a view struct or a collection of views. A query handler never mutates state and returns views, not aggregates.
@@ -67,15 +64,9 @@ These recipes live in this skill, which the template sync delivers, so they stay
 1. Create `subscriber/<purpose>_<event>.rs` implementing `DomainEventSubscriber<Event>`.
 2. Register it with `.subscribe(..)` in `bootstrap::event_bus` of `crates/service/src/bootstrap.rs`.
 3. A subscriber is idempotent and does not call the command bus.
-4. Delivery is at most once: work that must not be lost needs an outbox, which the template does not ship.
+4. Delivery is at most once: the in-process bus does not retry a subscriber that failed.
 
-**Add a migration.**
-
-1. Run `make create-migration name=<snake_case_description>` and write the up and the down file.
-2. Apply it with `make migrate`, update the adapter, run `make sqlx-prepare` and commit `.sqlx/` with the migration.
-3. Never edit a migration that has reached `main`.
-
-**Add a bounded context.** Run `make new-context group=<group> context=<context>`, then follow the steps that `docs/new-service.md` lists under "Add a bounded context": the `[workspace.dependencies]` entries, the code layer by layer with its fakes in `test-support`, the wiring in the `service` crate (adapters in `Adapters`, handlers in `bootstrap::router`, a state field in `AppState`, its router in `openapi::api_router`, its GraphQL roots in `graphql::schema`), the components in `workspace.dsl`, the migration and the regenerated snapshots. `architecture.toml` and every other protected item stay untouched.
+**Add a bounded context.** Run `make new-context group=<group> context=<context>`, then follow the steps that `docs/new-service.md` lists under "Add a bounded context": the `[workspace.dependencies]` entries, the code layer by layer with its fakes in `test-support`, the wiring in the `service` crate (adapters in `Adapters`, handlers in `bootstrap::application`, a state field in `AppState`, its router in `openapi::api_router`, its GraphQL roots in `graphql::schema`), the components in `workspace.dsl` and the regenerated snapshots. `architecture.toml` and every other protected item stay untouched.
 
 **Add a health probe.**
 

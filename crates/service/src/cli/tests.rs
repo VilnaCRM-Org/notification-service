@@ -36,14 +36,6 @@ fn serve_takes_every_setting_as_a_flag() {
         "9000",
         "--log-level",
         "debug",
-        "--database-url",
-        "postgres://u@h/d",
-        "--database-max-connections",
-        "7",
-        "--database-acquire-timeout",
-        "1s",
-        "--database-statement-timeout",
-        "2s",
         "--aws-region",
         "eu-west-1",
         "--aws-endpoint-url-sqs",
@@ -62,6 +54,52 @@ fn serve_takes_every_setting_as_a_flag() {
         "2048",
         "--shutdown-grace-period",
         "6s",
+        "--event-types",
+        "user.created,order.paid",
+        "--kafka-bootstrap-servers",
+        "a:9092",
+        "--kafka-topic",
+        "events",
+        "--kafka-security-protocol",
+        "sasl_ssl",
+        "--kafka-sasl-mechanism",
+        "PLAIN",
+        "--kafka-sasl-username",
+        "reader",
+        "--kafka-sasl-password",
+        "secret",
+        "--kafka-client-id",
+        "node",
+        "--kafka-request-timeout",
+        "4s",
+        "--kafka-connect-timeout",
+        "1s",
+        "--kafka-fetch-max-wait",
+        "100ms",
+        "--kafka-retry-delay",
+        "2s",
+        "--event-max-data-bytes",
+        "1024",
+        "--event-window-max-events",
+        "10",
+        "--event-window-max-bytes",
+        "3000000",
+        "--event-window-start-events",
+        "5",
+        "--event-replay-max-events",
+        "20",
+        "--event-replay-permits",
+        "3",
+        "--event-tail-stale-after",
+        "20s",
+        "--subscriber-buffer",
+        "8",
+        "--max-subscribers",
+        "9",
+        "--stream-keep-alive",
+        "30s",
+        "--cors-allowed-origins",
+        "*",
     ])
     .unwrap();
 
@@ -72,10 +110,6 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.app_host.as_deref(), Some("127.0.0.1"));
     assert_eq!(args.app_port.as_deref(), Some("9000"));
     assert_eq!(args.log_level.as_deref(), Some("debug"));
-    assert_eq!(args.database.url.as_deref(), Some("postgres://u@h/d"));
-    assert_eq!(args.database.max_connections.as_deref(), Some("7"));
-    assert_eq!(args.database.acquire_timeout.as_deref(), Some("1s"));
-    assert_eq!(args.database.statement_timeout.as_deref(), Some("2s"));
     assert_eq!(args.aws_region.as_deref(), Some("eu-west-1"));
     assert_eq!(
         args.aws_endpoint_url_sqs.as_deref(),
@@ -88,6 +122,31 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.http_request_timeout.as_deref(), Some("5s"));
     assert_eq!(args.http_max_body_bytes.as_deref(), Some("2048"));
     assert_eq!(args.shutdown_grace_period.as_deref(), Some("6s"));
+    assert_eq!(args.event_types.as_deref(), Some("user.created,order.paid"));
+    let kafka = &args.kafka;
+    assert_eq!(kafka.bootstrap_servers.as_deref(), Some("a:9092"));
+    assert_eq!(kafka.topic.as_deref(), Some("events"));
+    assert_eq!(kafka.security_protocol.as_deref(), Some("sasl_ssl"));
+    assert_eq!(kafka.sasl_mechanism.as_deref(), Some("PLAIN"));
+    assert_eq!(kafka.sasl_username.as_deref(), Some("reader"));
+    assert_eq!(kafka.sasl_password.as_deref(), Some("secret"));
+    assert_eq!(kafka.client_id.as_deref(), Some("node"));
+    assert_eq!(kafka.request_timeout.as_deref(), Some("4s"));
+    assert_eq!(kafka.connect_timeout.as_deref(), Some("1s"));
+    assert_eq!(kafka.fetch_max_wait.as_deref(), Some("100ms"));
+    assert_eq!(kafka.retry_delay.as_deref(), Some("2s"));
+    let streams = &args.streams;
+    assert_eq!(streams.max_data_bytes.as_deref(), Some("1024"));
+    assert_eq!(streams.window_max_events.as_deref(), Some("10"));
+    assert_eq!(streams.window_max_bytes.as_deref(), Some("3000000"));
+    assert_eq!(streams.window_start_events.as_deref(), Some("5"));
+    assert_eq!(streams.replay_max_events.as_deref(), Some("20"));
+    assert_eq!(streams.replay_permits.as_deref(), Some("3"));
+    assert_eq!(streams.tail_stale_after.as_deref(), Some("20s"));
+    assert_eq!(streams.subscriber_buffer.as_deref(), Some("8"));
+    assert_eq!(streams.max_subscribers.as_deref(), Some("9"));
+    assert_eq!(streams.keep_alive.as_deref(), Some("30s"));
+    assert_eq!(args.cors_allowed_origins.as_deref(), Some("*"));
 }
 
 #[test]
@@ -108,6 +167,163 @@ fn the_credentials_are_accepted_as_hidden_flags() {
     assert_eq!(args.aws_secret_access_key.as_deref(), Some("secret"));
 }
 
+/// The arguments of `command` with `flag` set to `secret` and `--app-port 9000` after it.
+fn serve_args_with_secret(command: &str, flag: &str, secret: &str) -> ServeArgs {
+    let cli = parse(&[command, flag, secret, "--app-port", "9000"]).unwrap();
+    let (Command::Serve(args) | Command::CheckConfig(args)) = cli.command else {
+        panic!("expected serve or check-config");
+    };
+    assert_eq!(args.app_port.as_deref(), Some("9000"));
+    args
+}
+
+#[rstest]
+fn a_secret_access_key_that_starts_with_a_hyphen_is_taken_as_the_value(
+    #[values("serve", "check-config")] command: &str,
+    #[values("--AwSsEcReT", "-AwSsEcReT", "-", "--")] secret: &str,
+) {
+    let args = serve_args_with_secret(command, "--aws-secret-access-key", secret);
+
+    assert_eq!(args.aws_secret_access_key.as_deref(), Some(secret));
+}
+
+#[rstest]
+fn a_sasl_password_that_starts_with_a_hyphen_is_taken_as_the_value(
+    #[values("serve", "check-config")] command: &str,
+    #[values("--s3cretpw", "-s3cretpw", "-", "--")] secret: &str,
+) {
+    let args = serve_args_with_secret(command, "--kafka-sasl-password", secret);
+
+    assert_eq!(args.kafka.sasl_password.as_deref(), Some(secret));
+}
+
+#[rstest]
+#[case("--aws-secret-access-key", "--AwSsEcReT")]
+#[case("--aws-secret-access-key", "-AwSsEcReT")]
+#[case("--kafka-sasl-password", "--s3cretpw")]
+#[case("--kafka-sasl-password", "-s3cretpw")]
+fn a_usage_error_after_a_secret_that_starts_with_a_hyphen_never_names_it(
+    #[case] flag: &str,
+    #[case] secret: &str,
+) {
+    let error = parse(&["check-config", flag, secret, "--no-such-flag"]).unwrap_err();
+    let rendered = error.render().to_string();
+
+    assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+    assert!(
+        rendered.contains("unexpected argument '--no-such-flag' found"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains(secret), "{rendered}");
+}
+
+#[rstest]
+#[case("serve")]
+#[case("check-config")]
+fn the_debug_output_of_the_arguments_redacts_the_secrets(#[case] command: &str) {
+    let cli = parse(&[
+        command,
+        "--aws-access-key-id",
+        "key-id-value",
+        "--aws-secret-access-key",
+        "aws-secret-value",
+        "--kafka-sasl-username",
+        "reader",
+        "--kafka-sasl-password",
+        "sasl-secret-value",
+    ])
+    .unwrap();
+
+    let printed = format!("{cli:?}");
+
+    assert!(!printed.contains("aws-secret-value"), "{printed}");
+    assert!(!printed.contains("sasl-secret-value"), "{printed}");
+    assert!(
+        printed.contains("aws_secret_access_key: Some(<redacted>)"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("sasl_password: Some(<redacted>)"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(r#"aws_access_key_id: Some("key-id-value")"#),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(r#"sasl_username: Some("reader")"#),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_debug_output_of_the_kafka_arguments_changes_only_the_password() {
+    let args = KafkaArgs {
+        bootstrap_servers: Some("a:9092".to_owned()),
+        sasl_username: Some("reader".to_owned()),
+        sasl_password: Some("sasl-secret-value".to_owned()),
+        retry_delay: Some("2s".to_owned()),
+        ..KafkaArgs::default()
+    };
+
+    assert_eq!(
+        format!("{args:?}"),
+        "KafkaArgs { bootstrap_servers: Some(\"a:9092\"), topic: None, security_protocol: None, \
+         sasl_mechanism: None, sasl_username: Some(\"reader\"), sasl_password: Some(<redacted>), \
+         client_id: None, request_timeout: None, connect_timeout: None, fetch_max_wait: None, \
+         retry_delay: Some(\"2s\") }"
+    );
+}
+
+#[test]
+fn the_debug_output_of_the_serve_arguments_changes_only_the_secret_key() {
+    let args = ServeArgs {
+        app_port: Some("9000".to_owned()),
+        aws_secret_access_key: Some("aws-secret-value".to_owned()),
+        cors_allowed_origins: Some("*".to_owned()),
+        ..ServeArgs::default()
+    };
+
+    assert_eq!(
+        format!("{args:?}"),
+        format!(
+            "ServeArgs {{ app_env: None, app_host: None, app_port: Some(\"9000\"), log_level: None, \
+             aws_region: None, aws_endpoint_url_sqs: None, aws_access_key_id: None, \
+             aws_secret_access_key: Some(<redacted>), sqs_connect_timeout: None, \
+             sqs_operation_timeout: None, sqs_max_attempts: None, health_probe_timeout: None, \
+             http_request_timeout: None, http_max_body_bytes: None, shutdown_grace_period: None, \
+             event_types: None, kafka: {:?}, streams: {:?}, cors_allowed_origins: Some(\"*\") }}",
+            KafkaArgs::default(),
+            StreamArgs::default()
+        )
+    );
+}
+
+#[test]
+fn the_pretty_debug_output_prints_a_set_secret_like_an_option() {
+    let args = KafkaArgs {
+        sasl_password: Some("sasl-secret-value".to_owned()),
+        ..KafkaArgs::default()
+    };
+
+    let printed = format!("{args:#?}");
+
+    assert!(!printed.contains("sasl-secret-value"), "{printed}");
+    assert!(
+        printed.contains("    sasl_password: Some(\n        <redacted>,\n    ),\n"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn the_debug_output_shows_an_unset_secret_as_none() {
+    let printed = format!("{:?}", ServeArgs::default());
+
+    assert!(printed.contains("aws_secret_access_key: None"), "{printed}");
+    assert!(printed.contains("sasl_password: None"), "{printed}");
+    assert!(!printed.contains("<redacted>"), "{printed}");
+}
+
 #[test]
 fn check_config_takes_the_arguments_of_serve() {
     let cli = parse(&["check-config", "--app-port", "9000"]).unwrap();
@@ -116,23 +332,6 @@ fn check_config_takes_the_arguments_of_serve() {
         panic!("expected check-config");
     };
     assert_eq!(args.app_port.as_deref(), Some("9000"));
-}
-
-#[test]
-fn migrate_applies_by_default_and_reverts_on_request() {
-    let apply = parse(&["migrate", "--wait-timeout", "5s", "--database-url", "u"]).unwrap();
-    let revert = parse(&["migrate", "revert"]).unwrap();
-
-    let Command::Migrate(apply) = apply.command else {
-        panic!("expected migrate");
-    };
-    assert_eq!(apply.action, None);
-    assert_eq!(apply.wait_timeout.as_deref(), Some("5s"));
-    assert_eq!(apply.database.url.as_deref(), Some("u"));
-    let Command::Migrate(revert) = revert.command else {
-        panic!("expected migrate");
-    };
-    assert_eq!(revert.action, Some(MigrateAction::Revert));
 }
 
 #[rstest]
@@ -178,6 +377,7 @@ fn healthcheck_takes_a_port_and_a_host() {
 
 #[rstest]
 #[case(&["frobnicate"], ErrorKind::InvalidSubcommand)]
+#[case(&["migrate"], ErrorKind::InvalidSubcommand)]
 #[case(&["serve", "--frobnicate"], ErrorKind::UnknownArgument)]
 #[case(&["--frobnicate"], ErrorKind::UnknownArgument)]
 #[case(&[], ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand)]
@@ -237,18 +437,37 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "AWS_ENDPOINT_URL_SQS",
         "AWS_REGION",
         "AWS_SECRET_ACCESS_KEY",
-        "DATABASE_ACQUIRE_TIMEOUT",
-        "DATABASE_MAX_CONNECTIONS",
-        "DATABASE_STATEMENT_TIMEOUT",
-        "DATABASE_URL",
+        "CORS_ALLOWED_ORIGINS",
+        "EVENT_MAX_DATA_BYTES",
+        "EVENT_REPLAY_MAX_EVENTS",
+        "EVENT_REPLAY_PERMITS",
+        "EVENT_TAIL_STALE_AFTER",
+        "EVENT_TYPES",
+        "EVENT_WINDOW_MAX_BYTES",
+        "EVENT_WINDOW_MAX_EVENTS",
+        "EVENT_WINDOW_START_EVENTS",
         "HEALTH_PROBE_TIMEOUT",
         "HTTP_MAX_BODY_BYTES",
         "HTTP_REQUEST_TIMEOUT",
+        "KAFKA_BOOTSTRAP_SERVERS",
+        "KAFKA_CLIENT_ID",
+        "KAFKA_CONNECT_TIMEOUT",
+        "KAFKA_FETCH_MAX_WAIT",
+        "KAFKA_REQUEST_TIMEOUT",
+        "KAFKA_RETRY_DELAY",
+        "KAFKA_SASL_MECHANISM",
+        "KAFKA_SASL_PASSWORD",
+        "KAFKA_SASL_USERNAME",
+        "KAFKA_SECURITY_PROTOCOL",
+        "KAFKA_TOPIC",
         "LOG_LEVEL",
+        "MAX_SUBSCRIBERS",
         "SHUTDOWN_GRACE_PERIOD",
         "SQS_CONNECT_TIMEOUT",
         "SQS_MAX_ATTEMPTS",
         "SQS_OPERATION_TIMEOUT",
+        "STREAM_KEEP_ALIVE",
+        "SUBSCRIBER_BUFFER",
     ];
     expected.sort_unstable();
     assert_eq!(variables, expected);
@@ -281,22 +500,14 @@ fn the_serve_help_lists_every_variable_but_the_credentials() {
 }
 
 #[test]
-fn the_migrate_and_healthcheck_settings_are_bound_to_their_variables() {
-    let migrate = Cli::command();
-    let migrate = migrate.find_subcommand("migrate").unwrap();
+fn the_healthcheck_settings_are_bound_to_their_variables() {
     let healthcheck = Cli::command();
     let healthcheck = healthcheck.find_subcommand("healthcheck").unwrap();
 
-    let wait = migrate
-        .get_arguments()
-        .find(|argument| argument.get_id() == "wait_timeout")
-        .unwrap();
     let port = healthcheck
         .get_arguments()
         .find(|argument| argument.get_id() == "port")
         .unwrap();
-    assert_eq!(wait.get_env().unwrap(), "DATABASE_WAIT_TIMEOUT");
-    assert!(wait.is_hide_env_values_set());
     let host = healthcheck
         .get_arguments()
         .find(|argument| argument.get_id() == "host")

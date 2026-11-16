@@ -29,29 +29,21 @@ If the doctor says the engine is missing although Docker is installed, `docker i
 
 ## First start is slow
 
-The first `make start` builds the development image and compiles the workspace inside it, which takes several minutes; the `app` container is not healthy until the compile in the migration step is done. `make start` waits at most 900 seconds and then exits non-zero. Watch the progress with `make logs`. Later starts reuse the image layers and the build volume and take seconds. `make build` rebuilds the images from scratch and is only needed when you want to discard the cache.
+The first `make start` builds the development image and compiles the workspace inside it, which takes several minutes; the `app` container is not healthy until that first compile in it is done and the service answers. `make start` waits at most 900 seconds and then exits non-zero. Watch the progress with `make logs`. Later starts reuse the image layers and the build volume and take seconds. `make build` rebuilds the images from scratch and is only needed when you want to discard the cache.
 
 ## Port clashes
 
-The environment publishes four ports on `127.0.0.1`: the service on `APP_PORT` (8081), PostgreSQL on `DB_PORT` (5432), LocalStack on `LOCALSTACK_PORT` (4566) and the Structurizr viewer on `STRUCTURIZR_PORT` (8080). When one is taken, `make start` or `make start-deps` fails with Docker's "port is already allocated" message.
+The environment publishes three ports on `127.0.0.1`: the service on `APP_PORT` (8081), LocalStack on `LOCALSTACK_PORT` (4566) and the Structurizr viewer on `STRUCTURIZR_PORT` (8080). When one of them is taken, `make start` or `make start-deps` fails with Docker's "port is already allocated" message.
 
 Pick another port for the run, for example:
 
 ```bash
-DB_PORT=15432 make start-deps
+LOCALSTACK_PORT=14566 make start-deps
 ```
 
-`.env` builds `DATABASE_URL` from `DB_PORT`, so the service and the tests follow the new port. To run a second environment next to the first, also give it its own project name (`PROJECT_NAME=other`), so the containers and volumes do not collide. Each project name gets its own containers, network and volumes.
+`.env` builds `AWS_ENDPOINT_URL_SQS` from `LOCALSTACK_PORT`, so the service and the tests follow the new port. To run a second environment next to the first, also give it its own project name (`PROJECT_NAME=other`), so the containers and volumes do not collide. Each project name gets its own containers, network and volumes.
 
-## Stale `.sqlx`
-
-The directory `.sqlx/` holds the offline query metadata the compiler reads (`SQLX_OFFLINE=true`). When a query or a migration changes and the metadata does not, `make validate-sqlx-metadata` fails and a build can fail with a message that a query is not in the cache. Regenerate it from the freshly migrated test database and commit the result:
-
-```bash
-make sqlx-prepare
-```
-
-An applied migration is never edited; add a new one with `make create-migration name=<snake_case_description>`.
+`make ensure-kafka`, which the targets that need the broker run, also publishes the broker's host listener on `127.0.0.1:9095`. That port is fixed (see [`make-targets-service.md`](make-targets-service.md)), also for a second project, so free it when `make ensure-kafka` reports it as allocated.
 
 ## Restoring after an interrupted Bats run
 

@@ -13,7 +13,6 @@ export CARGO_MUTANTS_VERSION         := 27.1.0
 export CARGO_DENY_VERSION            := 0.20.2
 export CARGO_SHEAR_VERSION           := 1.14.0
 export CARGO_HACK_VERSION            := 0.6.46
-export SQLX_CLI_VERSION              := 0.9.0
 export CLIPPY_SARIF_VERSION          := 0.8.0
 export TAPLO_VERSION                 := 0.10.0
 export TYPOS_VERSION                 := 1.52.0

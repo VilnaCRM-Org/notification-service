@@ -32,6 +32,7 @@ external = [
     "futures-util",
     "humantime",
     "serde",
+    "serde_json",
     "thiserror",
     "tokio",
     "tracing",
@@ -40,7 +41,15 @@ external = [
     "uuid",
     "validator",
 ]
-dev_external = ["http-body-util", "proptest", "rstest", "serde_json", "tokio", "tower"]
+dev_external = [
+    "http-body-util",
+    "proptest",
+    "rstest",
+    "serde_json",
+    "tokio",
+    "tokio-tungstenite",
+    "tower",
+]
 forbidden_transitive = ["aws-config", "aws-sdk-sqs", "moka", "sqlx"]
 
 [[layer]]
@@ -53,9 +62,10 @@ external = [
     "async-trait",
     "aws-config",
     "aws-sdk-sqs",
+    "krafka",
     "moka",
-    "sqlx",
     "thiserror",
+    "tokio",
     "tracing",
     "uuid",
 ]

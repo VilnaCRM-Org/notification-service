@@ -209,40 +209,6 @@ jobs:
             echo "Third-party crates compiled: ${count}"
           fi
 
-  query-metadata:
-    name: Persistence query metadata
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # NFR40: a key of its own, saved on main. --all-targets --all-features also builds the dev-dependencies,
-      # which the service build of check-requirements, the saver of service-debug, does not produce.
-      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
-        with:
-          cache-shared-key: query-metadata
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: sqlx-cli@0.9.0
-          fallback: cargo-binstall
-      - run: |
-          set -o pipefail
-          mkdir -p target
-          make validate-sqlx-metadata 2>&1 | tee target/query-metadata.log
-      - if: ${{ always() }}
-        run: |
-          # NFR40: compile units of third-party crates in this job's build, 0 on a rerun of an unchanged commit.
-          if [ -f target/query-metadata.log ]; then
-            count=$(sed 's/\x1b\[[0-9;]*m//g' target/query-metadata.log | grep -E '^[[:space:]]+(Compiling|Checking) ' | grep -vc '(/' || true)
-            echo "Third-party crates compiled: ${count}"
-          fi
-      - if: ${{ failure() }}
-        run: docker compose logs --no-color
-
   check-requirements:
     name: Configuration check
     needs: changes

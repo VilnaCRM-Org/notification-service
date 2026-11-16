@@ -1,6 +1,6 @@
 {
-  "name": "rust-service-template",
-  "description": "VilnaCRM enterprise-grade Rust service template",
+  "name": "notification-service",
+  "description": "VilnaCRM Notification Service",
   "createdAt": "2026-11-10T16:20:16.760Z",
   "platform": "claude-code",
   "upstreamVersions": {

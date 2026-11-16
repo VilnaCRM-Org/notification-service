@@ -15,7 +15,7 @@ How to use the skills of this directory. The index is [README.md](README.md); th
 - Run every tool through `make`; do not call cargo, docker or linters directly unless a skill says so.
 - Fix root causes. Never edit a protected file, add a suppression, skip a test or loosen a threshold to obtain a pass.
 - Keep changes small and reviewable; one concern per change.
-- Prefer the existing example slice and its patterns over new structure.
+- Prefer the existing event-stream slice (`crates/notification/event-stream/`) and its patterns over new structure.
 - When a skill and the code disagree, trust the code, then repair the skill through `documentation-sync`.
 
 ## Flows
