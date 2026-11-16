@@ -1,6 +1,6 @@
 # Extension seams
 
-The template ships what its requirements ask for and nothing more. Four features that a service often needs are left out on purpose, and each has one named place where it plugs in. This document says where that place is, what to add and what to leave alone. The examples name the crates and files of the template; adapt them to the names of your service.
+The template ships what its requirements ask for and nothing more. Three features that a service often needs are left out on purpose, and each has one named place where it plugs in. This document says where that place is, what to add and what to leave alone. The examples name the crates and files of the template; adapt them to the names of your service.
 
 Most seams change files that the template sync keeps in step with the template. Read [Seams and the template sync](#seams-and-the-template-sync) before you change one: each seam lists the synchronised files it changes, and each of them goes into your `.templatesyncignore` in the same pull request.
 
@@ -9,7 +9,6 @@ Most seams change files that the template sync keeps in step with the template. 
 - [Redis adapter through the `Cache` port](#redis-adapter-through-the-cache-port)
 - [Tracing and metrics at the request span](#tracing-and-metrics-at-the-request-span)
 - [Authentication layer](#authentication-layer)
-- [Outbox for domain events](#outbox-for-domain-events)
 - [Seams and the template sync](#seams-and-the-template-sync)
 
 ## Redis adapter through the `Cache` port
@@ -57,25 +56,11 @@ The template has no authentication: every route is public. The seam is the route
 3. Leave `/ping` and `/api/health` outside the protected routes: the container healthcheck and the load balancer call them without credentials.
 4. Mark the credential header as sensitive (`SetSensitiveRequestHeadersLayer` of `tower-http`, whose `sensitive-headers` feature the template does not enable) before the span is created. The span records no header today, which is why the template needs no such layer; keep it that way.
 5. Describe the scheme in the OpenAPI document (`securitySchemes` and a `security` requirement on the protected operations), regenerate the snapshots with `make generate-openapi-spec`, and review the diff: adding a requirement is a breaking change for existing clients and needs the label `approved-breaking-change`. The GraphQL route is a route of the same router and is protected by the same layer; pass the identity from the request extensions to the schema as context data when a resolver needs it.
-6. Add scenarios for the missing and the invalid credential in a feature file of your own, `features/<name>.feature`, and update the Schemathesis run, which must then send credentials. Do not add them to `features/health_check.feature`: it stays identical to the PHP template's file (FR55(a)), and its four scenarios keep passing because step 3 leaves `/api/health` outside the protected routes.
+6. Add scenarios for the missing and the invalid credential in a feature file of your own, `features/<name>.feature`, and update the Schemathesis run, which must then send credentials. Do not add them to `features/health_check.feature`: it stays the PHP template's file without its database scenario (FR55(a)), and its three scenarios keep passing because step 3 leaves `/api/health` outside the protected routes.
 
-Synchronised files this seam changes: `crates/service/src/http/router.rs`, and `crates/service/src/graphql/handler.rs` when a resolver needs the identity (its `execute` passes the request to the schema). The middleware itself and the feature file of step 6 are new files of your own, which the sync never touches; the module declaration of the middleware goes into `crates/service/src/http.rs`, the OpenAPI changes into the OpenAPI module and the snapshots, all of which the template already ignores. `features/health_check.feature` is not among the files this seam changes: it changes only together with the PHP template, and the test "FR55(a): features/health_check.feature is the PHP template file" of `make_general.bats` fails when its content differs from the PHP file. The `Makefile` and the workflows are synchronised too: give Schemathesis its credentials through `SCHEMATHESIS_FLAGS` instead of changing the recipe.
+Synchronised files this seam changes: `crates/service/src/http/router.rs`, and `crates/service/src/graphql/handler.rs` when a resolver needs the identity (its `execute` passes the request to the schema). The middleware itself and the feature file of step 6 are new files of your own, which the sync never touches; the module declaration of the middleware goes into `crates/service/src/http.rs`, the OpenAPI changes into the OpenAPI module and the snapshots, all of which the template already ignores. `features/health_check.feature` is not among the files this seam changes: it changes only together with the PHP template, and the test "FR55(a): features/health_check.feature is the PHP template file without its database scenario" of `make_general.bats` fails when its content differs from that file. The `Makefile` and the workflows are synchronised too: give Schemathesis its credentials through `SCHEMATHESIS_FLAGS` instead of changing the recipe.
 
 Rate limiting, CORS and similar edge concerns belong to the same stack and follow the same pattern: one layer, placed deliberately in the order, with a test.
-
-## Outbox for domain events
-
-Domain-event delivery is at most once. A command handler saves the aggregate and then publishes its events on the in-process event bus. When a subscriber fails after the save succeeded, the handler logs `event publication failed` at ERROR, still returns success and the client receives the success response. The event is lost for that subscriber. The only shipped subscriber writes the audit log line, for which this is acceptable. A service whose subscribers must not miss an event needs a transactional outbox.
-
-The seam is the persistence design: each repository method is one statement and one command changes one aggregate, and events are not part of a database transaction. To add an outbox:
-
-1. Add a migration pair that creates an `outbox` table in the context that owns the events (`make create-migration name=create_outbox`; see `docs/operations.md` for the migration rules): event id, event name, aggregate id, serialised payload, `occurred_at`, a state or `published_at` column, and an index for the unpublished rows.
-2. Introduce a unit-of-work port in the Domain crate of the context, with an adapter in its Infrastructure crate that saves the aggregate and inserts the outbox rows in one SQL transaction. The handler calls the unit of work instead of the repository and the bus.
-3. Add a relay: a task that reads unpublished rows in order, publishes them to the event bus or to a queue (the SQS client of `shared_infrastructure::messaging::sqs_client` is the seam for an asynchronous consumer), and marks them as published. Delivery then becomes at least once, so every subscriber must be idempotent, which the guidance already demands.
-4. Start the relay from `serve` and stop it inside the shutdown grace period. Add its failures to the log messages in `docs/operations.md`.
-5. Regenerate `.sqlx/` with `make sqlx-prepare`, add integration tests that kill the relay between the insert and the mark, and remove the statement about at-most-once delivery from the documents that carry it.
-
-Synchronised files this seam changes: `crates/service/src/command/serve.rs` (the relay task), `docs/operations.md` (its log messages), and the documents that carry the statement about at-most-once delivery of step 5: `docs/architecture.md`, `.claude/skills/api-resource-development/SKILL.md` and this guide, `docs/extension-seams.md`. The migration, the context crates and `.sqlx/` are already service-owned.
 
 ## Seams and the template sync
 

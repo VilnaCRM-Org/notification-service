@@ -8,7 +8,7 @@ Read `AGENTS.md`, then [AI-AGENT-GUIDE.md](AI-AGENT-GUIDE.md), then [SKILL-DECIS
 
 ## Skills
 
-- `api-resource-development`: adding or changing a REST or GraphQL operation, a command, a query, an event subscriber or a migration.
+- `api-resource-development`: adding or changing a REST or GraphQL operation, a command, a query or an event subscriber.
 - `verification-workflow`: running the repository checks and fixing a failing gate before declaring completion.
 - `complexity-management`: the complexity gate fails or a function approaches a limit.
 - `architecture-boundary-fixer`: `make architecture` reports a violation or code moves between layers or contexts.

@@ -4,7 +4,6 @@ Runbooks for operating the service and for maintaining the repository that hosts
 
 ## Contents
 
-- [Migrations and rollback](#migrations-and-rollback)
 - [Health-probe runbook](#health-probe-runbook)
 - [Logs and request ids](#logs-and-request-ids)
 - [Shutdown sequence](#shutdown-sequence)
@@ -15,71 +14,19 @@ Runbooks for operating the service and for maintaining the repository that hosts
 - [Build caches in CI](#build-caches-in-ci)
 - [Accepted findings: `.trivyignore` and `.gitleaksignore`](#accepted-findings-trivyignore-and-gitleaksignore)
 
-## Migrations and rollback
-
-Migrations are plain SQL files in `migrations/` at the workspace root, written as reversible pairs: `<UTC timestamp>_<snake_case_name>.up.sql` and `.down.sql`. They are embedded in the `service` binary, so the production image needs neither `sqlx-cli` nor the directory. The service never migrates on start: `serve` starts without touching the schema, and migrating is a separate step.
-
-| Task | Command | Result |
-| --- | --- | --- |
-| Apply every pending migration to the development database | `make migrate` | `applied <n> migration(s)` on stdout; nothing changes when none is pending |
-| Revert the most recently applied migration | `make migrate-rollback` | `reverted <version>` on stdout, or `nothing to revert` |
-| Create a new reversible pair | `make create-migration name=<snake_case_description>` | an empty `.up.sql` and `.down.sql` |
-| Refresh the committed query metadata after a query changed | `make sqlx-prepare` | updated files in `.sqlx/`, committed with the migration |
-
-Both migration commands wait for the database first: one attempt per second until `DATABASE_WAIT_TIMEOUT` elapses (default 30 seconds). Each failed attempt prints `waiting for database (attempt <n>): <error>` on stderr. When the database stays unreachable the command exits with status 1 and prints the connection error. An invalid configuration exits with status 2.
-
-Migrations run under `DATABASE_STATEMENT_TIMEOUT` like every statement of the service (default 5 seconds, accepted range 1 millisecond to 24 days; PostgreSQL treats 0 as "no limit", so 0 is rejected). A statement that runs longer is cancelled with `canceling statement due to statement timeout`, the command exits with status 1 and the compose service `app`, which waits for `migrate`, does not start. Before a long migration such as an index build or a backfill, raise the variable for the migrate step only, for example `DATABASE_STATEMENT_TIMEOUT=30m make migrate`, or set it in the environment of the `migrate` container.
-
-In a deployed environment the production image runs the same step with its first argument: `migrate` applies and `migrate revert` reverts. The compose files run it as the one-shot service `migrate`, which the service `app` waits for.
-
-Rules:
-
-1. An applied migration is never edited. A migration that has reached `main` may already have run in other environments; correct it with a new migration.
-2. Every migration belongs to one bounded context and touches only that context's tables.
-3. Write the `.down.sql` file so that it undoes the `.up.sql` file, and run `make migrate-rollback` followed by `make migrate` once before you commit the pair.
-4. Commit `.sqlx/` together with the migration when a query changed, or the offline build fails.
-
-Rollback of a deployment:
-
-1. Stop or scale down the new version when it cannot run against the older schema.
-2. Run `migrate revert` once per migration of the failed release, newest first. Each call reverts exactly one migration.
-3. Deploy the previous image.
-4. Check the readiness endpoint `GET /api/health` (see the next section).
-
-A `.down.sql` file that drops a column or table destroys data. Take a backup before a rollback in production and decide whether to restore it.
-
 ## Health-probe runbook
 
 `GET /api/health` answers `204` with an empty body when every probe succeeds. Otherwise it answers `500` with a problem document of type `/problems/dependency-unavailable`. Its `failures` member holds one entry per failing dependency, and `detail` joins the messages with a semicolon and a space. The messages are fixed and identical in every environment. The underlying cause is never returned: it is a log line `health probe failed` at `WARN` with the fields `dependency` and `cause` (the whole error chain, outermost first, joined by a colon and a space, for example `probe failed: dispatch failure: <reason>`), and it carries the request id of the probe request.
 
 `GET /ping` is the liveness check. It touches no dependency, so a dependency outage never restarts a healthy process. Use `/ping` for container and process liveness and `/api/health` for readiness behind a load balancer.
 
-All probes run concurrently and each has a deadline of `HEALTH_PROBE_TIMEOUT` (default 3 seconds). A probe that hangs counts as failed, and its `cause` is `timed out after 3s`. The adapters have shorter limits of their own (database pool acquisition 2 seconds, SQS operation 2 seconds), so a refused connection reports its real cause and the outer deadline only catches a dependency that hangs.
+All probes run concurrently and each has a deadline of `HEALTH_PROBE_TIMEOUT` (default 3 seconds). A probe that hangs counts as failed, and its `cause` is `timed out after 3s`. The SQS adapter has shorter limits of its own (operation 2 seconds, connection 500 milliseconds), so a refused connection reports its real cause and the outer deadline only catches a dependency that hangs.
 
 To see the cause, filter the log for the probe line:
 
 ```sh
 docker compose logs app | jq -c 'select(.message == "health probe failed")'
 ```
-
-### `Database is not available`
-
-Wire identifier: `dependency` is `database`. The probe runs `SELECT 1` on the connection pool.
-
-Likely causes:
-
-- the database is stopped, restarting or unreachable from the service (network, firewall, wrong host or port);
-- `DATABASE_URL` is wrong, or the credentials were rotated;
-- the pool is exhausted: every connection is busy for longer than `DATABASE_ACQUIRE_TIMEOUT` (default 2 seconds), which is a capacity problem rather than an outage;
-- the database accepts connections but the statement exceeds `DATABASE_STATEMENT_TIMEOUT`.
-
-Checks:
-
-1. Read the `cause` of the `health probe failed` line with `dependency` equal to `database`.
-2. From the same network as the service, connect with `psql` using the host, port and user of `DATABASE_URL`. Never paste the URL into a ticket: it contains the password.
-3. Compare `DATABASE_MAX_CONNECTIONS` with the database's connection limit and with the number of running instances.
-4. Look for long-running or locked statements in `pg_stat_activity`.
-5. After the database is back, the pool reconnects by itself (the pool is lazy); no restart is needed.
 
 ### `Cache is not working`
 
@@ -131,11 +78,11 @@ A started node whose probe fails still accepts subscriptions. Check `GET /api/ev
 
 ### Several failures at once
 
-When more than one probe fails, `detail` lists all messages in registration order (database, cache, message broker, event stream) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
+When more than one probe fails, `detail` lists all messages in registration order (cache, message broker, event stream) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
 
 ### Starting without dependencies
 
-`serve` does not wait for dependencies. With the database, the SQS endpoint and the Kafka broker down, `/ping` answers at once and `/api/health` answers with the problem document within about 2 seconds, naming the three, and the log shows `event topic unreachable` once. This is the intended behaviour, not a failure of the service.
+`serve` does not wait for dependencies. With the SQS endpoint and the Kafka broker down, `/ping` answers at once and `/api/health` answers with the problem document within about 2 seconds, naming the message broker and the event stream, and the log shows `event topic unreachable` once. This is the intended behaviour, not a failure of the service.
 
 ## Logs and request ids
 
@@ -146,7 +93,7 @@ When more than one probe fails, `detail` lists all messages in registration orde
 | `timestamp` | always | RFC 3339, UTC, microseconds |
 | `level` | always | `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE` |
 | `message` | always | fixed text from the list below |
-| `target` | always | Rust module path, or `audit` for audit entries |
+| `target` | always | Rust module path |
 | event fields | per message | flattened into the top level |
 | `span` | inside a request | the innermost open span: `{"name":"http.request","http.request.method":…,"http.route":…,"url.path":…,"request_id":…}`, or a span opened inside the request (an SQS call opens its own) |
 | `spans` | inside a request | every open span, outermost first; the first element is always the `http.request` span with the `request_id` |
@@ -161,8 +108,6 @@ Fixed messages:
 | `request failed` | ERROR | `error` | the error chain behind a 5xx problem |
 | `panic` | ERROR | `panic` | message and location; the request gets a 500 problem and the process keeps running |
 | `health probe failed` | WARN | `dependency`, `cause` | see the health-probe runbook |
-| `event publication failed` | ERROR | `event_name`, `event_id`, `error` | one per failing subscriber, `error` is the whole error chain joined by a colon and a space; the request still succeeds |
-| `domain event` | INFO, target `audit` | `event_name`, `event_id`, `aggregate_id`, `occurred_at` | the audit subscriber |
 | `event tail ready` | INFO | `position` | the node read to the end of the topic for the first time and accepts subscriptions from now on; written once |
 | `event topic invalid` | ERROR | `reason` (`topic-not-found`, `partition-count`) | at start, once per change of the fault: the topic does not exist or has not exactly one partition; the node stays `starting` and retries after `KAFKA_RETRY_DELAY` |
 | `event topic unreachable` | WARN | `error` | at start, when the fault changes to a broker or topic that cannot be read; the node stays `starting` and retries |
@@ -183,7 +128,7 @@ Fixed messages:
 
 Lines written outside a request (start-up, shutdown) carry no request span; the AWS SDK writes a few start-up entries at `debug` level inside spans of its own.
 
-The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,sqlx=warn,audit=info`. The directive `krafka=error` is always added: the Kafka client writes errors only, and the entries of the event tail report its states. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and `DATABASE_URL` are never logged.
+The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,event_stream_application=debug`. The directive `krafka=error` is always added: the Kafka client writes errors only, and the entries of the event tail report its states. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and the values of the secret variables (`AWS_SECRET_ACCESS_KEY`, `KAFKA_SASL_PASSWORD`) are never logged.
 
 ### Request ids
 
@@ -373,7 +318,7 @@ CI installs the cargo tools with `taiki-e/install-action`, pinned by commit, wit
 
 ## First measurements
 
-These tables record what the first runs cost, so that later changes can be judged against them. The local values were entered by Story 10.5; the hosted-runner values are those of the first complete pipeline run, on commit `db7fe08` of the bootstrap pull request on 2026-11-11, of the first run of the scheduled workflow on `main`, on commit `3e0bd3e` on 2026-11-11, of a dispatch of that workflow on the branch of the follow-up pull request #2, on commit `027e1f1` on 2026-11-11, of the first warm pull-request runs, on commits `e9eef29` and `95547ba9506b6e54d04747203b1a1a06ba693904` of pull request #2 on 2026-11-12, and of a second dispatch of the scheduled workflow on that branch, on commit `da5ea9c` on 2026-11-12 (run 43151995703). No documentation-only pull request has run yet: its duration (budget 5 minutes) is an estimate, below.
+These tables record what the first runs cost, so that later changes can be judged against them. Every figure of this section was measured before PostgreSQL and the template's example context were removed ([ADR 0020](adr/0020-postgresql-is-removed.md)): those runs started a database container, ran its migration step and the gate of the query metadata, and built and tested the example crates. The figures are kept as history; none of them was measured on the current workspace. The local values were entered by Story 10.5; the hosted-runner values are those of the first complete pipeline run, on commit `db7fe08` of the bootstrap pull request on 2026-11-11, of the first run of the scheduled workflow on `main`, on commit `3e0bd3e` on 2026-11-11, of a dispatch of that workflow on the branch of the follow-up pull request #2, on commit `027e1f1` on 2026-11-11, of the first warm pull-request runs, on commits `e9eef29` and `95547ba9506b6e54d04747203b1a1a06ba693904` of pull request #2 on 2026-11-12, and of a second dispatch of the scheduled workflow on that branch, on commit `da5ea9c` on 2026-11-12 (run 43151995703). No documentation-only pull request has run yet: its duration (budget 5 minutes) is an estimate, below.
 
 Conditions of the local runs, 2026-11-11: a virtual machine with 4 vCPUs, 15 GB of memory and Linux 6.18, a fresh clone in a temporary directory (project name `service-clone`), no build directory and no compiler cache. Cargo ran with `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0` and everything else at its default. The hosted jobs use the same two settings: the pull-request jobs that run cargo on the runner receive both from the toolchain action (`actions-rust-lang/setup-rust-toolchain` sets them), and the scheduled clean-clone job `clean-bootstrap-ci`, which does not use that action, sets both in the `env` of its workflow. The pinned tools were already installed on the machine, so `make bootstrap` did not compile them. Both container images were built beforehand from the same commit and the runs used `BUILD_IMAGE=0`, so the image builds are not part of any duration below. The development image had been built earlier the same day, and its inputs (`make/tool-versions.mk`, `scripts/install-tools.sh`, `scripts/install-bats.sh` and the base image) had not changed since. The machine was shared with other work (load average 3.84 at the start of `make bootstrap`). The commit is `d152806`.
 
@@ -424,7 +369,7 @@ The six Bats groups run one after the other inside stage 7, files in alphabetica
 
 The sum is two seconds above the stage because the first Bats line is counted from the start of the command.
 
-Mutation run of Story 9.3 on commit `3650cd4`, on the same machine with its own PostgreSQL and LocalStack, the shards run one after the other with the mutation slot of the machine: 665 mutants in 8 shards of 84 (the last one 77), all of them tested, none missed, none timed out. The duration of a shard from its start to its exit, which includes waiting for a free slot and the unmutated baseline build of the shard itself (339 s for the first shard, falling to 11 s for the last as the build directory warmed):
+Mutation run of Story 9.3 on commit `3650cd4`, on the same machine with its own backing services of the time (the database, removed since, and LocalStack), the shards run one after the other with the mutation slot of the machine: 665 mutants in 8 shards of 84 (the last one 77), all of them tested, none missed, none timed out. The duration of a shard from its start to its exit, which includes waiting for a free slot and the unmutated baseline build of the shard itself (339 s for the first shard, falling to 11 s for the last as the build directory warmed):
 
 | Shard | Mutants | Caught | Unviable | Duration |
 | --- | --- | --- | --- | --- |
@@ -505,7 +450,7 @@ Since that run the job `devcontainer-build` also starts the container and checks
 1. `npx --yes @devcontainers/cli@0.90.0 up --workspace-folder .` starts the container with the docker-in-docker entry point and runs its `postCreateCommand`, `make install-hooks && make doctor`; the doctor requires `docker info` to answer.
 2. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . docker info` reaches the inner container engine.
 3. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make format-check` runs a toolchain target with the pinned toolchain.
-4. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make start-deps` starts PostgreSQL and LocalStack through compose on the inner engine.
+4. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make start-deps` starts the services of `DEPS` through compose on the inner engine: LocalStack, and the database as well until its removal (the run below started both).
 
 The CLI version of every step equals `DEVCONTAINER_CLI_VERSION` of `make/tool-versions.mk` (G31 rule (b)). Run 43119953189 had only the build step. Run 43151995703 (dispatch on commit `da5ea9c`, 2026-11-12, runner label `ubuntu-24.04`), job `Development container build` (job 130963101979), passed every step:
 
@@ -534,16 +479,15 @@ rust-cache saves nothing when the restore was an exact hit (`Cache up-to-date.`)
 | `check` | `static-analysis` | `complexity`, `code-scanning` (scheduled) |
 | `service-debug` | `check-requirements` | `contract-snapshots`, `docs-check` |
 | `crate-isolation` | `crate-isolation` | none |
-| `query-metadata` | `query-metadata` | none |
 | `xtask` | `architecture` | `validate-configuration`, `architecture-model` |
 | `tests` | `tests` | none |
 | `e2e` | `e2e-tests` | none |
 | `mutation-in-place` | `mutation-shard` with index 1, in `tests.yml` and `scheduled.yml` | `mutation-plan`, the other shards |
 | `bats-<group>`, for the group `tests` `bats-tests-in-place` | `bats-group`, one key per group | none |
 
-The jobs `crate-isolation` (`Crate isolation`) and `query-metadata` (`Persistence query metadata`) of `quality.yml` restored `check` and `service-debug` until pull request #2 and saved nothing. Their commands select other packages, features and targets than the savers of those keys, so they recompiled hundreds of third-party compile units on every run, a rerun of an unchanged commit included (see [the package selection](#what-a-restored-cache-cannot-cover-the-package-selection)). Each now saves a key of its own on `main`, and no other job restores it. The gate step writes its output to `target/crate-isolation.log` or `target/query-metadata.log` (with `set -o pipefail`, so the step keeps the status of the gate), and the step after it, which runs even when the gate failed, prints `Third-party crates compiled: <count>`: the `Compiling` and `Checking` lines without a path, after the colour codes are removed. rust-cache removes the files at the top of `target/` before it saves, so a restored entry never brings an old log back.
+The job `crate-isolation` (`Crate isolation`) of `quality.yml` restored `check` until pull request #2 and saved nothing. Its command selects other packages, features and targets than the saver of that key, so it recompiled hundreds of third-party compile units on every run, a rerun of an unchanged commit included (see [the package selection](#what-a-restored-cache-cannot-cover-the-package-selection)). It now saves a key of its own on `main`, and no other job restores it. The job of the query metadata had the same problem and got the same fix in pull request #2; it was removed with the database ([ADR 0020](adr/0020-postgresql-is-removed.md)), and its key with it. The gate step writes its output to `target/crate-isolation.log` (with `set -o pipefail`, so the step keeps the status of the gate), and the step after it, which runs even when the gate failed, prints `Third-party crates compiled: <count>`: the `Compiling` and `Checking` lines without a path, after the colour codes are removed. rust-cache removes the files at the top of `target/` before it saves, so a restored entry never brings an old log back.
 
-Cost against the repository's cache quota of 10 GB: two more entries on `main`, one per key, so the workflows now use 14 Rust cache keys instead of 12. A new entry exists only after a push to `main` has saved it, so its size is to be measured after the merge of pull request #2. The neighbouring entries, as the toolchain step of the two jobs printed when it restored them: `check` `Cache Size: ~422 MB (442408998 B)` and `service-debug` `Cache Size: ~372 MB (390088549 B)` (jobs 131262929871 and 131262929917). If the two new entries are of the same order, they add about 0.8 GB; that is an estimate, not a measurement.
+Cost against the repository's cache quota of 10 GB: pull request #2 added two entries on `main`, one per key, so the workflows used 14 Rust cache keys instead of 12; with the key of the query metadata gone they use 13. A new entry exists only after a push to `main` has saved it, so its size is to be measured after the merge of pull request #2. The neighbouring entries, as the toolchain steps of `Crate isolation` and of the job of the query metadata printed when they restored them: `check` `Cache Size: ~422 MB (442408998 B)` and `service-debug` `Cache Size: ~372 MB (390088549 B)` (jobs 131262929871 and 131262929917). If the entry of `crate-isolation` is of the same order, it adds about 0.4 GB; that is an estimate, not a measurement.
 
 ### Mutation testing builds in the checkout
 
@@ -559,7 +503,7 @@ The same selection was run both ways on 2026-11-12 with cargo-mutants 27.1.0: 23
 
 Which third-party crates cargo builds, and with which features, depends on the packages that a command selects. cargo-mutants builds its baseline with `--package` for every package that has a mutant in the shard, and then each mutant with `--package` for its own package. The saver on `main` builds only the selections of its own shard. On the current tree the full run has 701 mutants in 5 shards, and the saver's shard holds the mutants of `health-check-application`, `health-check-domain`, `health-check-infrastructure` and `service`. A pull-request shard whose mutants lie elsewhere still compiles the crates that differ.
 
-The table below gives the third-party compile units of one pull-request shard, counted from the `Compiling` lines without a path. Each count starts from a target directory that holds exactly what the saver builds: its baseline and one build per package, 508 compile units from an empty directory. The commands are the cargo-mutants build commands replayed in a scratch copy of commit `027e1f1` on 2026-11-12.
+The figures of this subsection were measured before the removal of PostgreSQL and the example context ([ADR 0020](adr/0020-postgresql-is-removed.md)); the rows and the job that belong to those parts are kept as history. The table below gives the third-party compile units of one pull-request shard, counted from the `Compiling` lines without a path. Each count starts from a target directory that holds exactly what the saver builds: its baseline and one build per package, 508 compile units from an empty directory. The commands are the cargo-mutants build commands replayed in a scratch copy of commit `027e1f1` on 2026-11-12.
 
 | Packages with mutants in the shard | Baseline | Per-package builds | Total |
 | --- | --- | --- | --- |
@@ -569,7 +513,7 @@ The table below gives the third-party compile units of one pull-request shard, c
 | `xtask` | 17 | 0 | 17 |
 | `shared-domain` | 15 | 0 | 15 |
 | `shared-infrastructure` | 15 | 0 | 15 |
-| `some-module-application`, `some-module-domain`, `some-module-infrastructure` | 49 | 8, 7, 13 | 77 |
+| the three crates of the example context (removed since) | 49 | 8, 7, 13 | 77 |
 | `service`, `shared-domain` | 13 | 0, 9 | 22 |
 
 Before the switch, every shard compiled every third-party crate of its selection on every run.
@@ -580,10 +524,10 @@ The saver's own selections also go stale. When the mutant count moves the slice 
 
 This gap is the fourth recorded exception of NFR40, for its rerun clause: 0 to 77 third-party compile units per pull-request shard, against 321 to 345 before the switch, and 0 for the selections of the saver itself. A cache saved per pull request would close it, but each entry of about 800 MB would take a share of the repository's cache quota of 10 GB for every pull request and commit, and the quota would evict the entries of `main` that every other job restores.
 
-The same cause made two jobs of `quality.yml` recompile on every run while they restored the entry of another job:
+The same cause made two jobs of `quality.yml` recompile on every run while they restored the entry of another job (the second one went with the database):
 
 - `Crate isolation` restored `check`. Its saver, `static-analysis`, runs two clippy passes (`cargo clippy --locked --workspace --lib --bins --all-features` and `cargo clippy --locked --workspace --all-targets --all-features`, each followed by its lint options) and `cargo doc --locked --workspace --no-deps --document-private-items`, each over the whole workspace at once, so in each of them cargo builds a third-party crate with the union of the features that all crates of the workspace ask for. `make check-crate-isolation` runs `cargo hack check --workspace --each-feature --locked`, which checks each crate alone, once per feature set of the crate; the crates of the template declare no features of their own, so the hosted log shows one `cargo check --locked` per crate (`running ... on <crate> (1/13)` to `(13/13)`). Cargo resolves features per selection, so a third-party crate is built with the features that this one crate selects, without the other crates and without the dev-dependencies, and each such feature set is a compile unit of its own that the `check` entry does not hold.
-- `Persistence query metadata` restored `service-debug`. Its saver, `check-requirements`, builds only the `service` binary. `make validate-sqlx-metadata` runs `cargo sqlx prepare --workspace --check -- --all-targets --all-features --locked`, which also builds the tests and the other targets of every crate, and with them the dev-dependencies, `cucumber` among them, that the `service-debug` entry does not hold.
+- `Persistence query metadata` restored `service-debug`. Its saver, `check-requirements`, builds only the `service` binary. The gate of the query metadata ran the prepare check of the sqlx command-line tool over all targets and features of the workspace, which also builds the tests and the other targets of every crate, and with them the dev-dependencies, `cucumber` among them, that the `service-debug` entry does not hold.
 
 The third-party compile units of the gate step, counted in the hosted logs as the new count step counts them (the `Compiling` and `Checking` lines without a path, after the colour codes are removed):
 
@@ -594,7 +538,7 @@ The third-party compile units of the gate step, counted in the hosted logs as th
 | `Crate isolation` (job 131262929871) | `6a9dd24` | the same entry of `check`, `full match: false` | 224 (50 `Compiling`, 174 `Checking`) |
 | `Persistence query metadata` (job 131262929917) | `6a9dd24` | the same entry of `service-debug`, `full match: false` | 354 (56 `Compiling`, 298 `Checking`) |
 
-On `e9eef29` the restore was an exact hit, so these are the counts that a rerun of an unchanged commit gave. On `6a9dd24` only `.cargo/config.toml` had changed since the entry was saved (one `[env]` line; no manifest and not `Cargo.lock`), so hash 2 of the key was `24b880c7` against `f2938adc` of the entry and the restore matched by prefix only. The counts are the same: what the two jobs missed was their own selection, not a change of the key files. Unlike the mutation shards, each of the two jobs runs one fixed command on every run, so an entry that the job saves itself holds exactly what that command builds. Since pull request #2, each job saves a key of its own on `main` (see [the Rust caches](#rust-caches)).
+On `e9eef29` the restore was an exact hit, so these are the counts that a rerun of an unchanged commit gave. On `6a9dd24` only `.cargo/config.toml` had changed since the entry was saved (one `[env]` line; no manifest and not `Cargo.lock`), so hash 2 of the key was `24b880c7` against `f2938adc` of the entry and the restore matched by prefix only. The counts are the same: what the two jobs missed was their own selection, not a change of the key files. Unlike the mutation shards, each of the two jobs ran one fixed command on every run, so an entry that the job saves itself holds exactly what that command builds. Since pull request #2, `Crate isolation` saves a key of its own on `main` (see [the Rust caches](#rust-caches)), as the job of the query metadata did until its removal.
 
 ### Checking the rerun clause on hosted runners
 
@@ -603,15 +547,13 @@ The proof comes only from hosted logs. In the logs, `<hash>` stands for the two 
 On the first push to `main` after a key was renamed or added:
 
 - `Crate isolation`: toolchain step `No cache found.`. The step after `make check-crate-isolation` prints `Third-party crates compiled: <count>`, with a high count on this cold run. The post step of the toolchain action prints `... Saving cache ...` for `v0-rust-crate-isolation-Linux-x64-<hash>` and the size of the entry.
-- `Persistence query metadata`: the same lines for `v0-rust-query-metadata-Linux-x64-<hash>`, after `make validate-sqlx-metadata`.
 - `Mutation shard 0/<n>` (index 1), toolchain step: `No cache found.`. The mutation step's command ends in `--shard 0/<n> --in-place`. The step after it prints `Third-party crates compiled by cargo-mutants in this shard: <count>`, with a high count on this cold run. The post step of the toolchain action prints `... Saving cache ...` for `v0-rust-mutation-in-place-Linux-x64-<hash>`. The entry is far larger than the 121,575,024 bytes of the old `mutation` entry. The artifact `mutants-1` has no `Copied source tree` line in `debug.log`, and the `Compiling` lines of `log/baseline.log` name paths in the checkout.
 - `Bats: tests`: `No cache found.` for `v0-rust-bats-tests-in-place-Linux-x64-<hash>`, the TAP line `# G15: <count> third-party crates compiled by cargo-mutants (MUTANTS_IN_PLACE=1)`, and `... Saving cache ...` at the end.
-- A saver job that fails or is cancelled still saves, unless its restore was an exact hit. The toolchain action passes its default `cache-on-failure: true` to rust-cache, so the post step of rust-cache also runs after a failure, a cancellation or the job timeout (`post-if: success() || env.CACHE_ON_FAILURE == 'true'`). A missed mutant leaves the entry complete, because cargo-mutants tests every mutant before it exits 2. A job that was cancelled or timed out, or whose baseline failed, saves only what it built until then, and an exact hit never refreshes that entry. So check that the first saver run after a rename got to the end. Its mutation step prints the cargo-mutants summary `<count> mutants tested in <time>: ...`, which comes only after the last mutant, and `Bats: tests` prints the TAP line of G15. `Crate isolation` and `Persistence query metadata` got to the end when their gate step passed. If any of these is missing, rename the key again.
+- A saver job that fails or is cancelled still saves, unless its restore was an exact hit. The toolchain action passes its default `cache-on-failure: true` to rust-cache, so the post step of rust-cache also runs after a failure, a cancellation or the job timeout (`post-if: success() || env.CACHE_ON_FAILURE == 'true'`). A missed mutant leaves the entry complete, because cargo-mutants tests every mutant before it exits 2. A job that was cancelled or timed out, or whose baseline failed, saves only what it built until then, and an exact hit never refreshes that entry. So check that the first saver run after a rename got to the end. Its mutation step prints the cargo-mutants summary `<count> mutants tested in <time>: ...`, which comes only after the last mutant, and `Bats: tests` prints the TAP line of G15. `Crate isolation` got to the end when its gate step passed. If any of these is missing, rename the key again.
 
 On a rerun of an unchanged pull-request commit, started after that push:
 
 - `Crate isolation`: `Restored from cache key "v0-rust-crate-isolation-Linux-x64-<hash>" full match: true.` and `Third-party crates compiled: 0`.
-- `Persistence query metadata`: `Restored from cache key "v0-rust-query-metadata-Linux-x64-<hash>" full match: true.` and `Third-party crates compiled: 0`.
 - `Mutation plan` and every `Mutation shard k/n`: `Restored from cache key "v0-rust-mutation-in-place-Linux-x64-<hash>" full match: true.`. Each shard prints `Third-party crates compiled by cargo-mutants in this shard: 0` when its packages are among the saver's selections. Otherwise it prints the count of the table above for its selection, the same on the first attempt and on the rerun, because pull-request runs save nothing.
 - `Bats: tests`: `Restored from cache key "v0-rust-bats-tests-in-place-Linux-x64-<hash>" full match: true.` and `# G15: 0 third-party crates compiled by cargo-mutants (MUTANTS_IN_PLACE=1)`. The G15 selection is the same on every run.
 
@@ -628,11 +570,11 @@ Recorded on pull request #2, head `95547ba9506b6e54d04747203b1a1a06ba693904` (ru
 
 The count 0 on a rerun can be shown only after the merge. Before it, no saved entry has the new names, and pull requests do not save. Caches saved by a push to the pull request's branch are not visible to its `pull_request` runs. The rerun result is to be filled from run `<id>`: the rerun of one unchanged pull-request commit across all seven pull-request workflows, after the first push to `main` has saved the renamed keys, with the count line of every shard and the G15 TAP line of `Bats: tests`.
 
-The keys `crate-isolation` and `query-metadata` (pull request #2) are checked the same way, after the merge of pull request #2. Before it, the runs of the pull request find nothing under the two new names (`No cache found.`) and compile the selection of both jobs from nothing, so their count lines show cold counts. Check to run:
+The key `crate-isolation` (pull request #2) is checked the same way, after the merge of pull request #2. Before it, the runs of the pull request find nothing under the new name (`No cache found.`) and compile the selection of the job from nothing, so its count line shows a cold count. Pull request #2 also added a key for the job of the query metadata; job and key went with the database, so the checks below name only `crate-isolation`. Check to run:
 
-1. The first push to `main` after the merge: in `Crate isolation` and `Persistence query metadata`, the gate step passed and the post step of the toolchain action printed `... Saving cache ...` for `v0-rust-crate-isolation-Linux-x64-<hash>` and `v0-rust-query-metadata-Linux-x64-<hash>`, each with its `Cache Size`. Result: to be measured after the merge of pull request #2.
-2. The rerun of one unchanged pull-request commit after that push, the run of the previous paragraph: both jobs print `Restored from cache key ... full match: true.` and `Third-party crates compiled: 0`. Result: to be measured after the merge of pull request #2.
-3. The quota: in the same rerun, every other job that restores a key still restores the entry that `main` saved. A `No cache found.` there means that the quota of 10 GB evicted an entry of `main`. Then the two keys cannot be kept within the quota, and the counts of the table in [the package selection](#what-a-restored-cache-cannot-cover-the-package-selection) are recorded as a fifth exception of NFR40 instead. Result: to be measured after the merge of pull request #2.
+1. The first push to `main` after the merge: in `Crate isolation`, the gate step passed and the post step of the toolchain action printed `... Saving cache ...` for `v0-rust-crate-isolation-Linux-x64-<hash>` with its `Cache Size`. Result: to be measured after the merge of pull request #2.
+2. The rerun of one unchanged pull-request commit after that push, the run of the previous paragraph: the job prints `Restored from cache key ... full match: true.` and `Third-party crates compiled: 0`. Result: to be measured after the merge of pull request #2.
+3. The quota: in the same rerun, every other job that restores a key still restores the entry that `main` saved. A `No cache found.` there means that the quota of 10 GB evicted an entry of `main`. Then the key cannot be kept within the quota, and the counts of the table in [the package selection](#what-a-restored-cache-cannot-cover-the-package-selection) are recorded as a fifth exception of NFR40 instead. Result: to be measured after the merge of pull request #2.
 
 ## Accepted findings: `.trivyignore` and `.gitleaksignore`
 

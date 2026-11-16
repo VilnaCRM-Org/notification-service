@@ -12,7 +12,7 @@ Read these files, in this order, before you change anything:
 
 - A Rust 1.99.1 workspace with one crate per bounded-context layer.
 - REST and GraphQL interfaces served with axum.
-- PostgreSQL access through sqlx.
+- Kafka as the only shared state, read through krafka; no database.
 - Contract snapshots under `.github/`.
 - Load tests under `tests/Load/`.
 - The architecture model in `workspace.dsl`.

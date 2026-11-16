@@ -4,11 +4,11 @@ Planning decisions: AD-23 (test doubles and fault injection), AD-24 (coverage an
 
 ## Context
 
-The template promises that every gate can fail: 100% line and function coverage and no surviving mutant over all production source. Adapters can only be observed against real PostgreSQL and LocalStack, and tests must be able to force a dependency to fail without stopping a container.
+The template promises that every gate can fail: 100% line and function coverage and no surviving mutant over all production source. Adapters can only be observed against the real backing services (LocalStack and the Kafka broker; the template's PostgreSQL went with [ADR 0020](0020-postgresql-is-removed.md)), and tests must be able to force a dependency to fail without stopping a container.
 
 ## Decision
 
-Test doubles are hand-written fakes in the workspace crate `test-support`, which depends on Domain crates only. Domain crates keep the few fakes they need in their own `tests.rs` files. The end-to-end suite builds the production wiring with real adapters and replaces one health probe with a failing stub to simulate an outage. Every scenario gets its own PostgreSQL database, and a new application instance is built per request, which also shows statelessness. There are no mocking libraries and no containers started by tests.
+Test doubles are hand-written fakes in the workspace crate `test-support`, which depends on Domain crates only. Domain crates keep the few fakes they need in their own `tests.rs` files. The end-to-end suite builds the production wiring with real adapters and replaces one health probe with a failing stub to simulate an outage. A scenario that streams events gets a topic of its own on the broker of the stack, and every other request is answered by a new application instance, which also shows statelessness. There are no mocking libraries and no containers started by tests.
 
 Coverage is measured over the unit and integration suites in one run and gates 100% of lines and functions, with no ignore patterns; files named `tests.rs`, directories named `tests` and build scripts are absent from the report by construction. The end-to-end suite is not instrumented. Mutation testing covers every production source file, excluding only `main.rs`, build scripts and test files, each with its reason in the scope record. Each mutant is judged by the unit and integration tests of its own crate. A surviving or timed-out mutant fails the gate, and a mutant that does not compile is not counted.
 

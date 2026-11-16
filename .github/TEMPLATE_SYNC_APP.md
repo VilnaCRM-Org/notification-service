@@ -38,7 +38,7 @@ This is how `src/sync_template.sh` of the pinned `AndreasAugustin/actions-templa
 The file `.templatesyncignore` at the root of the repository lists the paths that the sync never touches. The sync action drops every blank line and everything from a `#` to the end of a line, and hands each remaining entry to `git reset --` (the function `handle_templatesyncignore` in `src/sync_template.sh` of the pinned `AndreasAugustin/actions-template-sync` v2.6.0, lines 477 to 490). Each entry is therefore a git pathspec relative to the root of the repository, not a `.gitignore` pattern:
 
 - A name without a slash, such as `Cargo.toml`, is the file at the root only. `crates/service/Cargo.toml` needs a line of its own, and so does every other file below the root.
-- An entry that ends in a slash, such as `migrations/`, is everything below that directory.
+- An entry that ends in a slash, such as `specs/`, is everything below that directory.
 - `*` also matches `/`: `crates/*.rs` is every Rust file at any depth below `crates/`.
 - An entry never starts with `/` and never contains `..`: git refuses a path outside the repository, and the sync stops with an error. Do not anchor an entry with a leading slash as you would in a `.gitignore` file.
 
@@ -63,7 +63,7 @@ Both flavours do the same thing and would open competing pull requests. Keep one
 
 A repository created from a template shares no history with it, so the sync action merges without a common ancestor and resolves every difference in favour of the template. A file that a service extends would lose the service's additions, so `.templatesyncignore` lists these files and the sync never touches them. A change that the template makes to such a file does not arrive; apply it by hand.
 
-The ignored files are the service-owned files (`README.md`, `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, `.sqlx/`, `migrations/`, the contract snapshots, `workspace.dsl`, `bmalph/config.json`, `specs/`, the example context `crates/company-subdomain/`, the feature files `features/api_docs.feature`, `features/example_api_resource.feature`, `features/graphql.feature` and `features/http_errors.feature`, `tests/Load/config.json.dist`, `docs/requests.http`) and the template-owned files that a service extends:
+The ignored files are the service-owned files (`README.md`, `CHANGELOG.md`, `Cargo.toml`, `Cargo.lock`, the contract snapshots, `workspace.dsl`, `bmalph/config.json`, `specs/`, the feature files `features/api_docs.feature`, `features/graphql.feature` and `features/http_errors.feature`, `tests/Load/config.json.dist`, `docs/requests.http`) and the template-owned files that a service extends:
 
 | File | What a service adds | What does not arrive |
 | --- | --- | --- |
@@ -77,11 +77,13 @@ The ignored files are the service-owned files (`README.md`, `CHANGELOG.md`, `Car
 | `deny.toml`, `.trivyignore`, `.gitleaksignore`, `_typos.toml`, `.cargo/mutants.toml` | dated exceptions | changes of the template's own policy in these files |
 | `crates/internal/health-check/domain/src/value_object/dependency.rs` and its `dependency/` tests, `crates/internal/health-check/infrastructure/src/probe.rs` | a dependency and the module declaration of its probe; a probe that needs a new client crate also changes `crates/internal/health-check/infrastructure/Cargo.toml`, which the template synchronises, so the service lists that file by its full path in its own `.templatesyncignore` | changes of the health-check wiring |
 | `crates/service/Cargo.toml`, `src/bootstrap`, `src/cli`, `src/config`, `src/http.rs`, `src/openapi`, `src/graphql/schema` of that crate | wiring, commands, configuration, routes and schema roots | changes of the service wiring |
-| `crates/service/src/http/router/tests.rs` and `crates/service/tests/integration/bootstrap.rs`, `migrate.rs`, `serve.rs`, `panic.rs` | the tests that construct `Adapters` and use the routes, the table and the migration of the example context; a service keeps them in step with its wiring | changes of these tests |
+| `crates/service/src/http/router/tests.rs` and `crates/service/tests/integration/bootstrap.rs`, `serve.rs`, `panic.rs` | the tests that construct `Adapters` and use the routes; a service keeps them in step with its wiring | changes of these tests |
 | `tests/support/`, `tests/e2e/` | test doubles, world and step definitions | changes of the test support |
 | files changed through an extension seam (see `docs/extension-seams.md`) | the change the seam describes; the service adds each synchronised path it changes to its own `.templatesyncignore` in the same pull request | changes of these files: the template does not ignore them, so its fixes reach every service that has not changed them; apply them by hand to a file you ignore |
 
-`docs/repository-settings.md` is synchronised too: a service lists the jobs of its own pull-request workflows in docs/repository-settings-service.md, which the template does not ship and a sync never touches. `Makefile` and `docs/make-targets.md` are synchronised, not ignored: a service defines its own targets in make/service.mk, which the `Makefile` loads, and documents them in docs/make-targets-service.md. The template ships neither file, so a sync cannot change them.
+This service removed PostgreSQL and the template's example context ([ADR 0020](../docs/adr/0020-postgresql-is-removed.md)), so its `.templatesyncignore` also keeps listing the paths of both, which the template still ships: the directories .sqlx and migrations, the example context under crates/company-subdomain, the feature file example_api_resource.feature, the migration test of the service crate, and every synchronised file the removal changed or deleted. A sync then brings none of them back, and a template change to them does not apply here.
+
+In the template, `docs/repository-settings.md`, `Makefile` and `docs/make-targets.md` are synchronised, not ignored: a service lists the jobs of its own pull-request workflows in docs/repository-settings-service.md, defines its own targets in make/service.mk, which the `Makefile` loads, and documents them in docs/make-targets-service.md. The template ships none of these three service files, so a sync cannot change them. This service ignores the three template files nevertheless: `docs/make-targets.md` since its first bounded context, the `Makefile` since the removal changed its targets, and `docs/repository-settings.md` since the removal deleted a required check that the template's copy still lists. A template change to any of the three does not arrive by itself here: apply it by hand.
 
 `.templatesyncignore` itself is on the list: the service owns its copy. The file in the template is the reference.
 

@@ -16,7 +16,7 @@ Real-time event delivery hub for VilnaCRM frontends over Server-Sent Events and 
 
 - Rust 1.99.1, pinned in `rust-toolchain.toml`, in a workspace with domain, application and infrastructure crates per bounded context
 - REST and GraphQL endpoints with generated OpenAPI and GraphQL contract snapshots under `.github/`
-- PostgreSQL with migrations and compile-time checked queries
+- No database: the events live in one Kafka topic that every node reads, and the service stores nothing
 - An architecture gate (`make architecture`) that keeps domain crates free of frameworks
 - Unit, integration, end-to-end, mutation and load tests
 - A Make command surface that runs natively or in containers
@@ -85,7 +85,7 @@ The k6 scenarios live in `tests/Load/`. `make load-tests` runs them locally, and
 - [`docs/new-service.md`](docs/new-service.md) — creating a service from the template
 - [`docs/environment.md`](docs/environment.md) — environment variables
 - [`docs/make-targets.md`](docs/make-targets.md) — Make targets
-- [`docs/operations.md`](docs/operations.md) — migrations, probes, logs and shutdown
+- [`docs/operations.md`](docs/operations.md) — probes, logs and shutdown
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — common failures
 - [`docs/extension-seams.md`](docs/extension-seams.md) — where a service extends the template
 - [`docs/load-testing.md`](docs/load-testing.md) — load tests

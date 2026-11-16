@@ -7,8 +7,8 @@ Index of the documents in this directory. The PHP-to-Rust mappings are part of t
 | Document | Content |
 | --- | --- |
 | [Getting started](getting-started.md) | prerequisites, `make doctor`, `make bootstrap`, the first request, native mode, container mode, the development container, stopping and cleaning |
-| [Creating a service](new-service.md) | package identity, the example context, `make new-context`, wiring, service-owned Make targets, secrets, variables and labels, the choice of a sync flavour |
-| [Troubleshooting](troubleshooting.md) | doctor findings, Docker versions, slow first start, port clashes, stale query metadata, an interrupted Bats run, rate-limited tool installation, builds behind a TLS-intercepting proxy |
+| [Creating a service](new-service.md) | package identity, the removal of the example context, `make new-context`, wiring, service-owned Make targets, secrets, variables and labels, the choice of a sync flavour |
+| [Troubleshooting](troubleshooting.md) | doctor findings, Docker versions, slow first start, port clashes, an interrupted Bats run, rate-limited tool installation, builds behind a TLS-intercepting proxy |
 
 ## Reference
 
@@ -19,13 +19,13 @@ Index of the documents in this directory. The PHP-to-Rust mappings are part of t
 | [Request collection](requests.http) | one request for each endpoint, in the plain-text `.http` format |
 | [Architecture](architecture.md) | layers, crates and bounded contexts; request flow; error model; statelessness; deployment assumptions; link to the architecture model |
 | [Decision records](adr/README.md) | the architecture decision records, in the form context, decision, consequences |
-| [Extension seams](extension-seams.md) | where Redis, tracing and metrics, authentication and an outbox plug in |
+| [Extension seams](extension-seams.md) | where Redis, tracing and metrics and authentication plug in |
 
 ## Operations and project settings
 
 | Document | Content |
 | --- | --- |
-| [Operations](operations.md) | migrations and rollback, the health-probe runbook, log schema, shutdown sequence, toolchain and tool-version updates, first measurements, scan exceptions |
+| [Operations](operations.md) | the health-probe runbook, log schema, shutdown sequence, toolchain and tool-version updates, first measurements, scan exceptions |
 | [Load testing](load-testing.md) | profiles, budgets, adding a scenario, the isolated environment, the AWS runner and its costs |
 | [Repository settings](repository-settings.md) | required status checks, merge settings, secrets, variables and labels, code scanning, follow-ups |
 

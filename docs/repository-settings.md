@@ -2,7 +2,7 @@
 
 A repository created from this template starts with the files, workflows and gates, but a few settings live in the hosting platform and cannot be committed. This document lists what a maintainer applies once, in the settings of the repository or of the organisation. Nothing here is checked by a gate except the job names of the pull-request workflows: `make validate-invariants` fails when a job of a pull-request workflow is missing from the tables below.
 
-A service that adds pull-request workflows of its own lists their jobs in a second document, docs/repository-settings-service.md, in the same table format. The template does not ship that file, so a sync never touches it, while this document is replaced by the template's copy on every sync. `make validate-invariants` accepts a job that is listed in either document.
+A service that adds pull-request workflows of its own lists their jobs in a second document, docs/repository-settings-service.md, in the same table format. The template does not ship that file, so a sync never touches it, while the template replaces this document with its copy on every sync. This service keeps its copy out of the sync (`.templatesyncignore`): its database and the job of the query metadata were removed ([ADR 0020](adr/0020-postgresql-is-removed.md)), and the template's copy still lists that job, so apply a later template change to this document by hand. `make validate-invariants` accepts a job that is listed in either document.
 
 ## Contents
 
@@ -17,6 +17,8 @@ A service that adds pull-request workflows of its own lists their jobs in a seco
 - [Governance follow-ups](#governance-follow-ups)
 
 ## Required status checks
+
+The check "Persistence query metadata" (job query-metadata of `quality.yml`) no longer exists in this service. If the branch protection of `main` still requires it, a maintainer removes it there; otherwise every pull request waits for a check that never reports.
 
 Every pull-request workflow runs on pull requests to `main` and on pushes to `main`. The tables name every job by its id, with the check name that GitHub shows in brackets. Mark the jobs in the column "Required" as required status checks of the branch protection of `main`.
 
@@ -38,7 +40,6 @@ The matrix jobs have an aggregator job with a fixed name. The aggregator is the 
 | `architecture` | Architecture boundaries | G4 | yes |
 | `manifest` | Manifest and lock validation | G5 | yes |
 | `crate-isolation` | Crate isolation | G29 | yes |
-| `query-metadata` | Persistence query metadata | G30 | yes |
 | `check-requirements` | Configuration check | G6 | yes |
 | `dependency-policy` | Dependency policy | G7 | yes |
 | `unused-dependencies` | Unused dependencies | G8 | yes |

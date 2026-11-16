@@ -54,7 +54,7 @@ curl http://localhost:8081/ping
 curl -i http://localhost:8081/api/health
 ```
 
-`/ping` answers `pong` (liveness). `/api/health` answers 204 when the database, the cache and the message broker respond and the event stream of the node is ready, and a 500 problem document that lists every failing dependency otherwise.
+`/ping` answers `pong` (liveness). `/api/health` answers 204 when the cache and the message broker respond and the event stream of the node is ready, and a 500 problem document that lists every failing dependency otherwise.
 
 | URL | Content |
 | --- | --- |
@@ -68,15 +68,15 @@ The file [`requests.http`](requests.http) holds one ready-made request for every
 
 ## Native mode
 
-By default every target runs its tools directly on the host. The backing services (PostgreSQL and LocalStack) run in Docker; targets that need them start them through `ensure-deps` and `ensure-database` and never stop a service that already runs. To work without the containerised service:
+By default every target runs its tools directly on the host. The backing services (LocalStack and the Kafka broker) run in Docker; targets that need them start them through `ensure-deps`, which also runs `ensure-kafka`, and never stop a service that already runs. To work without the containerised service:
 
 ```bash
 make start-deps
-make migrate
+make ensure-kafka
 cargo run -p service -- serve
 ```
 
-The binary loads `.env` itself, so no wrapper is needed. `make start-deps` starts only the services named in `DEPS`.
+The binary loads `.env` itself, so no wrapper is needed. `make start-deps` starts only the services named in `DEPS`; `make ensure-kafka` starts the broker with the host listener that `.env` names (`localhost:9095`). The service has no database, so nothing has to be prepared before `serve`.
 
 ## Container mode
 
@@ -106,10 +106,10 @@ Two things carry the name.
 | Command | Effect |
 | --- | --- |
 | `make stop` | stops the development environment and keeps its containers |
-| `make down` | removes the containers and the network; the volumes (database, caches) are kept |
+| `make down` | removes the containers and the network; the volumes (LocalStack and Kafka data, build caches) are kept |
 | `make purge` | removes generated reports and load-test results; `make clean` is an alias |
 
-`make down` is the safe way to free the ports. To remove the data volumes as well, use Docker Compose directly, for example `docker compose down --volumes`; the target never does it, so a restart keeps your database.
+`make down` is the safe way to free the ports. To remove the data volumes as well, use Docker Compose directly, for example `docker compose down --volumes`; the target never does it, so a restart keeps the data of LocalStack and Kafka and the build caches.
 
 ## Next steps
 

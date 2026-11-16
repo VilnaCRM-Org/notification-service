@@ -140,13 +140,13 @@ A scenario is one script and one configuration entry; no runner needs an edit.
 
 Only the four budget values of the shipped configuration are protected in `config.json.dist`, and `utils/thresholdsBuilder.js` is protected as a file: run `make validate-configuration` when you change either.
 
-The assistant skill `load-testing` shows the same steps with the example resource as its illustration.
+The assistant skill `load-testing` lists the same steps, with the `health` scenario as its illustration.
 
 ## The isolated environment
 
-Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no database, LocalStack or broker port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). It also runs `load-test-publisher`, which writes the events of the `subscriptions` scenario to its broker from the start of the project to its removal. The development service on port 8081 is a debug build and keeps running next to it.
+Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no LocalStack or broker port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). It also runs `load-test-publisher`, which writes the events of the `subscriptions` scenario to its broker from the start of the project to its removal. The development service on port 8081 is a debug build and keeps running next to it.
 
-`scripts/with-load-test-stack.sh` builds the production image (unless `BUILD_IMAGE=0`), starts the project and waits until it is healthy, prepares the database, runs the given command with `API_HOST=localhost` and `API_PORT=$LOAD_TEST_APP_PORT`, and always removes the project with its volumes, also when the command fails. When the command fails (a crossed K6 threshold, a failed Schemathesis check), it prints a line with the exit status and the logs of the project, the service's included, to standard error before it removes the project, and exits with the status of the command. It exits with status 2 and prints the logs when the environment does not become healthy.
+`scripts/with-load-test-stack.sh` builds the production image (unless `BUILD_IMAGE=0`), starts the project and waits until it is healthy, runs the given command with `API_HOST=localhost` and `API_PORT=$LOAD_TEST_APP_PORT`, and always removes the project with its volumes, also when the command fails. When the command fails (a crossed K6 threshold, a failed Schemathesis check), it prints a line with the exit status and the logs of the project, the service's included, to standard error before it removes the project, and exits with the status of the command. It exits with status 2 and prints the logs when the environment does not become healthy.
 
 To test a service that already runs elsewhere, call the runners directly with `API_HOST` and `API_PORT` set; no environment is started then.
 
