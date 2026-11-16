@@ -45,6 +45,7 @@ This file replaces the run summary of the first plan.
 - Implementability review: one round, eighteen findings (I1 to I18: four blockers, nine major, five minor), applied after the semantics findings and keeping them. The main changes: the protected changes of the feature and the shortened `required_directories` became one maintainer pull request (story 3.1); the GraphQL catalog moved to story 2.4; the end-to-end world waits for readiness (story 3.8); `make ci` of the removal is judged after the documentation (story 5.2); `Adapters` holds trait objects; the domain manifest and `workspace.dsl` edges follow first use; `uuid::Uuid` with a 36-character check; the `event_type` fixture survives the removal; the frame wrapper is written by hand; the end-of-log behaviour of `StaticTopic` and a pacing adapter; a K6 fallback for the SSE check; `/opt/kafka/bin` paths. I6 was resolved differently, because S12 had already deleted the middleware it was about. `implementation-readiness.md` section 10 lists all 34 findings.
 - Contract checks after the review round: `verify-bundle.sh` printed nothing; the staging dry run exited 0 with six WOULD lines and its info line; a script confirmed the story structure and that every Depends on line names only earlier stories.
 - Alignment with the code: the bundle was aligned with the implemented stories 1.1 to 2.4 on 2026-11-15 (the deviations their implementers and verifiers recorded, written into `architecture.md` and `epics.md`).
+- Alignment with story 5.1 as built (2026-11-15): the two story 5.1 tables of "Protected Changes" in `architecture.md` and the scope list of story 5.1 in `epics.md` describe the two protected sub-patches as built, with the sceptic's corrected rows; the `.gitkeep` placeholders are recorded in the removal section of `architecture.md` and under "Open items".
 
 ## Changed story list
 
@@ -107,26 +108,41 @@ The rust-implementer agent never edits a protected path or the profile, and the 
    ```
 
    The feature branch then merges `main`, so its merge base holds the six changed lines (three added lines and one changed line in `architecture.toml`, two deleted lines in `protected-config.toml`); checks: `make.architecture`, `make.validate_configuration` with `CONFIG_CHANGE_APPROVED=true base_ref=main`.
-2. **Story 5.1, part A (code)**, operator session in pull request #5, also `approved-breaking-change`:
-   - `scripts/check-docs.sh`;
+2. **Story 5.1, part A (code)**, operator session in pull request #5, also `approved-breaking-change`; sub-patch part A (4 files), line numbers of `3cdb4f2`:
+   - `scripts/check-docs.sh:19-20`, `:36`, `:81`, `:453`;
    - `tests/CLI/bats/check_docs.bats:558`;
-   - the hash pin in `tests/CLI/bats/make_general.bats:81-94`;
-   - `tests/CLI/bats/make_quality_gates.bats:168-172`.
-3. **Story 5.1, part B (stack and gates)**, same session and pull request:
+   - the FR55(a) hunk of `tests/CLI/bats/make_general.bats:81-94` (pin `67eba235…a1e0`, title, comment and messages);
+   - `tests/CLI/bats/make_quality_gates.bats:168-172` (G6 with `KAFKA_TOPIC=..`).
+3. **Story 5.1, part B (stack and gates)**, same session and pull request; sub-patch part B (16 files, 3 of them deleted):
    - `protected-config.toml:32-33`;
    - delete `scripts/setup-test-db.sh` and `scripts/check-sqlx-metadata.sh`;
    - `make/gates.mk:14`;
-   - `scripts/with-load-test-stack.sh:52`, `:6-7`;
+   - `scripts/with-load-test-stack.sh:52`, `:7`;
    - delete `tests/CLI/bats/make_database.bats`;
-   - `make_tests.bats`, `make_general.bats` (`:61-66`, `:143`, `:583`), `make_execution_mode.bats`, `make_lifecycle.bats`, `make_load_tests.bats:108-140`, `make_security.bats`;
+   - `make_tests.bats`, the other three hunks of `make_general.bats` (`:58-68`, `:143`, `:583`), `make_execution_mode.bats`, `make_lifecycle.bats`, `make_load_tests.bats:108-141`, `make_security.bats`;
    - `make/tool-versions.mk:16`;
    - `.cargo/config.toml:5-6`;
-   - `architecture.toml:57` (`sqlx`);
+   - `architecture.toml:67` (`sqlx`);
    - `.claude/settings.json:31`, `:68`, `:93`;
    - the profile `.claude/rust-sdlc.yml`, regenerated as its own commit.
+
+   `make_general.bats` has hunks in both parts, so the protected patch is applied as these two sub-patches, not split by path; part A and then part B give the single patch byte for byte.
 4. **Story 5.2** changes no protected file but runs in the same operator session, because the plugin stages escalate once story 5.1 is on the branch; it carries the `make ci` criterion with `CONFIG_CHANGE_APPROVED=true BREAKING_CHANGE_APPROVED=true`.
 5. **Outside the repository:** if "Persistence query metadata" is a required check of the branch rules of `main` (never verified), the maintainer removes it (story 5.1 hand-off).
 6. **Secrets scan on the branch history:** the CI check "Secrets scan" fails on the history of the branch, because commit `924c56165aff59d1a3bbdcf4c381b4d5e156fe09` holds the RFC 6455 sample nonce as a `Sec-WebSocket-Key` in three test lines (`crates/service/src/http/origin/tests.rs:59`, `crates/service/src/http/router/tests.rs:771` and `:789`); commit `c83776e` replaced the value. The maintainer either accepts the three fingerprints in `.gitleaksignore` (protected, label `approved-config-change`; it can ride in the pull request of story 3.1) or allows a rewrite of the branch history. The diff of story 3.1 above does not change for this.
+
+## Open items
+
+1. **`.sqlx/` and `migrations/` stay as placeholders in pull request #5.** Story 3.1 was committed on the feature branch (`37acdfe`, `3cdb4f2`) and is not merged into `main`, and the configuration guard reads `required_directories` from `main`, which still lists `.sqlx` and `migrations`. So pull request #5 keeps both directories, each holding only a `.gitkeep`; every other file in them is deleted. A follow-up pull request deletes the two placeholders after #5 is merged; only then is the FR-31 clause "`migrations/` and `.sqlx/` do not exist" met. It belongs in the body of pull request #5 as well.
+
+## Epic 5 decisions that change the plan
+
+The orchestrator's decisions of 2026-11-15 for Epic 5 (the maintainer approved the whole plan; labels `approved-config-change` and `approved-breaking-change` on pull request #5). Those that change the plan:
+
+1. **`API_VERSION` 2.0.0.** `crates/service/src/openapi.rs` sets `API_VERSION` to `2.0.0`, because its doc comment asks for a major bump on an approved breaking change, and the removal of the example operations is one. The plan named no version.
+2. **`DEPS ?= localstack`.** The architecture assumption (architecture.md, assumption 16) is now a decision. The protected lines of part B (`make_general.bats:583`, `make_execution_mode.bats:136`) are written to that text, and the broker stays outside `DEPS`, started by `ensure-kafka`.
+3. **The `.gitkeep` placeholders.** `.sqlx/` and `migrations/` are emptied down to a `.gitkeep` each instead of deleted (open item 1).
+4. **The profile refresh as its own commit.** Pull request #5 gets four commits: part A (code, with sub-patch part A and the new `features/health_check.feature`), part B (stack and gates, with sub-patch part B), story 5.2 (documentation), then the refresh of `.claude/rust-sdlc.yml` on its own, after the documentation instead of inside story 5.1. The refresh may also change `architecture.bounded_contexts` (`company-subdomain/some-module` out, `notification/event-stream` in), which is accepted.
 
 ## Assumptions
 
