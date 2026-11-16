@@ -19,7 +19,7 @@ framework:
   openapi: true
   graphql: true
 persistence:
-  engine: postgresql
+  engine: null
   migrations_dir: 'migrations'
   offline_metadata: true
 architecture:
@@ -34,8 +34,8 @@ architecture:
     - 'e2e'
     - 'tooling'
   bounded_contexts:
-    - 'company-subdomain/some-module'
     - 'internal/health-check'
+    - 'notification/event-stream'
   shared_crates:
     - 'crates/shared/application'
     - 'crates/shared/domain'
@@ -83,12 +83,12 @@ make:
   tests_with_coverage: tests-with-coverage
   e2e_tests: e2e-tests
   mutation_tests_diff: mutation-tests-diff
-  setup_test_db: setup-test-db
-  create_migration: create-migration
-  migrate: migrate
-  migrate_rollback: migrate-rollback
-  sqlx_prepare: sqlx-prepare
-  validate_sqlx_metadata: validate-sqlx-metadata
+  setup_test_db: null
+  create_migration: null
+  migrate: null
+  migrate_rollback: null
+  sqlx_prepare: null
+  validate_sqlx_metadata: null
   generate_openapi_spec: generate-openapi-spec
   generate_graphql_spec: generate-graphql-spec
   validate_contract_snapshots: validate-contract-snapshots
@@ -139,7 +139,6 @@ ci:
     - 'Architecture boundaries'
     - 'Manifest and lock validation'
     - 'Crate isolation'
-    - 'Persistence query metadata'
     - 'Configuration check'
     - 'Dependency policy'
     - 'Unused dependencies'
