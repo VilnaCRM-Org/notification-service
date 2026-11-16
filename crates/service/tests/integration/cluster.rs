@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use serde_json::json;
 use service::background::Running;
 use service::bootstrap::{Adapters, Application, application};
-use service::cli::{DatabaseArgs, KafkaArgs, ServeArgs, StreamArgs};
+use service::cli::{KafkaArgs, ServeArgs, StreamArgs};
 use service::config::Config;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -15,20 +15,14 @@ use tokio::task::JoinHandle;
 use crate::broker::{TYPE, TestTopic, bootstrap_servers, envelope, envelope_id, envelopes};
 use crate::client::{Sse, envelope_ids, ids, local, status, subscription, wait_for};
 use crate::limit::{bounded, listen_on};
-use crate::support::DEAD_DATABASE_URL;
 
 /// The configuration of every node of a test: the topic and the broker, nothing about another
 /// node, and a keep-alive every second, which ends the read that shows that nothing follows the
-/// last expected event. The database and SQS are on port 1 and never reached (no request of these
-/// tests needs them).
+/// last expected event. SQS is on port 1 and never reached (no request of these tests needs it).
 fn config(topic: &str) -> Config {
     Config::from_args(ServeArgs {
         aws_region: Some("us-east-1".to_owned()),
         aws_endpoint_url_sqs: Some("http://127.0.0.1:1".to_owned()),
-        database: DatabaseArgs {
-            url: Some(DEAD_DATABASE_URL.to_owned()),
-            ..DatabaseArgs::default()
-        },
         event_types: Some(TYPE.to_owned()),
         kafka: KafkaArgs {
             bootstrap_servers: Some(bootstrap_servers()),
@@ -57,7 +51,7 @@ struct Node {
 impl Node {
     /// Wires a node from `config` with the production adapters, serves it and starts its tail.
     async fn start(config: &Config) -> Self {
-        let adapters = bounded(Box::pin(Adapters::connect(config))).await.unwrap();
+        let adapters = bounded(Box::pin(Adapters::connect(config))).await;
         let Application { router, background } = application(adapters, config).unwrap();
         let listener = listen_on(local(0)).await;
         let address = listener.local_addr().unwrap();

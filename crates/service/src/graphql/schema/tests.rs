@@ -5,15 +5,7 @@ use async_graphql::{Request, Response};
 
 use super::*;
 
-const EXPECTED_SDL: &str = r#""Input of the create mutation."
-input CreateExampleApiResourceInput {
-  "Description."
-  description: String!
-  "Name."
-  name: String!
-}
-
-"The status of the event stream on the answering instance; 64-bit values are decimal strings."
+const EXPECTED_SDL: &str = r#""The status of the event stream on the answering instance; 64-bit values are decimal strings."
 type EventStreamStatus {
   "Whether the last read of the topic watermarks succeeded."
   brokerReachable: Boolean!
@@ -47,37 +39,12 @@ type EventType {
   name: String!
 }
 
-"Template example resource."
-type ExampleApiResource {
-  "Description."
-  description: String!
-  "Identifier."
-  id: ID!
-  "Name."
-  name: String!
-}
-
-"Mutation root."
-type Mutation {
-  "Creates an example API resource."
-  createExampleApiResource(input: CreateExampleApiResourceInput!): ExampleApiResource!
-}
-
 "Query root."
 type Query {
   "Retrieves the status of the event stream on the answering instance."
   eventStreamStatus: EventStreamStatus!
   "Retrieves one page of the subscribable event types, in byte order of their names."
   eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!
-  "Retrieves an example API resource by id."
-  exampleApiResource(id: ID!): ExampleApiResource
-  "Retrieves one page of example API resources, newest first."
-  exampleApiResources(
-    "Number of items per page, from 1 to 100."
-    itemsPerPage: Int! = 30,
-    "Page number, from 1."
-    page: Int! = 1
-  ): [ExampleApiResource!]!
 }
 
 "Directs the executor to include this field or fragment only when the `if` argument is true."
@@ -86,7 +53,6 @@ directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
   query: Query
-  mutation: Mutation
 }
 "#;
 
@@ -96,19 +62,19 @@ fn the_sdl_is_the_documented_schema() {
 }
 
 #[test]
-fn the_sdl_has_the_five_operations_and_nothing_else_to_call() {
+fn the_sdl_has_the_two_queries_and_nothing_else_to_call() {
     let text = sdl();
 
     assert!(text.contains("eventStreamStatus: EventStreamStatus!"));
     assert!(text.contains("eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!"));
-    assert!(text.contains("exampleApiResource(id: ID!)"));
-    assert!(text.contains("exampleApiResources("));
-    assert!(text.contains("createExampleApiResource(input: CreateExampleApiResourceInput!)"));
     for absent in [
         "node",
         "Connection",
         "update",
         "delete",
+        "input ",
+        "type Mutation",
+        "mutation:",
         "type Subscription",
     ] {
         assert!(!text.contains(absent), "the SDL contains `{absent}`");
@@ -158,7 +124,7 @@ fn twenty_generations_are_byte_identical() {
 }
 
 #[tokio::test]
-async fn the_builder_gives_a_schema_with_the_two_roots() {
+async fn the_builder_gives_a_schema_with_a_query_root_and_no_mutation_root() {
     let schema: ApiSchema = builder().finish();
 
     let response = schema.execute(Request::new("{ query: __typename }")).await;
@@ -170,10 +136,14 @@ async fn the_builder_gives_a_schema_with_the_two_roots() {
         response.data.into_json().unwrap(),
         serde_json::json!({ "query": "Query" })
     );
-    assert_eq!(
-        mutation.data.into_json().unwrap(),
-        serde_json::json!({ "mutation": "Mutation" })
-    );
+    assert!(mutation.data.into_json().unwrap().is_null());
+    let mut messages: Vec<&str> = mutation
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    messages.dedup();
+    assert_eq!(messages, ["Schema is not configured for mutations."]);
 }
 
 /// Executes `query` on the bounded schema within five seconds.

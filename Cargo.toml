@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/company-subdomain/some-module/application",
-    "crates/company-subdomain/some-module/domain",
-    "crates/company-subdomain/some-module/infrastructure",
     "crates/internal/health-check/application",
     "crates/internal/health-check/domain",
     "crates/internal/health-check/infrastructure",
@@ -42,9 +39,6 @@ service = { path = "crates/service" }
 shared-application = { path = "crates/shared/application" }
 shared-domain = { path = "crates/shared/domain" }
 shared-infrastructure = { path = "crates/shared/infrastructure" }
-some-module-application = { path = "crates/company-subdomain/some-module/application" }
-some-module-domain = { path = "crates/company-subdomain/some-module/domain" }
-some-module-infrastructure = { path = "crates/company-subdomain/some-module/infrastructure" }
 test-support = { path = "tests/support" }
 
 # Runtime
@@ -68,14 +62,6 @@ moka = { version = "0.12.16", features = ["future"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
-sqlx = { version = "0.9.0", default-features = false, features = [
-    "runtime-tokio",
-    "tls-rustls-aws-lc-rs",
-    "postgres",
-    "macros",
-    "migrate",
-    "uuid",
-] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = [
     "macros",
@@ -98,7 +84,6 @@ validator = { version = "0.21.0", features = ["derive"] }
 # Tests
 aws-smithy-mocks = "0.3.0"
 cucumber = "0.23.0"
-fake = { version = "5.1.0", features = ["uuid"] }
 http-body-util = "0.1.5"
 proptest = "1.12.0"
 rand = "0.10.3"

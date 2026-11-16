@@ -11,19 +11,18 @@ use crate::broker::{
     Forwarder, TYPE, TestTopic, bootstrap_servers, envelope_id, envelopes, unique_name,
 };
 use crate::client::{Sse, envelope_ids, get, ids, local, status, subscription, wait_for};
-use crate::support::{Answer, DEAD_DATABASE_URL, Scratch, messages_of, serve};
+use crate::support::{Answer, Scratch, messages_of, serve};
 
 /// How long a test lets a starting node fail its rounds: about ten rounds with
 /// `KAFKA_RETRY_DELAY` 100 ms. A process has no paused time, and that a fault is logged once is
 /// only shown over rounds that fail, so the wait is bounded by its fixed length.
 const FAILED_ROUNDS: Duration = Duration::from_secs(1);
 
-/// The configuration of a served binary on `topic` through `bootstrap`: a database and SQS on
-/// port 1, which no request of these tests needs, one event type, short pauses after a failed
-/// round and a keep-alive every second.
+/// The configuration of a served binary on `topic` through `bootstrap`: SQS on port 1, which no
+/// request of these tests needs, one event type, short pauses after a failed round and a
+/// keep-alive every second.
 fn variables<'a>(bootstrap: &'a str, topic: &'a str) -> Vec<(&'a str, &'a str)> {
     vec![
-        ("DATABASE_URL", DEAD_DATABASE_URL),
         ("AWS_REGION", "us-east-1"),
         ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
         ("KAFKA_BOOTSTRAP_SERVERS", bootstrap),

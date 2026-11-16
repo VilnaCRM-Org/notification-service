@@ -11,25 +11,22 @@ use health_check_domain::{Dependency, HealthProbe};
 use test_support::clock::FixedClock;
 use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
-use test_support::repository::InMemoryExampleApiResourceRepository;
 use test_support::static_topic::StaticTopic;
 
 use crate::bootstrap::{Adapters, event_bus};
 
-/// Healthy probes of the database, the cache and the message broker, in that order.
+/// Healthy probes of the cache and the message broker, in that order.
 fn healthy_probes() -> Vec<Arc<dyn HealthProbe>> {
     vec![
-        Arc::new(StubProbe::healthy(Dependency::Database)),
         Arc::new(StubProbe::healthy(Dependency::Cache)),
         Arc::new(StubProbe::healthy(Dependency::MessageBroker)),
     ]
 }
 
-/// The adapters of a node on `topic`, whose tail reads through `tail`: healthy probes, the
-/// in-memory repository, a clock at the Unix epoch and identifiers counted from 1.
+/// The adapters of a node on `topic`, whose tail reads through `tail`: healthy probes, a clock at
+/// the Unix epoch and identifiers counted from 1.
 pub(crate) fn adapters_on(topic: &StaticTopic, tail: Box<dyn TopicTail>) -> Adapters {
     Adapters {
-        repository: Arc::new(InMemoryExampleApiResourceRepository::new()),
         probes: healthy_probes(),
         event_bus: event_bus(),
         clock: Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),

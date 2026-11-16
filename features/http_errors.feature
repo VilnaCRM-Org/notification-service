@@ -14,20 +14,20 @@ Feature: HTTP surface
     And the response header "content-type" should contain "application/problem+json"
 
   Scenario: Unsupported method
-    When DELETE request is sent to "/api/example_api_resources"
+    When DELETE request is sent to "/api/graphql"
     Then the response status code should be 405
     And the response header "allow" should contain "POST"
 
   Scenario: Unsupported media type
-    When POST request is sent to "/api/example_api_resources" with content type "text/plain" and body:
+    When POST request is sent to "/api/graphql" with content type "text/plain" and body:
       """
-      name=plain
+      { eventTypes { name } }
       """
     Then the response status code should be 415
     And the response header "content-type" should contain "application/problem+json"
 
   Scenario: Malformed JSON
-    When POST request is sent to "/api/example_api_resources" with body:
+    When POST request is sent to "/api/graphql" with body:
       """
       {not json
       """

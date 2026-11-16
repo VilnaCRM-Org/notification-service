@@ -12,17 +12,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// Every variable of a valid configuration that has no default: the database and the region.
-pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 2] = [
-    (
-        "DATABASE_URL",
-        "postgres://app:local-dev-only@127.0.0.1:5432/app",
-    ),
-    ("AWS_REGION", "us-east-1"),
-];
-
-/// URL that nothing listens on: the "unreachable database" case. No container is stopped.
-pub(crate) const DEAD_DATABASE_URL: &str = "postgres://app:unused@127.0.0.1:1/app";
+/// Every variable of a valid configuration that has no default: the region.
+pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 1] = [("AWS_REGION", "us-east-1")];
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
@@ -95,21 +86,6 @@ pub(crate) fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
 
-/// The URL of the database a `#[sqlx::test]` gave the test: its name from the server, the rest
-/// from `DATABASE_URL`.
-pub(crate) async fn database_url(pool: &sqlx::PgPool) -> String {
-    let name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await
-        .unwrap();
-    let base = from_environment("DATABASE_URL")
-        .expect("DATABASE_URL is not set; run the tests through `make`")
-        .into_string()
-        .unwrap();
-    let (server, _database) = base.rsplit_once('/').unwrap();
-    format!("{server}/{name}")
-}
-
 /// A listener on a free loopback port that accepts connections (the kernel does) and never
 /// answers: the peer connects and then waits.
 #[expect(
@@ -129,14 +105,12 @@ pub(crate) fn stack_variable(name: &str) -> String {
         .unwrap()
 }
 
-/// The variables that let `serve` start against the compose services: the AWS ones, the Kafka
-/// broker of the test stack (its topic `notifications` is the default) and the given database
-/// URL, with long budgets so that a request that must succeed does not depend on how fast a loaded
-/// machine opens its first connection (request > probe >= acquire and operation, as the
-/// configuration requires).
-pub(crate) fn stack_with(database_url: &str) -> Vec<(&'static str, String)> {
+/// The variables that let `serve` start against the compose services: the AWS ones and the Kafka
+/// broker of the test stack (its topic `notifications` is the default), with long budgets so that
+/// a request that must succeed does not depend on how fast a loaded machine opens its first
+/// connection (request > probe >= operation, as the configuration requires).
+pub(crate) fn stack() -> Vec<(&'static str, String)> {
     vec![
-        ("DATABASE_URL", database_url.to_owned()),
         ("AWS_REGION", stack_variable("AWS_REGION")),
         (
             "KAFKA_BOOTSTRAP_SERVERS",
@@ -151,7 +125,6 @@ pub(crate) fn stack_with(database_url: &str) -> Vec<(&'static str, String)> {
             "AWS_SECRET_ACCESS_KEY",
             stack_variable("AWS_SECRET_ACCESS_KEY"),
         ),
-        ("DATABASE_ACQUIRE_TIMEOUT", "30s".to_owned()),
         ("SQS_CONNECT_TIMEOUT", "10s".to_owned()),
         ("SQS_OPERATION_TIMEOUT", "30s".to_owned()),
         ("HEALTH_PROBE_TIMEOUT", "40s".to_owned()),
@@ -247,7 +220,7 @@ impl Finished {
 }
 
 /// Starts `service serve` on `127.0.0.1` with an ephemeral port and waits for its `listening`
-/// entry. `variables` complete the configuration (`DATABASE_URL`, `AWS_REGION`, ..).
+/// entry. `variables` complete the configuration (`AWS_REGION`, ..).
 pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
     let mut all = vec![("APP_PORT", "0"), ("APP_HOST", "127.0.0.1")];
     all.extend_from_slice(variables);

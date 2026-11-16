@@ -20,7 +20,6 @@ use service::telemetry;
 use test_support::clock::FixedClock;
 use test_support::id::SequenceUuidGenerator;
 use test_support::probe::StubProbe;
-use test_support::repository::InMemoryExampleApiResourceRepository;
 use test_support::static_topic::StaticTopic;
 use tower::ServiceExt as _;
 
@@ -49,7 +48,6 @@ fn config() -> Config {
         panic!("`serve` arguments expected");
     };
     args.aws_region = Some("us-east-1".to_owned());
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     Config::from_args(args).unwrap()
 }
 
@@ -59,8 +57,7 @@ async fn a_panic_is_one_json_line_with_the_request_id_and_a_500_problem() {
     let sink = output.clone();
     telemetry::init("info", move || sink.clone()).unwrap();
     let adapters = Adapters {
-        repository: Arc::new(InMemoryExampleApiResourceRepository::new()),
-        probes: vec![Arc::new(StubProbe::panicking(Dependency::Database))],
+        probes: vec![Arc::new(StubProbe::panicking(Dependency::Cache))],
         event_bus: event_bus(),
         clock: Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),
         uuid_generator: Arc::new(SequenceUuidGenerator::starting_at(1)),

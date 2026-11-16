@@ -4,20 +4,15 @@ use std::io::{Read as _, Write as _};
 use std::time::Duration;
 
 use serde_json::Value;
-use sqlx::{AssertSqlSafe, PgPool};
 use tokio::time::Instant;
 
-use crate::support::{
-    DEAD_DATABASE_URL, READINESS, Scratch, Server, VALID_ENVIRONMENT, database_url, messages_of,
-    serve, stack_with,
-};
+use crate::support::{READINESS, Scratch, Server, VALID_ENVIRONMENT, messages_of, serve, stack};
 
 const REQUEST_ID: &str = "serve-test-1";
 
-/// The configuration of a service that starts but whose dependencies do not answer: the database,
-/// SQS and the Kafka broker on port 1, where nothing listens.
-const DEAD_DEPENDENCIES: [(&str, &str); 4] = [
-    ("DATABASE_URL", DEAD_DATABASE_URL),
+/// The configuration of a service that starts but whose dependencies do not answer: SQS and the
+/// Kafka broker on port 1, where nothing listens.
+const DEAD_DEPENDENCIES: [(&str, &str); 3] = [
     ("AWS_REGION", "us-east-1"),
     ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
     ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
@@ -54,22 +49,21 @@ fn as_pairs<'a>(owned: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a s
         .collect()
 }
 
-#[sqlx::test(migrator = "shared_infrastructure::persistence::MIGRATOR")]
-async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) {
+#[tokio::test]
+async fn a_request_sequence_is_logged_as_json_with_the_request_id() {
     let scratch = Scratch::new();
-    let url = database_url(&pool).await;
-    let owned = stack_with(&url);
+    let owned = stack();
     let server = serve(&scratch, &as_pairs(&owned));
     server.wait_until_ready().await;
     let headers = [
         ("x-request-id", REQUEST_ID),
         ("content-type", "application/json"),
     ];
-    let body = r#"{"name":"Serve test","description":"Created through the spawned binary"}"#;
+    let body = r#"{"query":"{ eventTypes { name } }"}"#;
 
     let ping = server.request("GET", "/ping", &headers, "");
     let health = server.request("GET", "/api/health", &headers, "");
-    let created = server.request("POST", "/api/example_api_resources", &headers, body);
+    let graphql = server.request("POST", "/api/graphql", &headers, body);
     let unknown = server.request("GET", "/no-such-route", &headers, "");
     let finished = server.terminate();
 
@@ -80,7 +74,12 @@ async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) 
         "{}",
         ping.head
     );
-    assert_eq!(created.status, 201, "{}", created.body);
+    assert_eq!(graphql.status, 200, "{}", graphql.body);
+    assert!(
+        graphql.body.contains(r#""eventTypes":[]"#),
+        "{}",
+        graphql.body
+    );
     assert_eq!(unknown.status, 404);
     assert_eq!(finished.code, Some(0));
     assert_eq!(finished.stderr, "");
@@ -117,7 +116,6 @@ async fn a_request_sequence_is_logged_as_json_with_the_request_id(pool: PgPool) 
         .filter(|line| !waits_for_readiness(line))
         .count();
     assert_eq!(completed, 4);
-    assert_eq!(messages_of(&finished.lines, "domain event").len(), 1);
 }
 
 #[test]
@@ -293,7 +291,7 @@ fn an_invalid_variable_is_one_json_entry_per_problem_and_exit_status_2() {
     let scratch = Scratch::new();
     let variables = [
         ("APP_PORT", "eighty"),
-        ("DATABASE_URL", "mysql://root:hunter2@db/app"),
+        ("AWS_ENDPOINT_URL_SQS", "ftp://root:hunter2@sqs/queue"),
     ];
 
     let output = scratch.run(&["serve"], &variables);
@@ -309,7 +307,7 @@ fn an_invalid_variable_is_one_json_entry_per_problem_and_exit_status_2() {
         .iter()
         .map(|line| line["variable"].as_str().unwrap())
         .collect();
-    assert_eq!(named, ["APP_PORT", "DATABASE_URL", "AWS_REGION"]);
+    assert_eq!(named, ["APP_PORT", "AWS_REGION", "AWS_ENDPOINT_URL_SQS"]);
     for line in &lines {
         assert_eq!(line["message"], "invalid configuration");
         assert_eq!(line["level"], "ERROR");
@@ -339,7 +337,6 @@ fn unreachable_dependencies_do_not_stop_ping_and_health_names_them() {
     assert!(ping_after < Duration::from_secs(5), "{ping_after:?}");
     assert_eq!(health.status, 500);
     assert!(probe_took < Duration::from_secs(4), "{probe_took:?}");
-    assert!(health.body.contains("Database"), "{}", health.body);
     assert!(health.body.contains("Message broker"), "{}", health.body);
     assert!(
         health.body.contains("Event stream is not ready"),
@@ -351,54 +348,34 @@ fn unreachable_dependencies_do_not_stop_ping_and_health_names_them() {
 }
 
 #[test]
-fn the_database_url_and_credentials_are_never_logged() {
+fn the_credentials_are_never_logged() {
     let scratch = Scratch::new();
     let mut variables = VALID_ENVIRONMENT.to_vec();
-    variables.push(("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"));
-    variables[0] = ("DATABASE_URL", "postgres://app:s3cret-pass@127.0.0.1:1/app");
-    let server = serve(&scratch, &variables);
+    variables.extend([
+        ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
+        ("AWS_ACCESS_KEY_ID", "reader"),
+        ("AWS_SECRET_ACCESS_KEY", "s3cret-pass"),
+        ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
+        ("KAFKA_SECURITY_PROTOCOL", "sasl_plaintext"),
+        ("KAFKA_SASL_MECHANISM", "PLAIN"),
+        ("KAFKA_SASL_USERNAME", "reader"),
+        ("KAFKA_SASL_PASSWORD", "s3cret-kafka"),
+    ]);
+    let mut server = serve(&scratch, &variables);
+    server.read_until("event topic unreachable");
     let _answer = server.get("/api/health");
 
     let finished = server.terminate();
 
     let text = serde_json::to_string(&finished.lines).unwrap();
     assert!(!text.contains("s3cret-pass"), "{text}");
+    assert!(!text.contains("s3cret-kafka"), "{text}");
 }
 
-#[sqlx::test(migrations = false)]
-async fn serve_applies_no_migration_to_a_database_that_was_never_migrated(pool: PgPool) {
+#[tokio::test]
+async fn entries_inside_nested_spans_carry_the_request_id() {
     let scratch = Scratch::new();
-    let url = database_url(&pool).await;
-    let owned = stack_with(&url);
-    let server = serve(&scratch, &as_pairs(&owned));
-
-    let ping = server.get("/ping");
-    let list = server.get("/api/example_api_resources");
-    let finished = server.terminate();
-
-    assert_eq!(ping.status, 200);
-    assert_eq!(list.status, 500, "{}", list.body);
-    assert!(
-        list.head.contains("content-type: application/problem+json"),
-        "{}",
-        list.head
-    );
-    assert_eq!(finished.code, Some(0));
-    for table in ["example_api_resources", "_sqlx_migrations"] {
-        let found: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
-            .bind(table)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(found, None, "{table}");
-    }
-}
-
-#[sqlx::test(migrations = false)]
-async fn entries_inside_nested_spans_carry_the_request_id(pool: PgPool) {
-    let scratch = Scratch::new();
-    let url = database_url(&pool).await;
-    let mut owned = stack_with(&url);
+    let mut owned = stack();
     owned.push(("LOG_LEVEL", "debug".to_owned()));
     let server = serve(&scratch, &as_pairs(&owned));
     server.wait_until_ready().await;
@@ -437,59 +414,4 @@ async fn entries_inside_nested_spans_carry_the_request_id(pool: PgPool) {
         assert_eq!(line["spans"][0]["name"], "http.request", "{line}");
         assert_eq!(line["spans"][0]["request_id"], REQUEST_ID, "{line}");
     }
-}
-
-/// Asks `/api/health` until it answers 204 or `limit` has passed, and returns the last answer.
-fn health_within(server: &Server, limit: Duration) -> crate::support::Answer {
-    let started = Instant::now();
-    loop {
-        let answer = server.get("/api/health");
-        if answer.status == 204 || started.elapsed() >= limit {
-            return answer;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
-#[sqlx::test(migrations = false)]
-async fn health_recovers_without_a_restart_when_the_database_comes_back(pool: PgPool) {
-    let scratch = Scratch::new();
-    let current = database_url(&pool).await;
-    let (server_url, name) = current.rsplit_once('/').unwrap();
-    // A name of the same length as the unique one the test server gave this test (PostgreSQL
-    // truncates names to 63 bytes), derived from it and never from input.
-    let missing = name.replacen("_sqlx_test_", "_recovered_", 1);
-    assert_ne!(missing, name);
-    let mut owned = stack_with(&format!("{server_url}/{missing}"));
-    let acquire_timeout = Duration::from_secs(30);
-    owned.retain(|(variable, _)| *variable != "DATABASE_ACQUIRE_TIMEOUT");
-    owned.push((
-        "DATABASE_ACQUIRE_TIMEOUT",
-        format!("{}s", acquire_timeout.as_secs()),
-    ));
-    let server = serve(&scratch, &as_pairs(&owned));
-    server.wait_until_ready().await;
-
-    let outage = server.get("/api/health");
-    sqlx::query(AssertSqlSafe(format!(r#"CREATE DATABASE "{missing}""#)))
-        .execute(&pool)
-        .await
-        .unwrap();
-    let recovered = health_within(
-        &server,
-        acquire_timeout.saturating_add(Duration::from_secs(1)),
-    );
-    let finished = server.terminate();
-    sqlx::query(AssertSqlSafe(format!(
-        r#"DROP DATABASE "{missing}" WITH (FORCE)"#
-    )))
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(outage.status, 500, "{}", outage.body);
-    let problem: Value = serde_json::from_str(&outage.body).unwrap();
-    assert_eq!(problem["detail"], "Database is not available", "{problem}");
-    assert_eq!(recovered.status, 204, "{}", recovered.body);
-    assert_eq!(finished.code, Some(0));
 }

@@ -407,9 +407,9 @@ template_owned_files_kept_out_of_sync() {
   printf '*Cargo.toml\n' >>"${tmp}/pattern"
   run template_owned_files_kept_out_of_sync "${tmp}/pattern"
   assert_success
-  assert_line 'crates/shared/infrastructure/Cargo.toml'
+  assert_line 'crates/shared/domain/Cargo.toml'
   assert_line 'xtask/Cargo.toml'
-  assert_line 'crates/internal/health-check/infrastructure/Cargo.toml'
+  assert_line 'crates/internal/health-check/domain/Cargo.toml'
   refute_line 'crates/service/Cargo.toml'
   refute_line 'Cargo.toml'
   refute_line "crates/company""-subdomain/some""-module/domain/Cargo.toml"
@@ -417,10 +417,10 @@ template_owned_files_kept_out_of_sync() {
   printf 'crates/shared/\n' >>"${tmp}/directory"
   run template_owned_files_kept_out_of_sync "${tmp}/directory"
   assert_success
-  assert_line 'crates/shared/infrastructure/Cargo.toml'
+  assert_line 'crates/shared/domain/Cargo.toml'
   assert_line 'crates/shared/infrastructure/src/cache.rs'
   cp .templatesyncignore "${tmp}/named"
-  printf 'crates/shared/infrastructure/Cargo.toml\ncrates/shared/infrastructure/src/cache.rs\n' >>"${tmp}/named"
+  printf 'crates/shared/domain/Cargo.toml\ncrates/shared/infrastructure/src/cache.rs\n' >>"${tmp}/named"
   run template_owned_files_kept_out_of_sync "${tmp}/named"
   assert_success
   assert_output ''

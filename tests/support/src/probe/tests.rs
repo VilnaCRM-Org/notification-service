@@ -13,21 +13,21 @@ fn a_probe_reports_its_dependency() {
         Dependency::Cache
     );
     assert_eq!(
-        StubProbe::failing(Dependency::Database).dependency(),
-        Dependency::Database
+        StubProbe::failing(Dependency::EventStream).dependency(),
+        Dependency::EventStream
     );
 }
 
 #[test]
 fn the_healthy_probe_succeeds() {
-    let probe = StubProbe::healthy(Dependency::Database);
+    let probe = StubProbe::healthy(Dependency::Cache);
 
     assert!(block_on(probe.check()).is_ok());
 }
 
 #[test]
 fn the_failing_probe_returns_an_error() {
-    let probe = StubProbe::failing(Dependency::Database);
+    let probe = StubProbe::failing(Dependency::Cache);
 
     assert_eq!(
         block_on(probe.check()).unwrap_err().to_string(),

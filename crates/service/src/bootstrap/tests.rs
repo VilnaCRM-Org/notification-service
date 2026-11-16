@@ -12,17 +12,11 @@ use health_check_domain::Dependency;
 use health_check_infrastructure::CacheProbe;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
-use shared_domain::EventBus;
-use shared_infrastructure::bus::{InMemoryCommandBus, InMemoryQueryBus};
-use some_module_application::{CreateExampleApiResourceHandler, GetExampleApiResourceHandler};
-use some_module_domain::ExampleApiResourceRepository;
-use test_support::bus::RecordingEventBus;
+use shared_infrastructure::bus::InMemoryQueryBus;
 use test_support::cache::StubCache;
-use test_support::clock::{FixedClock, SettableClock};
-use test_support::id::SequenceUuidGenerator;
+use test_support::clock::SettableClock;
 use test_support::log::{LogLine, LogRecorder};
 use test_support::probe::StubProbe;
-use test_support::repository::InMemoryExampleApiResourceRepository;
 use test_support::static_topic::StaticTopic;
 use test_support::topic::{
     ProbeCall, ScriptedTopicProbe, ScriptedTopicReplay, ScriptedTopicTail, TailCall,
@@ -31,14 +25,10 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt as _;
 
 use self::wiring::{adapters_on, paced_on, record};
-use super::{
-    Adapters, BootstrapError, application, event_bus, register_commands, register_queries, router,
-};
+use super::{Adapters, BootstrapError, application, register_queries, router};
 use crate::background::Running;
 use crate::cli::ServeArgs;
 use crate::config::Config;
-
-const FIRST_ID: &str = "00000000-0000-7000-8000-000000000001";
 
 /// The bound of every awaited call of a test that is not a single request.
 const LIMIT: Duration = Duration::from_secs(10);
@@ -59,12 +49,11 @@ impl Answer {
 }
 
 fn config(app_env: &str) -> Config {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
         aws_region: Some("us-east-1".to_owned()),
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     Config::from_args(args).unwrap()
 }
 
@@ -252,13 +241,6 @@ fn post(path: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
-fn create() -> Request<Body> {
-    post(
-        "/api/example_api_resources",
-        r#"{"name":"Name","description":"Description"}"#,
-    )
-}
-
 fn graphql(query: &str) -> Request<Body> {
     post(
         "/api/graphql",
@@ -267,31 +249,19 @@ fn graphql(query: &str) -> Request<Body> {
 }
 
 #[tokio::test(start_paused = true)]
-async fn every_handler_subscriber_and_probe_is_registered() {
+async fn every_handler_and_probe_is_registered() {
     let (app, running) = ready(paced()).await;
 
-    let created = send(&app, create()).await;
-    assert_eq!(created.status, StatusCode::CREATED);
-    let id = created.json()["id"].as_str().unwrap().to_owned();
-    let one = send(&app, get(&format!("/api/example_api_resources/{id}"))).await;
-    assert_eq!(one.status, StatusCode::OK);
-    assert_eq!(one.json()["name"], "Name");
-    let list = send(&app, get("/api/example_api_resources")).await;
-    assert_eq!(list.status, StatusCode::OK);
-    assert_eq!(list.json().as_array().unwrap().len(), 1);
-
-    let mutation = graphql(
-        r#"mutation { createExampleApiResource(input: {name: "G", description: "D"}) { id name } }"#,
+    let event_types = send(&app, get("/api/event-types")).await;
+    assert_eq!(event_types.status, StatusCode::OK);
+    assert_eq!(event_types.body, "[]");
+    let query = graphql("{ eventTypes { name } eventStreamStatus { state } }");
+    let answer = send(&app, query).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.json(),
+        serde_json::json!({"data": {"eventTypes": [], "eventStreamStatus": {"state": "ready"}}})
     );
-    let query_one = graphql(&format!(
-        r#"{{ exampleApiResource(id: "{id}") {{ id name }} }}"#
-    ));
-    let query_list = graphql("{ exampleApiResources { id name } }");
-    for request in [mutation, query_one, query_list] {
-        let answer = send(&app, request).await;
-        assert_eq!(answer.status, StatusCode::OK);
-        assert!(answer.json().get("errors").is_none(), "{}", answer.body);
-    }
 
     let health = send(&app, get("/api/health")).await;
     assert_eq!(health.status, StatusCode::NO_CONTENT);
@@ -305,7 +275,6 @@ async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
     let (recorder, _guard) = LogRecorder::install();
     let mut adapters = adapters();
     adapters.probes = vec![
-        Arc::new(StubProbe::failing(Dependency::Database)),
         Arc::new(StubProbe::failing(Dependency::Cache)),
         Arc::new(StubProbe::failing(Dependency::MessageBroker)),
     ];
@@ -316,7 +285,6 @@ async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
     assert_eq!(
         answer.json()["failures"],
         serde_json::json!([
-            {"dependency": "database", "message": "Database is not available"},
             {"dependency": "cache", "message": "Cache is not working"},
             {"dependency": "message_broker", "message": "Message broker is not available"},
             {"dependency": "event_stream", "message": "Event stream is not ready"}
@@ -326,22 +294,17 @@ async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
     let dependencies: Vec<_> = failed.iter().map(|line| line.field("dependency")).collect();
     assert_eq!(
         dependencies,
-        [
-            Some("database"),
-            Some("cache"),
-            Some("message_broker"),
-            Some("event_stream")
-        ]
+        [Some("cache"), Some("message_broker"), Some("event_stream")]
     );
     assert_eq!(
-        failed[3].field("cause"),
+        failed[2].field("cause"),
         Some("probe failed: the node is starting")
     );
 }
 
 #[tokio::test]
 async fn the_configured_retry_delay_reaches_the_background() {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         aws_region: Some("us-east-1".to_owned()),
         kafka: crate::cli::KafkaArgs {
             retry_delay: Some("2500ms".to_owned()),
@@ -349,7 +312,6 @@ async fn the_configured_retry_delay_reaches_the_background() {
         },
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
 
     let application = application(adapters(), &Config::from_args(args).unwrap()).unwrap();
 
@@ -590,41 +552,14 @@ async fn the_window_keeps_the_newest_events_that_fit_its_byte_bound() {
 }
 
 #[tokio::test]
-async fn a_created_resource_is_audited_by_the_registered_subscriber() {
-    let (recorder, _guard) = LogRecorder::install();
-    let app = app(adapters());
-
-    let created = send(&app, create()).await;
-
-    assert_eq!(created.status, StatusCode::CREATED);
-    let audit: Vec<_> = recorder
-        .lines()
-        .into_iter()
-        .filter(|line| line.target == "audit")
-        .collect();
-    assert_eq!(audit.len(), 1);
-    assert_eq!(audit[0].field("aggregate_id"), Some(FIRST_ID));
-}
-
-#[tokio::test]
-async fn a_replaced_repository_serves_the_requests() {
-    let mut adapters = adapters();
-    adapters.repository = Arc::new(InMemoryExampleApiResourceRepository::failing());
-
-    let answer = send(&app(adapters), create()).await;
-
-    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
-}
-
-#[tokio::test]
 async fn a_replaced_probe_decides_the_health_answer() {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::failing(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::failing(Dependency::MessageBroker)));
 
     let answer = send(&app(adapters), get("/api/health")).await;
 
     assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
-        answer.body.contains("Database is not available"),
+        answer.body.contains("Message broker is not available"),
         "{}",
         answer.body
     );
@@ -649,72 +584,9 @@ async fn a_failing_cache_behind_the_cache_probe_is_reported() {
         answer.body
     );
     assert!(
-        !answer.body.contains("Database is not available"),
+        !answer.body.contains("Message broker is not available"),
         "{}",
         answer.body
-    );
-}
-
-#[tokio::test]
-async fn a_replaced_event_bus_receives_the_event() {
-    let recording = Arc::new(RecordingEventBus::new());
-    let mut adapters = adapters();
-    adapters.event_bus = {
-        let port: Arc<dyn EventBus> = Arc::<RecordingEventBus>::clone(&recording);
-        port
-    };
-
-    let answer = send(&app(adapters), create()).await;
-
-    assert_eq!(answer.status, StatusCode::CREATED);
-    let published = recording.published();
-    assert_eq!(published.len(), 1);
-    assert_eq!(published[0].aggregate_id.to_string(), FIRST_ID);
-}
-
-#[tokio::test]
-async fn a_failing_event_bus_does_not_fail_the_create_request() {
-    let mut adapters = adapters();
-    adapters.event_bus = Arc::new(RecordingEventBus::failing());
-
-    let answer = send(&app(adapters), create()).await;
-
-    assert_eq!(answer.status, StatusCode::CREATED);
-    assert_eq!(answer.json()["id"], FIRST_ID);
-}
-
-#[tokio::test]
-async fn a_replaced_clock_stamps_the_event() {
-    let (recorder, _guard) = LogRecorder::install();
-    let moment = SystemTime::UNIX_EPOCH
-        .checked_add(Duration::from_secs(1_700_000_000))
-        .unwrap();
-    let mut adapters = adapters();
-    adapters.clock = Arc::new(FixedClock::at(moment));
-
-    let answer = send(&app(adapters), create()).await;
-
-    assert_eq!(answer.status, StatusCode::CREATED);
-    let lines = recorder.lines();
-    let audit = lines.iter().find(|line| line.target == "audit").unwrap();
-    assert_eq!(
-        audit.field("occurred_at"),
-        Some("2023-11-14T22:13:20.000000Z")
-    );
-}
-
-#[tokio::test]
-async fn a_replaced_uuid_generator_chooses_the_identifier() {
-    let mut adapters = adapters();
-    adapters.uuid_generator = Arc::new(SequenceUuidGenerator::starting_at(42));
-
-    let answer = send(&app(adapters), create()).await;
-
-    assert_eq!(answer.status, StatusCode::CREATED);
-    assert_eq!(answer.json()["id"], "00000000-0000-7000-8000-00000000002a");
-    assert_eq!(
-        answer.headers[header::LOCATION],
-        "/api/example_api_resources/00000000-0000-7000-8000-00000000002a"
     );
 }
 
@@ -727,14 +599,7 @@ async fn with_probe_keeps_the_order_and_the_other_probes() {
         .iter()
         .map(|probe| probe.dependency())
         .collect();
-    assert_eq!(
-        dependencies,
-        [
-            Dependency::Database,
-            Dependency::Cache,
-            Dependency::MessageBroker
-        ]
-    );
+    assert_eq!(dependencies, [Dependency::Cache, Dependency::MessageBroker]);
     let outcomes: Vec<_> = {
         let mut outcomes = Vec::new();
         for probe in &adapters.probes {
@@ -742,58 +607,7 @@ async fn with_probe_keeps_the_order_and_the_other_probes() {
         }
         outcomes
     };
-    assert_eq!(outcomes, [true, false, true]);
-}
-
-fn create_handler(
-    repository: &Arc<dyn ExampleApiResourceRepository>,
-) -> CreateExampleApiResourceHandler {
-    CreateExampleApiResourceHandler::new(
-        Arc::clone(repository),
-        event_bus(),
-        Arc::new(FixedClock::at(SystemTime::UNIX_EPOCH)),
-        Arc::new(SequenceUuidGenerator::starting_at(1)),
-    )
-}
-
-fn repository() -> Arc<dyn ExampleApiResourceRepository> {
-    Arc::new(InMemoryExampleApiResourceRepository::new())
-}
-
-#[test]
-fn a_second_command_handler_is_a_duplicate_that_names_the_message() {
-    let repository = repository();
-    let bus = register_commands(InMemoryCommandBus::new(), create_handler(&repository)).unwrap();
-
-    let error = register_commands(bus, create_handler(&repository)).unwrap_err();
-
-    assert!(
-        matches!(error, BootstrapError::DuplicateHandler(_)),
-        "{error:?}"
-    );
-    assert!(
-        error.to_string().contains("CreateExampleApiResource"),
-        "{error}"
-    );
-}
-
-#[test]
-fn a_second_query_handler_is_a_duplicate_that_names_the_message() {
-    let repository = repository();
-    let bus = InMemoryQueryBus::new()
-        .register(GetExampleApiResourceHandler::new(Arc::clone(&repository)))
-        .unwrap();
-
-    let error = register_queries(bus, &repository, &EventCatalog::default()).unwrap_err();
-
-    assert!(
-        matches!(error, BootstrapError::DuplicateHandler(_)),
-        "{error:?}"
-    );
-    assert!(
-        error.to_string().contains("GetExampleApiResource"),
-        "{error}"
-    );
+    assert_eq!(outcomes, [false, true]);
 }
 
 #[test]
@@ -804,7 +618,7 @@ fn a_second_event_type_handler_is_a_duplicate_that_names_the_message() {
         ))
         .unwrap();
 
-    let error = register_queries(bus, &repository(), &EventCatalog::default()).unwrap_err();
+    let error = register_queries(bus, &EventCatalog::default()).unwrap_err();
 
     assert!(
         matches!(error, BootstrapError::DuplicateHandler(_)),
@@ -815,12 +629,11 @@ fn a_second_event_type_handler_is_a_duplicate_that_names_the_message() {
 
 #[tokio::test]
 async fn the_event_catalog_of_the_configuration_is_served() {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         aws_region: Some("us-east-1".to_owned()),
         event_types: Some("user.created,order.paid,order.paid".to_owned()),
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     let app = router(adapters(), &Config::from_args(args).unwrap()).unwrap();
 
     let answer = send(&app, get("/api/event-types")).await;
@@ -868,12 +681,11 @@ async fn the_status_of_a_node_without_a_tail_is_starting_and_catching_up() {
 
 #[tokio::test]
 async fn the_graphql_schema_carries_the_event_stream_state() {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         aws_region: Some("us-east-1".to_owned()),
         event_types: Some("user.created,order.paid,user.deleted".to_owned()),
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     let app = router(adapters(), &Config::from_args(args).unwrap()).unwrap();
 
     let answer = send(
@@ -895,16 +707,6 @@ async fn the_graphql_schema_carries_the_event_stream_state() {
             }
         })
     );
-}
-
-#[test]
-fn the_database_error_keeps_its_message_and_source() {
-    let source = sqlx::Error::Configuration("bad url".into());
-
-    let error = BootstrapError::from(source);
-
-    assert_eq!(error.to_string(), "invalid database settings");
-    assert!(std::error::Error::source(&error).is_some());
 }
 
 #[tokio::test]

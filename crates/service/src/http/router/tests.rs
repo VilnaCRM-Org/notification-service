@@ -19,8 +19,6 @@ use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
 use crate::http::security_headers::DEFAULT_CONTENT_SECURITY_POLICY;
 use tower::ServiceExt as _;
 
-const MISSING_ID: &str = "00000000-0000-7000-8000-0000000000ff";
-
 /// Method, path, body, expected status and expected content security policy.
 type Route<'a> = (Method, String, Option<&'a str>, StatusCode, &'a str);
 
@@ -31,12 +29,11 @@ struct Answer {
 }
 
 fn config(app_env: &str) -> Config {
-    let mut args = ServeArgs {
+    let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
         aws_region: Some("us-east-1".to_owned()),
         ..ServeArgs::default()
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     Config::from_args(args).unwrap()
 }
 
@@ -89,27 +86,25 @@ fn assert_common_headers(answer: &Answer, policy: &str, route: &str) {
 
 #[tokio::test]
 async fn every_route_carries_the_request_id_and_the_security_headers() {
-    let graphql = r#"{"query":"{ exampleApiResources { id } }"}"#;
-    let create = r#"{"name":"Name","description":"Description"}"#;
-    let resource = format!("/api/example_api_resources/{MISSING_ID}");
+    let graphql = r#"{"query":"{ eventTypes { name } }"}"#;
     let routes: Vec<Route<'_>> = vec![
         (
-            Method::POST,
-            "/api/example_api_resources".into(),
-            Some(create),
-            StatusCode::CREATED,
-            DEFAULT_CONTENT_SECURITY_POLICY,
-        ),
-        (
             Method::GET,
-            resource,
+            "/api/event-types".into(),
             None,
-            StatusCode::NOT_FOUND,
+            StatusCode::OK,
             DEFAULT_CONTENT_SECURITY_POLICY,
         ),
         (
             Method::GET,
-            "/api/example_api_resources".into(),
+            "/api/event-types?page=0".into(),
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            DEFAULT_CONTENT_SECURITY_POLICY,
+        ),
+        (
+            Method::GET,
+            "/api/events/status".into(),
             None,
             StatusCode::OK,
             DEFAULT_CONTENT_SECURITY_POLICY,
@@ -188,7 +183,7 @@ async fn every_route_carries_the_request_id_and_the_security_headers() {
         ),
         (
             Method::DELETE,
-            "/api/example_api_resources".into(),
+            "/api/event-types".into(),
             None,
             StatusCode::METHOD_NOT_ALLOWED,
             DEFAULT_CONTENT_SECURITY_POLICY,
@@ -219,11 +214,7 @@ async fn an_unknown_route_is_the_404_problem() {
 
 #[tokio::test]
 async fn a_wrong_method_is_the_405_problem_with_the_allowed_methods() {
-    let answer = send(
-        "test",
-        request(Method::DELETE, "/api/example_api_resources", None),
-    )
-    .await;
+    let answer = send("test", request(Method::DELETE, "/api/event-types", None)).await;
 
     assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED);
     assert_eq!(
@@ -237,14 +228,14 @@ async fn a_wrong_method_is_the_405_problem_with_the_allowed_methods() {
         .map(str::trim)
         .collect();
     allowed.sort_unstable();
-    assert_eq!(allowed, ["GET", "HEAD", "POST"]);
+    assert_eq!(allowed, ["GET", "HEAD"]);
     let body: Value = serde_json::from_str(&answer.body).unwrap();
     assert_eq!(body["status"], 405);
 }
 
 #[tokio::test]
 async fn a_panicking_probe_is_the_bare_500_problem() {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Cache)));
     let app = router(adapters, &config("test")).unwrap();
 
     let answer = send_to(&app, request(Method::GET, "/api/health", None)).await;
@@ -266,13 +257,12 @@ async fn a_body_over_the_limit_is_the_413_problem() {
     let mut config = config("test");
     config.max_body_bytes = 1024;
     let app = router(adapters(), &config).unwrap();
-    let body = format!(r#"{{"name":"{}","description":"d"}}"#, "x".repeat(2048));
+    let body = format!(
+        r#"{{"query":"{{ eventTypes {{ name }} }}","padding":"{}"}}"#,
+        "x".repeat(2048)
+    );
 
-    let answer = send_to(
-        &app,
-        request(Method::POST, "/api/example_api_resources", Some(&body)),
-    )
-    .await;
+    let answer = send_to(&app, request(Method::POST, "/api/graphql", Some(&body))).await;
 
     assert_eq!(answer.status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(
@@ -287,7 +277,7 @@ async fn a_request_over_its_budget_is_the_503_problem() {
     let mut config = config("test");
     config.request_timeout = Duration::from_secs(1);
     config.health_probe_timeout = Duration::from_secs(60);
-    let adapters = adapters().with_probe(Arc::new(StubProbe::hanging(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::hanging(Dependency::Cache)));
     let app = router(adapters, &config).unwrap();
 
     let answer = send_to(&app, request(Method::GET, "/api/health", None)).await;
@@ -333,12 +323,13 @@ async fn the_other_routes_behave_the_same_in_every_mode() {
     let probes = [
         (Method::GET, "/ping", None),
         (Method::GET, "/api/health", None),
-        (Method::GET, "/api/example_api_resources", None),
+        (Method::GET, "/api/event-types", None),
+        (Method::GET, "/api/events/status", None),
         (Method::GET, "/api/unknown", None),
         (
             Method::POST,
             "/api/graphql",
-            Some(r#"{"query":"{ exampleApiResources { id } }"}"#),
+            Some(r#"{"query":"{ eventTypes { name } }"}"#),
         ),
     ];
     for (method, path, body) in probes {
@@ -374,7 +365,7 @@ async fn no_response_is_compressed_and_no_other_protocol_is_advertised() {
     let app = router(adapters(), &config("test")).unwrap();
     for path in [
         "/ping",
-        "/api/example_api_resources",
+        "/api/event-types",
         "/api/docs/swagger-ui-bundle.js",
         "/api/unknown",
     ] {
@@ -573,7 +564,7 @@ fn answers_of_every_kind() -> Vec<(Method, &'static str, Option<&'static str>, S
         (
             Method::POST,
             "/api/graphql",
-            Some(r#"{"query":"{ exampleApiResources { id } }"}"#),
+            Some(r#"{"query":"{ eventTypes { name } }"}"#),
             StatusCode::OK,
         ),
         (Method::GET, "/api/unknown", None, StatusCode::NOT_FOUND),
@@ -599,7 +590,7 @@ fn answers_of_every_kind() -> Vec<(Method, &'static str, Option<&'static str>, S
 }
 
 fn panicking_router(config: &Config) -> Router {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Database)));
+    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Cache)));
     router(adapters, config).unwrap()
 }
 

@@ -29,7 +29,7 @@ fn a_report_with_a_failure_is_not_healthy() {
 #[test]
 fn a_report_keeps_the_failures_in_the_order_given() {
     let report = HealthReport::new(vec![
-        failure(Dependency::Database),
+        failure(Dependency::EventStream),
         failure(Dependency::MessageBroker),
     ]);
 
@@ -40,7 +40,7 @@ fn a_report_keeps_the_failures_in_the_order_given() {
         .collect();
     assert_eq!(
         dependencies,
-        vec![Dependency::Database, Dependency::MessageBroker]
+        vec![Dependency::EventStream, Dependency::MessageBroker]
     );
 }
 

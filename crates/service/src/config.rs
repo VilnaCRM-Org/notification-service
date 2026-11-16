@@ -17,13 +17,9 @@ use event_stream_application::EventCatalog;
 use event_stream_domain::EventType;
 use event_stream_infrastructure::{KafkaSecurity, KafkaSettings, SaslCredentials, SaslMechanism};
 use shared_infrastructure::messaging::SqsSettings;
-use shared_infrastructure::persistence::{
-    MAX_STATEMENT_TIMEOUT, MIN_STATEMENT_TIMEOUT, PostgresSettings,
-};
-use sqlx::postgres::PgConnectOptions;
 use tracing_subscriber::EnvFilter;
 
-use crate::cli::{DatabaseArgs, KafkaArgs, MigrateArgs, ServeArgs, StreamArgs};
+use crate::cli::{KafkaArgs, ServeArgs, StreamArgs};
 
 /// Deployment environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,8 +66,6 @@ pub struct Config {
     pub port: u16,
     /// `tracing` filter directives.
     pub log_level: String,
-    /// PostgreSQL pool settings.
-    pub database: PostgresSettings,
     /// SQS client settings.
     pub sqs: SqsSettings,
     /// Timeout of one health probe.
@@ -155,14 +149,12 @@ impl Config {
     pub fn from_args(args: ServeArgs) -> Result<Self, ConfigErrors> {
         let mut collector = Collector::default();
         let server = server(&mut collector, &args);
-        let database = database(&mut collector, &args.database);
         let sqs = sqs(&mut collector, &args);
         let limits = limits(&mut collector, &args);
         let kafka = kafka_fields(&mut collector, &args.kafka);
         let streams = stream_settings(&mut collector, &args);
         let allowed_origins = allowed_origins(&mut collector, &args);
         collector.cross_field_rules(
-            database.as_ref().map(|settings| settings.acquire_timeout),
             sqs.as_ref().map(|settings| settings.operation_timeout),
             limits.as_ref().map(|limits| limits.health_probe_timeout),
             limits.as_ref().map(|limits| limits.request_timeout),
@@ -170,7 +162,6 @@ impl Config {
         let parts = Parts {
             kafka: kafka_settings(&mut collector, &args.kafka, kafka),
             server,
-            database,
             sqs,
             limits,
             streams,
@@ -186,7 +177,6 @@ impl Config {
 /// The groups of a configuration, each `None` when one of its variables is invalid.
 struct Parts {
     server: Option<Server>,
-    database: Option<PostgresSettings>,
     sqs: Option<SqsSettings>,
     limits: Option<Limits>,
     kafka: Option<KafkaSettings>,
@@ -203,7 +193,6 @@ impl Parts {
             host: server.host,
             port: server.port,
             log_level: server.log_level,
-            database: self.database?,
             sqs: self.sqs?,
             health_probe_timeout: limits.health_probe_timeout,
             request_timeout: limits.request_timeout,
@@ -213,38 +202,6 @@ impl Parts {
             streams: self.streams?,
             allowed_origins: self.allowed_origins?,
         })
-    }
-}
-
-/// The settings of `migrate` and `migrate revert`: the database and how long to wait for it.
-#[derive(Debug, Clone)]
-pub struct MigrateSettings {
-    /// The PostgreSQL pool.
-    pub database: PostgresSettings,
-    /// How long to wait for the database, one attempt per second.
-    pub wait_timeout: Duration,
-}
-
-impl MigrateSettings {
-    /// Parses and validates the database variables and `DATABASE_WAIT_TIMEOUT`.
-    ///
-    /// # Errors
-    ///
-    /// Returns every problem found, each naming its environment variable.
-    pub fn from_args(args: &MigrateArgs) -> Result<Self, ConfigErrors> {
-        let mut collector = Collector::default();
-        let database = database(&mut collector, &args.database);
-        let wait = collector.collect(
-            "DATABASE_WAIT_TIMEOUT",
-            duration(args.wait_timeout.as_deref(), Duration::from_secs(30)),
-        );
-        match (database, wait) {
-            (Some(database), Some(wait_timeout)) => Ok(Self {
-                database,
-                wait_timeout,
-            }),
-            _ => Err(ConfigErrors(collector.problems)),
-        }
     }
 }
 
@@ -293,17 +250,10 @@ impl Collector {
 
     fn cross_field_rules(
         &mut self,
-        acquire: Option<Duration>,
         operation: Option<Duration>,
         probe: Option<Duration>,
         request: Option<Duration>,
     ) {
-        self.at_least(
-            "HEALTH_PROBE_TIMEOUT",
-            probe,
-            "DATABASE_ACQUIRE_TIMEOUT",
-            acquire,
-        );
         self.at_least(
             "HEALTH_PROBE_TIMEOUT",
             probe,
@@ -401,28 +351,6 @@ fn server(collector: &mut Collector, args: &ServeArgs) -> Option<Server> {
         host: host?,
         port: port?,
         log_level: log_level?,
-    })
-}
-
-fn database(collector: &mut Collector, args: &DatabaseArgs) -> Option<PostgresSettings> {
-    let url = collector.collect("DATABASE_URL", database_url(args.url.as_deref()));
-    let max_connections = collector.collect(
-        "DATABASE_MAX_CONNECTIONS",
-        bounded(args.max_connections.as_deref(), 10, 1..=100),
-    );
-    let acquire = collector.collect(
-        "DATABASE_ACQUIRE_TIMEOUT",
-        duration(args.acquire_timeout.as_deref(), Duration::from_secs(2)),
-    );
-    let statement = collector.collect(
-        "DATABASE_STATEMENT_TIMEOUT",
-        statement_timeout(args.statement_timeout.as_deref()),
-    );
-    Some(PostgresSettings {
-        url: url?,
-        max_connections: max_connections?,
-        acquire_timeout: acquire?,
-        statement_timeout: statement?,
     })
 }
 
@@ -990,16 +918,6 @@ fn log_level(raw: Option<&str>) -> Parsed<String> {
         .map_err(|_error| "must be valid tracing filter directives, for example info".to_owned())
 }
 
-fn database_url(raw: Option<&str>) -> Parsed<String> {
-    let url = required(raw)?;
-    let scheme_ok = url.starts_with("postgres://") || url.starts_with("postgresql://");
-    if scheme_ok && PgConnectOptions::from_str(&url).is_ok() {
-        Ok(url)
-    } else {
-        Err("must be a postgres:// or postgresql:// URL".to_owned())
-    }
-}
-
 fn endpoint(raw: Option<&str>) -> Parsed<Option<String>> {
     let Some(url) = raw else {
         return Ok(None);
@@ -1046,17 +964,6 @@ fn duration(raw: Option<&str>, default: Duration) -> Parsed<Duration> {
         humantime::parse_duration(value)
             .map_err(|_error| "must be a duration such as 500ms, 2s or 1m".to_owned())
     })
-}
-
-/// `DATABASE_STATEMENT_TIMEOUT`: PostgreSQL reads 0 as "no timeout" and refuses more than about
-/// 24.8 days, so the value must lie between 1 millisecond and 24 days.
-fn statement_timeout(raw: Option<&str>) -> Parsed<Duration> {
-    let value = duration(raw, Duration::from_secs(5))?;
-    if (MIN_STATEMENT_TIMEOUT..=MAX_STATEMENT_TIMEOUT).contains(&value) {
-        Ok(value)
-    } else {
-        Err("must be a duration from 1ms to 24d".to_owned())
-    }
 }
 
 fn parsed<T: FromStr>(raw: Option<&str>, default: T, reason: &str) -> Parsed<T> {

@@ -12,7 +12,7 @@ async fn operation_is_sent(world: &mut AppWorld, step: &Step) {
         .docstring
         .as_deref()
         .expect("the step has a doc string");
-    let body = json!({"query": world.substitute(query)}).to_string();
+    let body = json!({"query": query}).to_string();
     world
         .send("POST", "/api/graphql", Some("application/json"), &body)
         .await;
@@ -30,19 +30,4 @@ fn response_has_no_errors(world: &mut AppWorld) {
         "body: {}",
         world.reply().body
     );
-}
-
-#[then(expr = "the GraphQL field {string} should contain exactly the created resources")]
-#[expect(
-    clippy::needless_pass_by_ref_mut,
-    reason = "cucumber fixes the step signature"
-)]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "cucumber fixes the step signature"
-)]
-fn field_contains_created(world: &mut AppWorld, field: String) {
-    let json = world.reply().json();
-    let items = json.get("data").and_then(|data| data.get(field.as_str()));
-    world.assert_exactly_created(items.unwrap_or(&serde_json::Value::Null));
 }

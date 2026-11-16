@@ -9,7 +9,7 @@ info:
   license:
     name: CC0-1.0
     url: https://creativecommons.org/publicdomain/zero/1.0/
-  version: 1.0.0
+  version: 2.0.0
 servers:
 - url: /
   description: Current host
@@ -88,160 +88,12 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
-  /api/example_api_resources:
-    get:
-      tags:
-      - ExampleApiResource
-      summary: Retrieves the collection of ExampleApiResource resources.
-      description: Returns one page of resources, newest first.
-      operationId: api_example_api_resources_get
-      parameters:
-      - name: page
-        in: query
-        description: Page number, starting at 1.
-        required: false
-        schema:
-          type: integer
-          format: int32
-          default: 1
-          minimum: 1
-      - name: itemsPerPage
-        in: query
-        description: Number of items per page.
-        required: false
-        schema:
-          type: integer
-          format: int32
-          default: 30
-          maximum: 100
-          minimum: 1
-      responses:
-        '200':
-          description: ExampleApiResource collection
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ExampleApiResource'
-        '400':
-          description: Invalid query parameter.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '422':
-          description: Validation failed.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        default:
-          description: Problem response.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-    post:
-      tags:
-      - ExampleApiResource
-      summary: Creates an ExampleApiResource resource.
-      description: Validates the input, stores the resource and returns it.
-      operationId: api_example_api_resources_post
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateExampleApiResourceRequest'
-        required: true
-      responses:
-        '201':
-          description: ExampleApiResource resource created
-          headers:
-            location:
-              schema:
-                type: string
-              description: Path of the created resource.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExampleApiResource'
-        '400':
-          description: Invalid input.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '413':
-          description: Request body too large.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '415':
-          description: Unsupported media type.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '422':
-          description: Validation failed.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        default:
-          description: Problem response.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-  /api/example_api_resources/{id}:
-    get:
-      tags:
-      - ExampleApiResource
-      summary: Retrieves an ExampleApiResource resource.
-      description: Returns the resource identified by id.
-      operationId: api_example_api_resources_id_get
-      parameters:
-      - name: id
-        in: path
-        description: ExampleApiResource identifier
-        required: true
-        schema:
-          type: string
-          format: uuid
-      responses:
-        '200':
-          description: ExampleApiResource resource
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExampleApiResource'
-        '400':
-          description: Invalid identifier.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        '404':
-          description: Resource not found.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
-        default:
-          description: Problem response.
-          content:
-            application/problem+json:
-              schema:
-                $ref: '#/components/schemas/Problem'
   /api/health:
     get:
       tags:
       - HealthCheck
       summary: Checks the health of the service.
-      description: Returns 204 when the database, the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.
+      description: Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.
       operationId: api_health_get
       responses:
         '204':
@@ -260,28 +112,6 @@ paths:
                 $ref: '#/components/schemas/Problem'
 components:
   schemas:
-    CreateExampleApiResourceRequest:
-      type: object
-      description: Body of the create operation.
-      required:
-      - name
-      - description
-      properties:
-        description:
-          type: string
-          description: Free-text description of the resource.
-          example: Example description
-          maxLength: 1024
-          minLength: 1
-          pattern: ^[^\u0000]*$
-        name:
-          type: string
-          description: Display name of the resource.
-          example: Example name
-          maxLength: 255
-          minLength: 1
-          pattern: ^[^\u0000]*$
-      additionalProperties: false
     DependencyFailure:
       type: object
       description: One dependency that did not answer its probe.
@@ -291,7 +121,7 @@ components:
       properties:
         dependency:
           type: string
-          description: '`database`, `cache`, `message_broker` or `event_stream`.'
+          description: '`cache`, `message_broker` or `event_stream`.'
         message:
           type: string
           description: Failure message of the probe.
@@ -390,30 +220,6 @@ components:
           maxLength: 128
           minLength: 1
           pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
-    ExampleApiResource:
-      type: object
-      description: Template example resource.
-      required:
-      - id
-      - name
-      - description
-      properties:
-        description:
-          type: string
-          description: Free-text description of the resource.
-          maxLength: 1024
-          minLength: 1
-          pattern: ^[^\u0000]*$
-        id:
-          type: string
-          format: uuid
-          description: Identifier of the resource.
-        name:
-          type: string
-          description: Display name of the resource.
-          maxLength: 255
-          minLength: 1
-          pattern: ^[^\u0000]*$
     Problem:
       type: object
       description: An RFC 9457 problem document.
@@ -469,7 +275,5 @@ components:
 tags:
 - name: EventStream
   description: Event catalog and event stream status endpoints.
-- name: ExampleApiResource
-  description: Template example resource endpoints.
 - name: HealthCheck
   description: Runtime health-check endpoints.

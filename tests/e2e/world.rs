@@ -1,16 +1,13 @@
 //! The world of a scenario: injected faults, the configured event types and variables, the last
-//! response, the created ids and the scenario database, and the event stream of a scenario: a
-//! topic of its own on the broker of the stack with a producer, a node that reads it, and the SSE
-//! and WebSocket clients of that node.
+//! response, and the event stream of a scenario: a topic of its own on the broker of the stack with
+//! a producer, a node that reads it, and the SSE and WebSocket clients of that node.
 //!
 //! Without a node of its own, a new application instance is built for every request; its tail
 //! reads the topic `notifications` of the broker of the stack, and the request is sent once the
 //! node is ready. Once the scenario started a node, every request goes to that node.
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::net::SocketAddr;
-use std::str::FromStr as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,9 +27,6 @@ use service::background::Running;
 use service::bootstrap::{Adapters, application};
 use service::cli::{Cli, Command};
 use service::config::Config;
-use shared_infrastructure::persistence::MIGRATOR;
-use sqlx::postgres::PgConnectOptions;
-use sqlx::{AssertSqlSafe, ConnectOptions as _, Connection as _, PgConnection};
 use test_support::probe::StubProbe;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -40,14 +34,8 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tower::ServiceExt as _;
 
-/// Counter that makes the database names of the scenarios of one process unique.
-static DATABASES: AtomicUsize = AtomicUsize::new(0);
-
 /// Counter that makes the topic names of the scenarios of one process unique.
 static TOPICS: AtomicUsize = AtomicUsize::new(0);
-
-/// The token that stands for the remembered id in paths, doc strings and string arguments.
-const ID_TOKEN: &str = "{id}";
 
 /// The topic of the broker of the stack.
 const STACK_TOPIC: &str = "notifications";
@@ -66,9 +54,7 @@ const ANSWER_TIMEOUT: Duration = REQUEST_TIMEOUT.saturating_add(Duration::from_s
 
 /// The environment variables whose value [`config_with`], [`AppWorld::config`] or
 /// [`AppWorld::start_node`] replaces after parsing; a scenario cannot set them.
-const SUITE_VARIABLES: [&str; 8] = [
-    "DATABASE_URL",
-    "DATABASE_ACQUIRE_TIMEOUT",
+const SUITE_VARIABLES: [&str; 6] = [
     "SQS_CONNECT_TIMEOUT",
     "SQS_OPERATION_TIMEOUT",
     "HEALTH_PROBE_TIMEOUT",
@@ -352,10 +338,7 @@ pub(crate) struct AppWorld {
     failing: Vec<Dependency>,
     event_types: Option<String>,
     variables: Vec<(String, String)>,
-    database: Option<String>,
     reply: Option<Reply>,
-    created: Vec<String>,
-    remembered: Option<String>,
     /// The topic of the node of the scenario.
     topic: Option<String>,
     /// Set once the topic of the scenario was created.
@@ -374,11 +357,6 @@ pub(crate) struct AppWorld {
     websocket: Option<WebSocket>,
 }
 
-/// The configuration as the binary reads it from the environment.
-fn base_config() -> Config {
-    config_with(&[])
-}
-
 /// The configuration as the binary reads it from the environment and the extra flags.
 fn config_with(flags: &[String]) -> Config {
     let arguments = ["service", "serve"]
@@ -395,9 +373,8 @@ fn config_with(flags: &[String]) -> Config {
     let mut config = Config::from_args(args).expect("valid configuration");
     // The production defaults are a few seconds. A scenario must succeed however long the machine
     // needs to open the first connection, so the budgets are long and keep the order the
-    // configuration requires (request > probe >= acquire and operation). Every value replaced
-    // here is named in `SUITE_VARIABLES`.
-    config.database.acquire_timeout = Duration::from_secs(30);
+    // configuration requires (request > probe >= operation). Every value replaced here is named
+    // in `SUITE_VARIABLES`.
     config.sqs.connect_timeout = Duration::from_secs(10);
     config.sqs.operation_timeout = Duration::from_secs(30);
     config.health_probe_timeout = Duration::from_secs(40);
@@ -495,41 +472,6 @@ async fn wait_until_ready(router: &Router) {
     .await;
 }
 
-/// Connection options of the server of `DATABASE_URL`.
-fn server_options() -> PgConnectOptions {
-    PgConnectOptions::from_str(&base_config().database.url).expect("valid database URL")
-}
-
-/// A connection to the server of `DATABASE_URL`, used to create and drop databases.
-async fn admin() -> PgConnection {
-    server_options()
-        .connect()
-        .await
-        .expect("the database server is reachable")
-}
-
-/// Drops every database a killed run left behind (and, with it, any other `e2e_` database: two
-/// runs must not share a server at the same time).
-pub(crate) async fn drop_leftover_databases() {
-    let mut connection = admin().await;
-    let names: Vec<String> =
-        sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'e2e\\_%'")
-            .fetch_all(&mut connection)
-            .await
-            .expect("list the leftover databases");
-    for name in names {
-        drop_named(&mut connection, &name).await;
-    }
-}
-
-async fn drop_named(connection: &mut PgConnection, name: &str) {
-    let statement = format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)");
-    sqlx::query(AssertSqlSafe(statement))
-        .execute(connection)
-        .await
-        .expect("drop the database");
-}
-
 impl AppWorld {
     /// Marks a dependency as failing: its probe is replaced before the next request.
     pub(crate) fn fail(&mut self, dependency: Dependency) {
@@ -557,66 +499,9 @@ impl AppWorld {
         self.reply.as_ref().expect("a request was sent")
     }
 
-    /// The ids of the resources the scenario created.
-    pub(crate) fn created(&self) -> BTreeSet<String> {
-        self.created.iter().cloned().collect()
-    }
-
-    /// Asserts that the ids of the JSON array are exactly the created ids, and that there are some.
-    pub(crate) fn assert_exactly_created(&self, array: &Value) {
-        let ids: BTreeSet<String> = array
-            .as_array()
-            .expect("a JSON array")
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str))
-            .map(str::to_owned)
-            .collect();
-        let created = self.created();
-        assert!(!created.is_empty(), "the scenario created no resource");
-        assert_eq!(ids, created);
-    }
-
-    /// Replaces the `{id}` token by the remembered id.
-    pub(crate) fn substitute(&self, text: &str) -> String {
-        self.remembered
-            .as_deref()
-            .map_or_else(|| text.to_owned(), |id| text.replace(ID_TOKEN, id))
-    }
-
-    /// Creates the scenario database on first use and returns its URL.
-    async fn database_url(&mut self) -> String {
-        let options = server_options();
-        if self.database.is_none() {
-            let name = format!(
-                "e2e_{}_{}",
-                std::process::id(),
-                DATABASES.fetch_add(1, Ordering::SeqCst)
-            );
-            let statement = format!("CREATE DATABASE \"{name}\"");
-            sqlx::query(AssertSqlSafe(statement))
-                .execute(&mut admin().await)
-                .await
-                .expect("create the scenario database");
-            let mut connection = options.clone().database(&name).connect().await.unwrap();
-            MIGRATOR.run(&mut connection).await.expect("migrate");
-            connection.close().await.expect("close");
-            self.database = Some(name);
-        }
-        url_with_database(self.database.as_deref().expect("created above"))
-    }
-
-    /// Ends what the scenario started, then drops the scenario database, if the scenario made one.
-    /// The runner calls it after every scenario.
-    pub(crate) async fn drop_database(&mut self) {
-        self.end_event_stream().await;
-        if let Some(name) = self.database.take() {
-            drop_named(&mut admin().await, &name).await;
-        }
-    }
-
     /// Closes the clients, stops the node and deletes the topic of the scenario, as far as the
-    /// scenario made them.
-    async fn end_event_stream(&mut self) {
+    /// scenario made them. The runner calls it after every scenario.
+    pub(crate) async fn end_event_stream(&mut self) {
         self.sse = None;
         self.websocket = None;
         if let Some(node) = self.node.take() {
@@ -640,17 +525,14 @@ impl AppWorld {
         event_types.chain(variables).collect()
     }
 
-    /// The configuration of a node of the scenario: the configured flags and the scenario database.
-    async fn config(&mut self) -> Config {
-        let url = self.database_url().await;
-        let mut config = config_with(&self.flags());
-        config.database.url = url;
-        config
+    /// The configuration of a node of the scenario: the configured flags.
+    fn config(&self) -> Config {
+        config_with(&self.flags())
     }
 
     /// The production wiring with the failing probes of the scenario.
     async fn adapters(&self, config: &Config) -> Adapters {
-        let mut adapters = Adapters::connect(config).await.expect("production wiring");
+        let mut adapters = Adapters::connect(config).await;
         for dependency in &self.failing {
             adapters = adapters.with_probe(Arc::new(StubProbe::failing(*dependency)));
         }
@@ -666,26 +548,25 @@ impl AppWorld {
         content_type: Option<&str>,
         body: &str,
     ) {
-        let mut request = Request::builder().method(method).uri(self.substitute(path));
+        let mut request = Request::builder().method(method).uri(path);
         if let Some(content_type) = content_type {
             request = request.header(header::CONTENT_TYPE, content_type);
         }
         let request = request
-            .body(Body::from(self.substitute(body)))
+            .body(Body::from(body.to_owned()))
             .expect("valid request");
         let reply = if let Some(node) = &self.node {
             dispatch(&node.router, request).await
         } else {
             self.send_to_new_instance(request).await
         };
-        self.record(&reply);
         self.reply = Some(reply);
     }
 
     /// Builds a new application instance, runs its tail until the node is ready, sends `request`
     /// to it and shuts its background work down.
-    async fn send_to_new_instance(&mut self, request: Request<Body>) -> Reply {
-        let config = self.config().await;
+    async fn send_to_new_instance(&self, request: Request<Body>) -> Reply {
+        let config = self.config();
         let adapters = self.adapters(&config).await;
         let application = application(adapters, &config).expect("assembled application");
         let running = application.background.spawn();
@@ -693,20 +574,6 @@ impl AppWorld {
         let reply = dispatch(&application.router, request).await;
         shut_down(running).await;
         reply
-    }
-
-    /// Remembers the id of a created resource: a 201 body or a GraphQL mutation result.
-    fn record(&mut self, reply: &Reply) {
-        let json = reply.json();
-        let created = if reply.status == 201 {
-            json.get("id")
-        } else {
-            json.pointer("/data/createExampleApiResource/id")
-        };
-        if let Some(id) = created.and_then(Value::as_str) {
-            self.created.push(id.to_owned());
-            self.remembered = Some(id.to_owned());
-        }
     }
 
     /// Creates a topic of one partition for the scenario, starts the node of the scenario on it
@@ -738,7 +605,7 @@ impl AppWorld {
     /// Starts the node of the scenario on `topic`.
     async fn start_node(&mut self, topic: String) {
         assert!(self.node.is_none(), "the scenario already has a node");
-        let mut config = self.config().await;
+        let mut config = self.config();
         config.kafka.topic = topic;
         let adapters = self.adapters(&config).await;
         self.node = Some(Node::start(adapters, &config).await);
@@ -938,14 +805,4 @@ impl AppWorld {
         })
         .await
     }
-}
-
-/// The URL of database `name` on the server of `DATABASE_URL`: the path segment is replaced.
-fn url_with_database(name: &str) -> String {
-    let url = base_config().database.url;
-    let (server, database) = url.rsplit_once('/').expect("a database name");
-    let query = database
-        .split_once('?')
-        .map_or_else(String::new, |(_, query)| format!("?{query}"));
-    format!("{server}/{name}{query}")
 }

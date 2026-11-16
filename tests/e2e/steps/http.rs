@@ -65,7 +65,6 @@ fn status_should_be(world: &mut AppWorld, expected: u16) {
     reason = "cucumber fixes the step signature"
 )]
 fn body_should_contain(world: &mut AppWorld, text: String) {
-    let text = world.substitute(&text);
     let body = &world.reply().body;
     assert!(
         body.contains(&text),
@@ -128,14 +127,4 @@ fn json_field_should_equal(world: &mut AppWorld, field: String, expected: String
         "body: {}",
         world.reply().body
     );
-}
-
-#[then("the JSON array should contain exactly the created resources")]
-#[expect(
-    clippy::needless_pass_by_ref_mut,
-    reason = "cucumber fixes the step signature"
-)]
-fn array_should_contain_created(world: &mut AppWorld) {
-    let json = world.reply().json();
-    world.assert_exactly_created(&json);
 }

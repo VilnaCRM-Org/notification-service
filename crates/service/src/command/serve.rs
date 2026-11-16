@@ -138,7 +138,7 @@ async fn drain(
 /// the tail loop connects on its first round.
 async fn serve(config: &Config) -> Result<Shutdown, BoxError> {
     let signals = Signals::install()?;
-    let adapters = Adapters::connect(config).await?;
+    let adapters = Adapters::connect(config).await;
     let application = bootstrap::application(adapters, config)?;
     let listener = bind(config).await?;
     run_until(application, listener, config, signals.received()).await

@@ -22,8 +22,6 @@ pub struct Cli {
 pub enum Command {
     /// Validate the configuration, start logging, serve until SIGTERM or SIGINT, then drain.
     Serve(ServeArgs),
-    /// Wait for the database and apply the pending migrations, or revert the last one.
-    Migrate(MigrateArgs),
     /// Validate the configuration of `serve` without opening a socket or contacting a dependency.
     CheckConfig(ServeArgs),
     /// Write the REST API contract (YAML) to a file or to standard output.
@@ -32,42 +30,6 @@ pub enum Command {
     GraphqlExport(ExportArgs),
     /// Ask a running service whether it is alive (on the loopback interface or the `APP_HOST` address).
     Healthcheck(HealthcheckArgs),
-}
-
-/// What `service migrate` does besides applying the pending migrations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
-pub enum MigrateAction {
-    /// Revert the most recently applied migration.
-    Revert,
-}
-
-/// Settings of the PostgreSQL pool.
-#[derive(Debug, Clone, Default, Args)]
-pub struct DatabaseArgs {
-    /// `postgres://` or `postgresql://` URL of the database (required).
-    #[arg(long = "database-url", env = "DATABASE_URL", hide_env_values = true)]
-    pub url: Option<String>,
-    /// Upper bound of open connections, 1 to 100 (default 10).
-    #[arg(
-        long = "database-max-connections",
-        env = "DATABASE_MAX_CONNECTIONS",
-        hide_env_values = true
-    )]
-    pub max_connections: Option<String>,
-    /// How long a caller waits for a free connection (default 2s).
-    #[arg(
-        long = "database-acquire-timeout",
-        env = "DATABASE_ACQUIRE_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub acquire_timeout: Option<String>,
-    /// `statement_timeout` of every connection (default 5s).
-    #[arg(
-        long = "database-statement-timeout",
-        env = "DATABASE_STATEMENT_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub statement_timeout: Option<String>,
 }
 
 /// Settings of `serve` and `check-config`: every service variable.
@@ -85,9 +47,6 @@ pub struct ServeArgs {
     /// `tracing` filter directives of the log output (default `info`).
     #[arg(long = "log-level", env = "LOG_LEVEL", hide_env_values = true)]
     pub log_level: Option<String>,
-    /// Settings of the PostgreSQL pool.
-    #[command(flatten)]
-    pub database: DatabaseArgs,
     /// AWS region of the message broker (required).
     #[arg(long = "aws-region", env = "AWS_REGION", hide_env_values = true)]
     pub aws_region: Option<String>,
@@ -330,24 +289,6 @@ pub struct StreamArgs {
         hide_env_values = true
     )]
     pub keep_alive: Option<String>,
-}
-
-/// Settings of `migrate` and `migrate revert`.
-#[derive(Debug, Clone, Args)]
-pub struct MigrateArgs {
-    /// Settings of the PostgreSQL pool.
-    #[command(flatten)]
-    pub database: DatabaseArgs,
-    /// How long to wait for the database, one attempt per second (default 30s).
-    #[arg(
-        long = "wait-timeout",
-        env = "DATABASE_WAIT_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub wait_timeout: Option<String>,
-    /// Revert instead of apply.
-    #[command(subcommand)]
-    pub action: Option<MigrateAction>,
 }
 
 /// Arguments of `openapi-export` and `graphql-export`.

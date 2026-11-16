@@ -555,7 +555,7 @@ EOF
 }
 
 @test "rule 5: each of the five sources is read" {
-  printf '      --extra <EXTRA_FROM_HELP>  x [env: EXTRA_FROM_HELP]\n' >>"${help}/migrate.txt"
+  printf '      --extra <EXTRA_FROM_HELP>  x [env: EXTRA_FROM_HELP]\n' >>"${help}/healthcheck.txt"
   append .env 'EXTRA_FROM_ENV=1'
   append .env <<'EOF'
 DERIVED=${EXTRA_REFERENCED}

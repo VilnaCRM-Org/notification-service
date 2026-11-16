@@ -13,7 +13,7 @@ fn json_document() -> Value {
     "get",
     "api_health_get",
     "HealthCheck",
-    ("Checks the health of the service.", "Returns 204 when the database, the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
+    ("Checks the health of the service.", "Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
 )]
 #[case(
     "/api/event-types",
@@ -28,27 +28,6 @@ fn json_document() -> Value {
     "api_events_status_get",
     "EventStream",
     ("Retrieves the event stream status.", "Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.", "200 default")
-)]
-#[case(
-    "/api/example_api_resources",
-    "get",
-    "api_example_api_resources_get",
-    "ExampleApiResource",
-    ("Retrieves the collection of ExampleApiResource resources.", "Returns one page of resources, newest first.", "200 400 422 default")
-)]
-#[case(
-    "/api/example_api_resources",
-    "post",
-    "api_example_api_resources_post",
-    "ExampleApiResource",
-    ("Creates an ExampleApiResource resource.", "Validates the input, stores the resource and returns it.", "201 400 413 415 422 default")
-)]
-#[case(
-    "/api/example_api_resources/{id}",
-    "get",
-    "api_example_api_resources_id_get",
-    "ExampleApiResource",
-    ("Retrieves an ExampleApiResource resource.", "Returns the resource identified by id.", "200 400 404 default")
 )]
 fn documents_every_operation(
     #[case] path: &str,
@@ -84,7 +63,7 @@ fn documents_every_operation(
 }
 
 #[test]
-fn documents_exactly_the_six_operations() {
+fn documents_exactly_the_three_operations() {
     let json = json_document();
     let mut operations = Vec::new();
     for (path, item) in json["paths"].as_object().unwrap() {
@@ -98,9 +77,6 @@ fn documents_exactly_the_six_operations() {
         [
             "get /api/event-types",
             "get /api/events/status",
-            "get /api/example_api_resources",
-            "post /api/example_api_resources",
-            "get /api/example_api_resources/{id}",
             "get /api/health",
         ]
     );
@@ -132,7 +108,7 @@ fn carries_the_service_identity_and_the_contract_version() {
             env!("CARGO_PKG_DESCRIPTION")
         )
     );
-    assert_eq!(info["version"], "1.0.0");
+    assert_eq!(info["version"], "2.0.0");
     assert_eq!(info["version"], API_VERSION);
     assert_eq!(
         info["contact"],
@@ -169,7 +145,6 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
         json["tags"],
         json!([
             { "name": "EventStream", "description": "Event catalog and event stream status endpoints." },
-            { "name": "ExampleApiResource", "description": "Template example resource endpoints." },
             { "name": "HealthCheck", "description": "Runtime health-check endpoints." },
         ])
     );
@@ -178,7 +153,7 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
 }
 
 #[test]
-fn defines_exactly_the_seven_schemas() {
+fn defines_exactly_the_five_schemas() {
     let json = json_document();
     let schemas = json["components"]["schemas"].as_object().unwrap();
 
@@ -186,22 +161,12 @@ fn defines_exactly_the_seven_schemas() {
     assert_eq!(
         names,
         [
-            "CreateExampleApiResourceRequest",
             "DependencyFailure",
             "EventStreamStatus",
             "EventType",
-            "ExampleApiResource",
             "Problem",
             "Violation"
         ]
-    );
-    assert_eq!(
-        schemas["CreateExampleApiResourceRequest"]["additionalProperties"],
-        false
-    );
-    assert_eq!(
-        schemas["ExampleApiResource"]["properties"]["id"]["format"],
-        "uuid"
     );
 }
 
@@ -253,14 +218,6 @@ fn the_status_schema_carries_the_twelve_fields_and_the_status_route_returns_it()
             ["schema"],
         json!({"$ref": "#/components/schemas/EventStreamStatus"})
     );
-}
-
-#[test]
-fn the_create_response_documents_the_location_header() {
-    let json = json_document();
-
-    let created = &json["paths"]["/api/example_api_resources"]["post"]["responses"]["201"];
-    assert!(created["headers"]["location"].is_object());
 }
 
 #[test]

@@ -17,8 +17,6 @@ mod healthcheck;
 #[cfg(test)]
 mod limit;
 #[cfg(test)]
-mod migrate;
-#[cfg(test)]
 mod panic;
 #[cfg(test)]
 mod serve;

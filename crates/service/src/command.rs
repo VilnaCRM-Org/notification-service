@@ -15,7 +15,6 @@ use crate::openapi;
 pub mod check_config;
 pub mod export;
 pub mod healthcheck;
-pub mod migrate;
 pub mod serve;
 
 /// Exit status of a command that failed while running.
@@ -29,7 +28,6 @@ pub fn run(command: Command, stdout: &mut dyn Write, stderr: &mut dyn Write) -> 
     match command {
         Command::CheckConfig(args) => check_config::run(args, stdout, stderr),
         Command::Serve(args) => start_service(args),
-        Command::Migrate(args) => migrate::run(&args, stdout, stderr),
         Command::OpenapiExport(args) => export::run(openapi::yaml, &args, stdout, stderr),
         Command::GraphqlExport(args) => {
             export::run(|| Ok::<_, Infallible>(schema::sdl()), &args, stdout, stderr)

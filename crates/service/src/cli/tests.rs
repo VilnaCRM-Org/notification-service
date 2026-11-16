@@ -36,14 +36,6 @@ fn serve_takes_every_setting_as_a_flag() {
         "9000",
         "--log-level",
         "debug",
-        "--database-url",
-        "postgres://u@h/d",
-        "--database-max-connections",
-        "7",
-        "--database-acquire-timeout",
-        "1s",
-        "--database-statement-timeout",
-        "2s",
         "--aws-region",
         "eu-west-1",
         "--aws-endpoint-url-sqs",
@@ -118,10 +110,6 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.app_host.as_deref(), Some("127.0.0.1"));
     assert_eq!(args.app_port.as_deref(), Some("9000"));
     assert_eq!(args.log_level.as_deref(), Some("debug"));
-    assert_eq!(args.database.url.as_deref(), Some("postgres://u@h/d"));
-    assert_eq!(args.database.max_connections.as_deref(), Some("7"));
-    assert_eq!(args.database.acquire_timeout.as_deref(), Some("1s"));
-    assert_eq!(args.database.statement_timeout.as_deref(), Some("2s"));
     assert_eq!(args.aws_region.as_deref(), Some("eu-west-1"));
     assert_eq!(
         args.aws_endpoint_url_sqs.as_deref(),
@@ -189,23 +177,6 @@ fn check_config_takes_the_arguments_of_serve() {
     assert_eq!(args.app_port.as_deref(), Some("9000"));
 }
 
-#[test]
-fn migrate_applies_by_default_and_reverts_on_request() {
-    let apply = parse(&["migrate", "--wait-timeout", "5s", "--database-url", "u"]).unwrap();
-    let revert = parse(&["migrate", "revert"]).unwrap();
-
-    let Command::Migrate(apply) = apply.command else {
-        panic!("expected migrate");
-    };
-    assert_eq!(apply.action, None);
-    assert_eq!(apply.wait_timeout.as_deref(), Some("5s"));
-    assert_eq!(apply.database.url.as_deref(), Some("u"));
-    let Command::Migrate(revert) = revert.command else {
-        panic!("expected migrate");
-    };
-    assert_eq!(revert.action, Some(MigrateAction::Revert));
-}
-
 #[rstest]
 #[case("openapi-export")]
 #[case("graphql-export")]
@@ -249,6 +220,7 @@ fn healthcheck_takes_a_port_and_a_host() {
 
 #[rstest]
 #[case(&["frobnicate"], ErrorKind::InvalidSubcommand)]
+#[case(&["migrate"], ErrorKind::InvalidSubcommand)]
 #[case(&["serve", "--frobnicate"], ErrorKind::UnknownArgument)]
 #[case(&["--frobnicate"], ErrorKind::UnknownArgument)]
 #[case(&[], ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand)]
@@ -309,10 +281,6 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "AWS_REGION",
         "AWS_SECRET_ACCESS_KEY",
         "CORS_ALLOWED_ORIGINS",
-        "DATABASE_ACQUIRE_TIMEOUT",
-        "DATABASE_MAX_CONNECTIONS",
-        "DATABASE_STATEMENT_TIMEOUT",
-        "DATABASE_URL",
         "EVENT_MAX_DATA_BYTES",
         "EVENT_REPLAY_MAX_EVENTS",
         "EVENT_REPLAY_PERMITS",
@@ -375,22 +343,14 @@ fn the_serve_help_lists_every_variable_but_the_credentials() {
 }
 
 #[test]
-fn the_migrate_and_healthcheck_settings_are_bound_to_their_variables() {
-    let migrate = Cli::command();
-    let migrate = migrate.find_subcommand("migrate").unwrap();
+fn the_healthcheck_settings_are_bound_to_their_variables() {
     let healthcheck = Cli::command();
     let healthcheck = healthcheck.find_subcommand("healthcheck").unwrap();
 
-    let wait = migrate
-        .get_arguments()
-        .find(|argument| argument.get_id() == "wait_timeout")
-        .unwrap();
     let port = healthcheck
         .get_arguments()
         .find(|argument| argument.get_id() == "port")
         .unwrap();
-    assert_eq!(wait.get_env().unwrap(), "DATABASE_WAIT_TIMEOUT");
-    assert!(wait.is_hide_env_values_set());
     let host = healthcheck
         .get_arguments()
         .find(|argument| argument.get_id() == "host")

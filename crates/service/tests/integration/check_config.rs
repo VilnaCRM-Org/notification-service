@@ -5,18 +5,11 @@ use rstest::rstest;
 
 use crate::support::{Scratch, VALID_ENVIRONMENT, stderr, stdout};
 
-const FULL_ENVIRONMENT: [(&str, &str); 42] = [
+const FULL_ENVIRONMENT: [(&str, &str); 38] = [
     ("APP_ENV", "dev"),
     ("APP_HOST", "127.0.0.1"),
     ("APP_PORT", "0"),
     ("LOG_LEVEL", "debug"),
-    (
-        "DATABASE_URL",
-        "postgres://app:local-dev-only@127.0.0.1:5432/app",
-    ),
-    ("DATABASE_MAX_CONNECTIONS", "5"),
-    ("DATABASE_ACQUIRE_TIMEOUT", "1s"),
-    ("DATABASE_STATEMENT_TIMEOUT", "2s"),
     ("AWS_REGION", "us-east-1"),
     ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
     ("AWS_ACCESS_KEY_ID", "test"),
@@ -81,16 +74,7 @@ fn every_variable_of_the_table_is_accepted_together() {
 fn flags_replace_variables() {
     let scratch = Scratch::new();
 
-    let output = scratch.run(
-        &[
-            "check-config",
-            "--database-url",
-            "postgres://u@h/d",
-            "--aws-region",
-            "eu-west-1",
-        ],
-        &[],
-    );
+    let output = scratch.run(&["check-config", "--aws-region", "eu-west-1"], &[]);
 
     assert_eq!(output.status.code(), Some(0));
 }
@@ -102,7 +86,7 @@ fn every_invalid_or_missing_variable_is_named_in_one_run_without_its_value() {
     let output = scratch.run(
         &["check-config"],
         &[
-            ("DATABASE_URL", "mysql://user:hunter2@h/db"),
+            ("AWS_ENDPOINT_URL_SQS", "ftp://user:hunter2@h/queue"),
             ("APP_PORT", "99999"),
             ("APP_ENV", "staging"),
         ],
@@ -115,8 +99,8 @@ fn every_invalid_or_missing_variable_is_named_in_one_run_without_its_value() {
     assert_eq!(lines.len(), 4, "{errors}");
     assert!(lines[0].starts_with("APP_ENV: "));
     assert!(lines[1].starts_with("APP_PORT: "));
-    assert!(lines[2].starts_with("DATABASE_URL: "));
-    assert!(lines[3].starts_with("AWS_REGION: "));
+    assert!(lines[2].starts_with("AWS_REGION: "));
+    assert!(lines[3].starts_with("AWS_ENDPOINT_URL_SQS: "));
     assert!(!errors.contains("hunter2"));
     assert!(!errors.contains("99999"));
     assert!(!errors.contains("staging"));
@@ -127,7 +111,6 @@ fn an_sqs_endpoint_with_a_malformed_host_is_named_without_its_value() {
     let scratch = Scratch::new();
     let variables = [
         VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
         ("AWS_ENDPOINT_URL_SQS", "http://exa mple:4566"),
     ];
 
@@ -145,15 +128,11 @@ fn an_sqs_endpoint_with_a_malformed_host_is_named_without_its_value() {
 
 #[rstest]
 #[case("0")]
-#[case("500us")]
-#[case("30d")]
-fn a_statement_timeout_outside_its_range_is_rejected(#[case] value: &str) {
+#[case("49ms")]
+#[case("6s")]
+fn a_fetch_wait_outside_its_range_is_rejected(#[case] value: &str) {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("DATABASE_STATEMENT_TIMEOUT", value),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("KAFKA_FETCH_MAX_WAIT", value)];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -161,7 +140,7 @@ fn a_statement_timeout_outside_its_range_is_rejected(#[case] value: &str) {
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
-        "DATABASE_STATEMENT_TIMEOUT: must be a duration from 1ms to 24d\n"
+        "KAFKA_FETCH_MAX_WAIT: must be a duration from 50ms to 5s\n"
     );
 }
 
@@ -183,11 +162,7 @@ fn distinct_names(count: usize) -> String {
 #[case::a_thousand_and_one(&distinct_names(1_001))]
 fn check_config_rejects_invalid_event_types_without_their_value(#[case] value: &str) {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("EVENT_TYPES", value),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("EVENT_TYPES", value)];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -201,11 +176,7 @@ fn check_config_rejects_invalid_event_types_without_their_value(#[case] value: &
 #[case::invalid_name("secret.a,Secret.B")]
 fn serve_rejects_invalid_event_types_without_their_value(#[case] value: &str) {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("EVENT_TYPES", value),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("EVENT_TYPES", value)];
 
     let output = scratch.run(&["serve"], &variables);
 
@@ -231,11 +202,7 @@ fn serve_rejects_invalid_event_types_without_their_value(#[case] value: &str) {
 fn check_config_accepts_a_thousand_distinct_event_types() {
     let scratch = Scratch::new();
     let names = distinct_names(1_000);
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("EVENT_TYPES", names.as_str()),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("EVENT_TYPES", names.as_str())];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -280,11 +247,7 @@ fn check_config_names_one_invalid_stream_variable_without_its_value(
     #[case] reason: &str,
 ) {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        (variable, value),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], (variable, value)];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -298,7 +261,6 @@ fn check_config_reports_the_rules_between_kafka_variables_last() {
     let scratch = Scratch::new();
     let variables = [
         VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
         ("KAFKA_CONNECT_TIMEOUT", "4s"),
         ("KAFKA_REQUEST_TIMEOUT", "3s"),
         ("KAFKA_SECURITY_PROTOCOL", "sasl_ssl"),
@@ -323,7 +285,6 @@ fn the_sasl_password_is_never_printed_by_check_config_or_serve() {
     let scratch = Scratch::new();
     let variables = [
         VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
         ("KAFKA_SECURITY_PROTOCOL", "sasl_ssl"),
         ("KAFKA_SASL_MECHANISM", "PLAIN"),
         ("KAFKA_SASL_USERNAME", "reader"),
@@ -353,11 +314,7 @@ fn the_sasl_password_is_never_printed_by_check_config_or_serve() {
 #[test]
 fn a_key_id_without_a_secret_names_the_missing_variable() {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("AWS_ACCESS_KEY_ID", "key"),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("AWS_ACCESS_KEY_ID", "key")];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -371,11 +328,7 @@ fn a_key_id_without_a_secret_names_the_missing_variable() {
 #[test]
 fn a_secret_without_a_key_id_names_the_missing_variable() {
     let scratch = Scratch::new();
-    let variables = [
-        VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
-        ("AWS_SECRET_ACCESS_KEY", "secret"),
-    ];
+    let variables = [VALID_ENVIRONMENT[0], ("AWS_SECRET_ACCESS_KEY", "secret")];
 
     let output = scratch.run(&["check-config"], &variables);
 
@@ -391,7 +344,6 @@ fn both_credentials_set_or_both_unset_is_valid() {
     let scratch = Scratch::new();
     let both = [
         VALID_ENVIRONMENT[0],
-        VALID_ENVIRONMENT[1],
         ("AWS_ACCESS_KEY_ID", "key"),
         ("AWS_SECRET_ACCESS_KEY", "secret"),
     ];
@@ -410,20 +362,23 @@ fn both_credentials_set_or_both_unset_is_valid() {
 fn the_help_lists_every_flag_and_never_a_value() {
     let scratch = Scratch::new();
     let variables = [
-        ("DATABASE_URL", "postgres://u:topsecret@h/db"),
+        ("KAFKA_SASL_PASSWORD", "topsecret"),
         ("AWS_SECRET_ACCESS_KEY", "credentialvalue"),
         ("APP_PORT", "4242"),
     ];
 
     let serve = scratch.run(&["serve", "--help"], &variables);
+    let check = scratch.run(&["check-config", "--help"], &variables);
     let root = scratch.run(&["--help"], &variables);
 
-    for output in [&serve, &root] {
+    for output in [&serve, &check, &root] {
         assert_eq!(output.status.code(), Some(0));
         let text = stdout(output);
         assert!(!text.contains("topsecret"));
         assert!(!text.contains("credentialvalue"));
         assert!(!text.contains("4242"));
+        assert!(!text.contains("DATABASE_"));
+        assert!(!text.contains("migrate"));
     }
     let help = stdout(&serve);
     for flag in [
@@ -431,10 +386,6 @@ fn the_help_lists_every_flag_and_never_a_value() {
         "--app-host",
         "--app-port",
         "--log-level",
-        "--database-url",
-        "--database-max-connections",
-        "--database-acquire-timeout",
-        "--database-statement-timeout",
         "--aws-region",
         "--aws-endpoint-url-sqs",
         "--sqs-connect-timeout",
@@ -452,7 +403,7 @@ fn the_help_lists_every_flag_and_never_a_value() {
     ] {
         assert!(help.contains(flag), "{flag} is missing from the help");
     }
-    assert!(help.contains("[env: DATABASE_URL]"));
+    assert!(help.contains("[env: AWS_REGION]"));
     assert!(!help.contains("AWS_ACCESS_KEY_ID"));
     assert!(!help.contains("AWS_SECRET_ACCESS_KEY"));
     assert!(stdout(&root).contains("check-config"));
@@ -490,7 +441,7 @@ fn the_env_file_of_the_working_directory_is_loaded() {
     let scratch = Scratch::new();
     scratch.write(
         ".env",
-        "DB_USER=u\nDATABASE_URL=postgres://${DB_USER}:p@h/d\nAWS_REGION=us-east-1\n",
+        "PORT_BASE=9000\nAPP_PORT=${PORT_BASE}\nAWS_REGION=us-east-1\n",
     );
 
     let output = scratch.run(&["check-config"], &[]);
@@ -506,20 +457,12 @@ fn the_process_environment_wins_over_the_env_file() {
 
     let invalid_in_the_process = scratch.run(
         &["check-config"],
-        &[
-            VALID_ENVIRONMENT[0],
-            VALID_ENVIRONMENT[1],
-            ("APP_PORT", "not-a-port"),
-        ],
+        &[VALID_ENVIRONMENT[0], ("APP_PORT", "not-a-port")],
     );
     scratch.write(".env", "APP_PORT=not-a-port\n");
     let valid_in_the_process = scratch.run(
         &["check-config"],
-        &[
-            VALID_ENVIRONMENT[0],
-            VALID_ENVIRONMENT[1],
-            ("APP_PORT", "9001"),
-        ],
+        &[VALID_ENVIRONMENT[0], ("APP_PORT", "9001")],
     );
 
     assert_eq!(invalid_in_the_process.status.code(), Some(2));
@@ -535,9 +478,7 @@ fn a_directory_without_an_env_file_has_no_configuration() {
     let output = scratch.run(&["check-config"], &[]);
 
     assert_eq!(output.status.code(), Some(2));
-    let errors = stderr(&output);
-    assert!(errors.starts_with("DATABASE_URL: is required\n"));
-    assert!(errors.contains("AWS_REGION: is required\n"));
+    assert_eq!(stderr(&output), "AWS_REGION: is required\n");
 }
 
 #[test]

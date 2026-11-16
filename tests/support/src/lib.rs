@@ -8,7 +8,6 @@ pub mod fixture;
 pub mod id;
 pub mod log;
 pub mod probe;
-pub mod repository;
 pub mod seed;
 pub mod static_topic;
 pub mod topic;

@@ -18,24 +18,13 @@ use event_stream_infrastructure::KafkaTopic;
 use health_check_application::HealthCheckState;
 use health_check_application::HealthService;
 use health_check_domain::HealthProbe;
-use health_check_infrastructure::{CacheProbe, PostgresProbe, SqsProbe};
-use shared_domain::{Clock, CommandBus, EventBus, QueryBus, UuidGenerator};
-use shared_infrastructure::bus::{
-    DuplicateHandler, InMemoryCommandBus, InMemoryEventBus, InMemoryQueryBus,
-};
+use health_check_infrastructure::{CacheProbe, SqsProbe};
+use shared_domain::{Clock, EventBus, QueryBus, UuidGenerator};
+use shared_infrastructure::bus::{DuplicateHandler, InMemoryEventBus, InMemoryQueryBus};
 use shared_infrastructure::cache::MokaCache;
 use shared_infrastructure::clock::SystemClock;
 use shared_infrastructure::id::UuidV7Generator;
 use shared_infrastructure::messaging::sqs_client;
-use shared_infrastructure::persistence::connect_lazy;
-use some_module_application::http::SomeModuleState;
-use some_module_application::{
-    AuditExampleApiResourceCreated, CreateExampleApiResourceHandler, GetExampleApiResourceHandler,
-    ListExampleApiResourcesHandler,
-};
-use some_module_domain::ExampleApiResourceRepository;
-use some_module_infrastructure::PgExampleApiResourceRepository;
-
 use tokio::sync::watch;
 
 use crate::background::Background;
@@ -48,11 +37,11 @@ use crate::http::router::assemble;
 /// Every driven port of the application.
 #[derive(Debug)]
 pub struct Adapters {
-    /// Repository of the example context.
-    pub repository: Arc<dyn ExampleApiResourceRepository>,
-    /// Health probes in the order database, cache, message broker.
+    /// Health probes in the order cache, message broker; [`application`] appends the probe of the
+    /// event stream.
     pub probes: Vec<Arc<dyn HealthProbe>>,
-    /// Bus the command handlers publish domain events to.
+    /// Bus of the domain events, built by [`event_bus`]; no handler publishes to it yet, so it
+    /// waits for the first context that registers one.
     pub event_bus: Arc<dyn EventBus>,
     /// Source of the current time.
     pub clock: Arc<dyn Clock>,
@@ -69,33 +58,23 @@ pub struct Adapters {
 /// The application could not be wired.
 #[derive(Debug, thiserror::Error)]
 pub enum BootstrapError {
-    /// The database settings are invalid.
-    #[error("invalid database settings")]
-    Database(#[from] sqlx::Error),
     /// A message has two handlers.
     #[error(transparent)]
     DuplicateHandler(#[from] DuplicateHandler),
 }
 
 impl Adapters {
-    /// The production wiring: a lazy connection pool, an in-process cache behind the cache
-    /// probe, the SQS client, the in-process event bus and the three readers of the event topic.
+    /// The production wiring: an in-process cache behind the cache probe, the SQS client, the
+    /// in-process event bus and the three readers of the event topic.
     ///
-    /// Nothing here touches the network; the first connection is made by the first request that
-    /// needs it, and each reader of the topic connects when it is first called.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BootstrapError::Database`] when the database URL cannot be parsed.
-    pub async fn connect(config: &Config) -> Result<Self, BootstrapError> {
-        let pool = connect_lazy(&config.database)?;
+    /// Nothing here touches the network; the SQS client connects on its first call, and each
+    /// reader of the topic connects when it is first called.
+    pub async fn connect(config: &Config) -> Self {
         let sqs = sqs_client(&config.sqs).await;
         let cache = Arc::new(MokaCache::new());
         let topic = KafkaTopic::new(config.kafka.clone());
-        Ok(Self {
-            repository: Arc::new(PgExampleApiResourceRepository::new(pool.clone())),
+        Self {
             probes: vec![
-                Arc::new(PostgresProbe::new(pool)),
                 Arc::new(CacheProbe::new(cache)),
                 Arc::new(SqsProbe::new(sqs)),
             ],
@@ -105,7 +84,7 @@ impl Adapters {
             topic_probe: Arc::new(topic.probe()),
             topic_tail: Box::new(topic.tail()),
             topic_replay: Arc::new(topic.replay()),
-        })
+        }
     }
 
     /// Replaces the probe of the same dependency; the order and the other probes are kept.
@@ -123,30 +102,19 @@ impl Adapters {
     }
 }
 
-/// The in-process event bus with every subscriber registered.
+/// The in-process event bus with every subscriber registered; no context subscribes yet.
 #[must_use]
 pub fn event_bus() -> Arc<dyn EventBus> {
-    Arc::new(InMemoryEventBus::new().subscribe(AuditExampleApiResourceCreated))
+    Arc::new(InMemoryEventBus::new())
 }
 
-/// Registers the command handlers of the example context.
-fn register_commands(
-    bus: InMemoryCommandBus,
-    create: CreateExampleApiResourceHandler,
-) -> Result<InMemoryCommandBus, BootstrapError> {
-    Ok(bus.register(create)?)
-}
-
-/// Registers the query handlers of the example context and of the event stream.
+/// Registers the query handlers of the event stream.
 fn register_queries(
     bus: InMemoryQueryBus,
-    repository: &Arc<dyn ExampleApiResourceRepository>,
     catalog: &EventCatalog,
 ) -> Result<InMemoryQueryBus, BootstrapError> {
-    let get = GetExampleApiResourceHandler::new(Arc::clone(repository));
-    let list = ListExampleApiResourcesHandler::new(Arc::clone(repository));
     let event_types = ListEventTypesHandler::new(Arc::new(catalog.clone()));
-    Ok(bus.register(get)?.register(list)?.register(event_types)?)
+    Ok(bus.register(event_types)?)
 }
 
 /// The event stream of a node: the state of its routes, the receiver of its tail state and the
@@ -248,53 +216,28 @@ pub struct Application {
 
 /// Builds the router and the background work of the event stream from `adapters`.
 ///
-/// It registers every handler, builds the command and query buses, the event stream, the state,
-/// the `GraphQL` schema and the router with its middleware. Nothing here touches the network. The
+/// It registers every handler, builds the query bus, the event stream, the state, the `GraphQL`
+/// schema and the router with its middleware. Nothing here touches the network. The
 /// health probes are those of `adapters` followed by the probe of the event stream.
 ///
 /// # Errors
 ///
 /// Returns [`BootstrapError::DuplicateHandler`] when a message has two handlers.
 pub fn application(adapters: Adapters, config: &Config) -> Result<Application, BootstrapError> {
-    let create = CreateExampleApiResourceHandler::new(
-        Arc::clone(&adapters.repository),
-        adapters.event_bus,
-        Arc::clone(&adapters.clock),
-        Arc::clone(&adapters.uuid_generator),
-    );
-    let command_bus = register_commands(InMemoryCommandBus::new(), create)?;
-    let catalog = &config.streams.catalog;
-    let query_bus = register_queries(InMemoryQueryBus::new(), &adapters.repository, catalog)?;
-    let commands: Arc<dyn CommandBus> = Arc::new(command_bus);
+    let query_bus = register_queries(InMemoryQueryBus::new(), &config.streams.catalog)?;
     let queries: Arc<dyn QueryBus> = Arc::new(query_bus);
     let ports = TailPorts {
         probe: adapters.topic_probe,
         tail: adapters.topic_tail,
         clock: Arc::clone(&adapters.clock),
     };
-    let stream = event_stream(
-        Arc::clone(&queries),
-        &config.streams,
-        ports,
-        adapters.topic_replay,
-    );
-    let some_module = SomeModuleState {
-        command_bus: commands,
-        query_bus: queries,
-        uuid_generator: adapters.uuid_generator,
-    };
+    let stream = event_stream(queries, &config.streams, ports, adapters.topic_replay);
     let readiness = EventStreamProbe::new(
         stream.tail_state,
         adapters.clock,
         config.streams.stale_after,
     );
-    let router = assemble_router(
-        some_module,
-        stream.state,
-        adapters.probes,
-        readiness,
-        config,
-    );
+    let router = assemble_router(stream.state, adapters.probes, readiness, config);
     Ok(Application {
         router,
         background: stream.background,
@@ -304,7 +247,6 @@ pub fn application(adapters: Adapters, config: &Config) -> Result<Application, B
 /// The health service over `probes` and the probe of the event stream, the `GraphQL` schema and
 /// the router with its middleware.
 fn assemble_router(
-    some_module: SomeModuleState,
     event_stream: EventStreamState,
     mut probes: Vec<Arc<dyn HealthProbe>>,
     readiness: EventStreamProbe,
@@ -315,13 +257,9 @@ fn assemble_router(
     let health_check = HealthCheckState {
         service: Arc::new(service),
     };
-    let schema = schema::builder()
-        .data(some_module.clone())
-        .data(event_stream.clone())
-        .finish();
+    let schema = schema::builder().data(event_stream.clone()).finish();
     let state = AppState {
         health_check,
-        some_module,
         event_stream,
     };
     assemble(state, schema, config)

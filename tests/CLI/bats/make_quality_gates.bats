@@ -165,11 +165,11 @@ FIXTURES="${BATS_TEST_DIRNAME}/fixtures"
   assert_output --regexp 'cannot update the lock file .*Cargo\.lock because --locked was passed'
 }
 
-@test "G6: check-requirements fails with status 2 and names DATABASE_URL" {
-  require_host_mode "the DATABASE_URL set here does not reach the container"
-  run env DATABASE_URL=mysql://x scripts/with-env.sh .env -- make --no-print-directory check-requirements
+@test "G6: check-requirements fails with status 2 and names KAFKA_TOPIC" {
+  require_host_mode "the KAFKA_TOPIC set here does not reach the container"
+  run env KAFKA_TOPIC=.. scripts/with-env.sh .env -- make --no-print-directory check-requirements
   assert_failure 2
-  assert_output --partial 'DATABASE_URL'
+  assert_output --partial 'KAFKA_TOPIC: must be a Kafka topic name'
   # Make's error line carries the status of the recipe, which is the status of the command itself.
   assert_output --partial '] Error 2'
 }

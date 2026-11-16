@@ -27,15 +27,13 @@ pub(super) type Client = WebSocketStream<TcpStream>;
 pub(super) fn config(flags: &[&str]) -> Config {
     use clap::Parser as _;
     let arguments = ["service", "serve"].iter().chain(flags);
-    let crate::cli::Command::Serve(mut args) = crate::cli::Cli::parse_from(arguments).command
-    else {
+    let crate::cli::Command::Serve(args) = crate::cli::Cli::parse_from(arguments).command else {
         panic!("`serve` arguments expected");
     };
-    args = ServeArgs {
+    let args = ServeArgs {
         aws_region: Some("us-east-1".to_owned()),
         ..args
     };
-    args.database.url = Some("postgres://app:unused@127.0.0.1:1/app".to_owned());
     Config::from_args(args).unwrap()
 }
 

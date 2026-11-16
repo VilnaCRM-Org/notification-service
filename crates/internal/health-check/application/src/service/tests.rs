@@ -14,9 +14,9 @@ use super::HealthService;
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 const ALL: [Dependency; 3] = [
-    Dependency::Database,
     Dependency::Cache,
     Dependency::MessageBroker,
+    Dependency::EventStream,
 ];
 
 fn service(probes: Vec<StubProbe>) -> HealthService {
@@ -61,13 +61,13 @@ async fn a_service_without_probes_is_healthy() {
 }
 
 #[rstest]
-#[case::database(&[Dependency::Database])]
 #[case::cache(&[Dependency::Cache])]
 #[case::message_broker(&[Dependency::MessageBroker])]
-#[case::database_and_cache(&[Dependency::Database, Dependency::Cache])]
-#[case::database_and_message_broker(&[Dependency::Database, Dependency::MessageBroker])]
+#[case::event_stream(&[Dependency::EventStream])]
 #[case::cache_and_message_broker(&[Dependency::Cache, Dependency::MessageBroker])]
-#[case::all(&[Dependency::Database, Dependency::Cache, Dependency::MessageBroker])]
+#[case::cache_and_event_stream(&[Dependency::Cache, Dependency::EventStream])]
+#[case::message_broker_and_event_stream(&[Dependency::MessageBroker, Dependency::EventStream])]
+#[case::all(&[Dependency::Cache, Dependency::MessageBroker, Dependency::EventStream])]
 #[tokio::test]
 async fn the_report_holds_exactly_the_failing_dependencies_in_registration_order(
     #[case] failing: &[Dependency],
@@ -81,16 +81,16 @@ async fn the_report_holds_exactly_the_failing_dependencies_in_registration_order
 #[tokio::test]
 async fn failures_follow_the_registration_order_not_the_dependency_order() {
     let report = service(vec![
-        StubProbe::failing(Dependency::MessageBroker),
-        StubProbe::healthy(Dependency::Cache),
-        StubProbe::failing(Dependency::Database),
+        StubProbe::failing(Dependency::EventStream),
+        StubProbe::healthy(Dependency::MessageBroker),
+        StubProbe::failing(Dependency::Cache),
     ])
     .check()
     .await;
 
     assert_eq!(
         failed(&report),
-        vec![Dependency::MessageBroker, Dependency::Database]
+        vec![Dependency::EventStream, Dependency::Cache]
     );
 }
 
@@ -108,7 +108,7 @@ async fn a_hanging_probe_times_out_and_counts_as_failed() {
     let started = Instant::now();
 
     let report = service(vec![
-        StubProbe::healthy(Dependency::Database),
+        StubProbe::healthy(Dependency::EventStream),
         StubProbe::hanging(Dependency::Cache),
         StubProbe::healthy(Dependency::MessageBroker),
     ])
@@ -128,9 +128,9 @@ async fn probes_run_concurrently() {
     let started = Instant::now();
 
     let report = service(vec![
-        StubProbe::hanging(Dependency::Database),
         StubProbe::hanging(Dependency::Cache),
         StubProbe::hanging(Dependency::MessageBroker),
+        StubProbe::hanging(Dependency::EventStream),
     ])
     .check()
     .await;
@@ -144,7 +144,7 @@ async fn each_failure_is_logged_once_at_warn_with_its_dependency_and_cause() {
     let (recorder, _guard) = LogRecorder::install();
 
     let _report = service(vec![
-        StubProbe::failing(Dependency::Database),
+        StubProbe::failing(Dependency::EventStream),
         StubProbe::healthy(Dependency::Cache),
         StubProbe::hanging(Dependency::MessageBroker),
     ])
@@ -156,7 +156,7 @@ async fn each_failure_is_logged_once_at_warn_with_its_dependency_and_cause() {
     assert_eq!(lines[0].level, Level::WARN);
     assert_eq!(lines[0].target, "health_check_application::service");
     assert_eq!(lines[0].message, "health probe failed");
-    assert_eq!(lines[0].field("dependency"), Some("database"));
+    assert_eq!(lines[0].field("dependency"), Some("event_stream"));
     assert_eq!(
         lines[0].field("cause"),
         Some("probe failed: stub probe failure")

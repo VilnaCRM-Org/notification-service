@@ -13,4 +13,4 @@ Feature: API documentation
     When GET request is sent to "/api/docs/openapi.json"
     Then the response status code should be 200
     And the response body should contain "3.1.0"
-    And the response body should contain "/api/example_api_resources"
+    And the response body should contain "/api/event-types"
