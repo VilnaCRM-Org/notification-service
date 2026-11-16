@@ -1353,6 +1353,13 @@ Unused allow-list entries are not reported (`xtask/src/arch/rules.rs:226-229`), 
 | `architecture.toml` | remove `"sqlx"` from infrastructure `external` (`:67`); keep both `forbidden_transitive` entries |
 | `.claude/settings.json` | remove `:31` and `:68` (allow `make validate-sqlx-metadata`, `make setup-test-db`) and `:93` (ask `make migrate-rollback`) |
 
+**Approved during the implementation.** Two protected changes were not in this plan. The maintainer approved each as an exact patch, and each is a commit of pull request #5:
+
+| File | Exact change | Approved | Commit |
+| --- | --- | --- | --- |
+| `.gitleaksignore` | three fingerprints of the rule `generic-api-key` in commit `924c561` (`crates/service/src/http/origin/tests.rs:59`, `crates/service/src/http/router/tests.rs:771` and `:789`): the sample nonce of RFC 6455 used as the `Sec-WebSocket-Key` of handshake tests, not a credential; later commits use another value | 2026-11-15 | `24d24da` |
+| `tests/CLI/bats/make_repository.bats` | four assertion lines of the test of `template_owned_files_kept_out_of_sync`: its sample template-owned manifests become `crates/shared/domain/Cargo.toml` and `crates/internal/health-check/domain/Cargo.toml`, because the removal changed the two infrastructure manifests it named before, so `.templatesyncignore` now lists them | 2026-11-16 | `74d122c` |
+
 The line numbers are those of `3cdb4f2`, the base of the two sub-patches; no protected file changed after it, and since `ecc5d17`, the head this plan was written on, only the protected files of story 3.1 changed (`architecture.toml`, `protected-config.toml`, `.gitleaksignore`). Part A and then part B give the single protected patch byte for byte; `make_general.bats` has hunks in both, so the split is two sub-patches, not a path filter. Protected files that mention the database and need no change: `scripts/check-invariants.sh`, `tests/CLI/bats/check_invariants.bats`, `tests/CLI/bats/make_contracts.bats`, `tests/CLI/bats/test_helper.bash`, `xtask/tests/**`, `xtask/src/arch/**`, `taplo.toml`, `_typos.toml`, `deny.toml`, `.cargo/mutants.toml`, `.githooks/*`, `scripts/with-env.sh`, `scripts/mutation-diff.sh`, the K6 thresholds.
 
 > Assumption: the plugin skill `bounded-context-scaffolding` names "no protected file changed" as a success criterion of a scaffold; story 1.1 meets it (the scaffold changes no protected file), and the allow-list entries come in the preparatory pull request of story 3.1, as D16 requires.
