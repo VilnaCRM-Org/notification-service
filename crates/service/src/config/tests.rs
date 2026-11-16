@@ -919,6 +919,7 @@ fn every_field_of_serve_args_is_consumed_by_from_args() {
     }
 }
 
+mod env_file;
 mod kafka;
 mod origins;
 mod streams;

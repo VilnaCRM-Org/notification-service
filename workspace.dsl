@@ -4,7 +4,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
         properties {
             "structurizr.groupSeparator" "/"
         }
-        apiClient = person "API client" "A person or program that calls the REST and GraphQL API."
+        apiClient = person "API client" "A person or program that calls the REST and GraphQL API and subscribes to events over Server-Sent Events or WebSocket."
         messageBroker = softwareSystem "Message broker" "Amazon SQS, or LocalStack in development." {
             tags "External"
         }
@@ -12,8 +12,8 @@ workspace "Service architecture" "C4 model of the service: system context, conta
             tags "External"
         }
         system = softwareSystem "Service" "A VilnaCRM service built from the Rust service template." {
-            service = container "Service binary" "Serves REST under /api, GraphQL at /api/graphql, /api/health and /ping; also exports the API contracts." "Rust, axum, tokio" {
-                compositionRoot = component "service" "Composition root: CLI, configuration, wiring, router, middleware, OpenAPI document, GraphQL schema." "Rust crate"
+            service = container "Service binary" "Serves REST under /api, GraphQL at /api/graphql, the SSE and WebSocket event streams at /api/events/stream and /api/events/ws, /api/health and /ping; runs the supervised tail of the Kafka topic; also exports the API contracts." "Rust, axum, tokio" {
+                compositionRoot = component "service" "Composition root: CLI, configuration, wiring, router, middleware, OpenAPI document, GraphQL schema, the supervised tail loop and the readiness probe of the event stream." "Rust crate"
                 group "Shared" {
                     group "Shared/Domain" {
                         sharedDomain = component "shared-domain" "Aggregate root, domain event, bus ports, technical ports, UUID and page value objects." "Rust crate" {
@@ -55,7 +55,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Notification/EventStream/Application" {
-                        eventStreamApplication = component "event-stream-application" "Event catalog, the list event types query and the GET /api/event-types handler." "Rust crate" {
+                        eventStreamApplication = component "event-stream-application" "Event catalog and the list event types query, the envelope parser, the memory window, the tail use case, the hub, the subscriptions with resume and replay, the node status, the GET /api/event-types and GET /api/events/status handlers, the SSE and WebSocket routes GET /api/events/stream and GET /api/events/ws, and the GraphQL eventTypes and eventStreamStatus queries." "Rust crate" {
                             tags "Application"
                         }
                     }
@@ -71,9 +71,9 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 compositionRoot -> healthCheckInfrastructure "Registers the probes"
                 compositionRoot -> sharedDomain "Wires the bus, clock and UUID ports"
                 compositionRoot -> healthCheckDomain "Collects the probes behind the HealthProbe port"
-                compositionRoot -> eventStreamApplication "Mounts the event catalog route and registers its handler"
-                compositionRoot -> eventStreamDomain "Parses EVENT_TYPES into event types"
-                compositionRoot -> eventStreamInfrastructure "Parses the Kafka settings"
+                compositionRoot -> eventStreamApplication "Builds the catalog, window, hub, tail use case, subscriptions and status; mounts the event-types, status, SSE and WebSocket routes and the GraphQL queries; supervises the tail loop and reads its state for readiness"
+                compositionRoot -> eventStreamDomain "Parses EVENT_TYPES into event types and holds the topic readers behind the TopicProbe, TopicTail and TopicReplay ports"
+                compositionRoot -> eventStreamInfrastructure "Parses the Kafka settings and builds the probe, tail and replay readers of the Kafka topic that feed the supervised tail and the replays"
                 sharedApplication -> sharedDomain "Uses bus errors"
                 sharedInfrastructure -> sharedDomain "Implements bus, cache, clock and UUID ports"
                 healthCheckDomain -> sharedDomain "Uses the shared error type"
@@ -83,14 +83,14 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                 healthCheckInfrastructure -> healthCheckDomain "Implements HealthProbe"
                 healthCheckInfrastructure -> sharedDomain "Uses the Cache port"
                 eventStreamDomain -> sharedDomain "Uses the shared error type in the topic ports"
-                eventStreamApplication -> eventStreamDomain "Pages the catalog of event types"
-                eventStreamApplication -> sharedDomain "Answers through the query bus ports"
-                eventStreamApplication -> sharedApplication "Uses extractors and problem documents"
+                eventStreamApplication -> eventStreamDomain "Pages the catalog of event types and reads the topic through the TopicProbe, TopicTail and TopicReplay ports into stored events by cursor"
+                eventStreamApplication -> sharedDomain "Answers through the query bus ports, pages by PageRequest and reads the time from the Clock port"
+                eventStreamApplication -> sharedApplication "Uses extractors, problem documents and the GraphQL error helper"
                 eventStreamInfrastructure -> eventStreamDomain "Implements the topic ports"
                 eventStreamInfrastructure -> sharedDomain "Uses the shared error type"
             }
         }
-        apiClient -> system.service "Calls the REST and GraphQL API" "HTTP, JSON"
+        apiClient -> system.service "Calls the REST and GraphQL API and subscribes to events over SSE and WebSocket" "HTTP, JSON, Server-Sent Events, WebSocket"
         system.service.healthCheckInfrastructure -> messageBroker "Calls ListQueues" "HTTPS, AWS SDK"
         system.service.eventStreamInfrastructure -> kafka "Reads the notifications topic from" "Kafka protocol, krafka"
     }

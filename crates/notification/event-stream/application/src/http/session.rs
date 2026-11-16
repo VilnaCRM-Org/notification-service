@@ -41,7 +41,8 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    /// The largest command, in bytes: 100 names of 128 characters take 13 135 bytes.
+    /// The largest command, in bytes: the largest valid command, an unsubscribe of 100 names of
+    /// 128 characters, takes 13 134 bytes.
     pub(crate) const MAX_COMMAND_BYTES: usize = 16_384;
 
     /// The session of a subscription that the hub registered.

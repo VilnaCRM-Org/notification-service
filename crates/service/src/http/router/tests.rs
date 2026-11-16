@@ -10,8 +10,9 @@ use serde_json::Value;
 use test_support::probe::StubProbe;
 use test_support::static_topic::StaticTopic;
 
-use crate::bootstrap::tests::wiring::adapters_on;
-use crate::bootstrap::{Adapters, router};
+use crate::background::Running;
+use crate::bootstrap::tests::wiring::{adapters_on, paced_on};
+use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
@@ -556,42 +557,102 @@ fn from_origin(
     request
 }
 
-/// Method, path, body and status of a request to each kind of answer: a success, GraphQL, the
-/// 404, 405, 422 and 500 problems.
-fn answers_of_every_kind() -> Vec<(Method, &'static str, Option<&'static str>, StatusCode)> {
+/// The probe of the cache behind a kind of answer.
+type CacheProbe = fn(Dependency) -> StubProbe;
+
+/// A probe of the cache that makes the health route the 500 problem.
+const PANICKING: CacheProbe = StubProbe::panicking;
+
+/// A probe of the cache that keeps the health route past the request budget.
+const HANGING: CacheProbe = StubProbe::hanging;
+
+/// Method, path, body, status and the probe of the cache of a request to one kind of answer.
+type Kind = (
+    Method,
+    &'static str,
+    Option<&'static str>,
+    StatusCode,
+    CacheProbe,
+);
+
+/// A request to each kind of answer: a success, GraphQL, the 404, 405, 422 and 500 problems, the
+/// 503 problem of the event stream of an unstarted hub and the 503 problem of the request budget.
+fn answers_of_every_kind() -> Vec<Kind> {
     vec![
-        (Method::GET, "/api/event-types", None, StatusCode::OK),
+        (
+            Method::GET,
+            "/api/event-types",
+            None,
+            StatusCode::OK,
+            PANICKING,
+        ),
         (
             Method::POST,
             "/api/graphql",
             Some(r#"{"query":"{ eventTypes { name } }"}"#),
             StatusCode::OK,
+            PANICKING,
         ),
-        (Method::GET, "/api/unknown", None, StatusCode::NOT_FOUND),
+        (
+            Method::GET,
+            "/api/unknown",
+            None,
+            StatusCode::NOT_FOUND,
+            PANICKING,
+        ),
         (
             Method::DELETE,
             "/api/event-types",
             None,
             StatusCode::METHOD_NOT_ALLOWED,
+            PANICKING,
         ),
         (
             Method::GET,
             "/api/event-types?page=0",
             None,
             StatusCode::UNPROCESSABLE_ENTITY,
+            PANICKING,
         ),
         (
             Method::GET,
             "/api/health",
             None,
             StatusCode::INTERNAL_SERVER_ERROR,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/events/stream?types=a",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+            PANICKING,
+        ),
+        (
+            Method::GET,
+            "/api/health",
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+            HANGING,
         ),
     ]
 }
 
-fn panicking_router(config: &Config) -> Router {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::panicking(Dependency::Cache)));
+/// The router of `config` whose probe of the cache is `probe`; its event stream never starts.
+fn probed_router(probe: CacheProbe, config: &Config) -> Router {
+    let adapters = adapters().with_probe(Arc::new(probe(Dependency::Cache)));
     router(adapters, config).unwrap()
+}
+
+/// The request budget of the answers of every kind.
+const REQUEST_BUDGET: Duration = Duration::from_secs(1);
+
+/// `config` with [`REQUEST_BUDGET`] and a health probe timeout far above it, so that a hanging
+/// probe of the cache ends in the 503 problem of the budget; the tests run on paused time.
+fn budgeted(mut config: Config) -> Config {
+    config.request_timeout = REQUEST_BUDGET;
+    config.health_probe_timeout = Duration::from_secs(60);
+    config
 }
 
 /// The body of an answer with the generated request id blanked out wherever it is repeated, so
@@ -633,12 +694,13 @@ fn has_cors_headers(headers: &HeaderMap) -> bool {
         || headers.contains_key(header::VARY)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn without_allowed_origins_no_answer_changes() {
-    let app = panicking_router(&config("test"));
+    let without_origins = budgeted(config("test"));
 
-    for (method, path, body, status) in answers_of_every_kind() {
-        let route = format!("{method} {path}");
+    for (method, path, body, status, probe) in answers_of_every_kind() {
+        let route = format!("{method} {path} {status}");
+        let app = probed_router(probe, &without_origins);
         let with = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
         let without = send_to(&app, from_origin(method.clone(), path, body, None)).await;
         assert_eq!(without.status, status, "{route}");
@@ -646,6 +708,7 @@ async fn without_allowed_origins_no_answer_changes() {
         assert!(!has_cors_headers(&without.headers), "{route}");
         assert_same_answer(&with, &without, &[], &route);
     }
+    let app = probed_router(PANICKING, &without_origins);
     let preflight = |path: &str| {
         Request::options(path)
             .header(header::ORIGIN, ORIGIN)
@@ -661,14 +724,16 @@ async fn without_allowed_origins_no_answer_changes() {
     assert!(!has_cors_headers(&unknown.headers));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_allowed_origin_gets_the_cors_headers_on_every_kind_of_answer() {
     let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
-    let app = panicking_router(&config_with_origins(origins));
-    let unset = panicking_router(&config("test"));
+    let allowing = budgeted(config_with_origins(origins));
+    let without_origins = budgeted(config("test"));
 
-    for (method, path, body, status) in answers_of_every_kind() {
-        let route = format!("{method} {path}");
+    for (method, path, body, status, probe) in answers_of_every_kind() {
+        let route = format!("{method} {path} {status}");
+        let app = probed_router(probe, &allowing);
+        let unset = probed_router(probe, &without_origins);
         let baseline = send_to(&unset, from_origin(method.clone(), path, body, None)).await;
         let allowed = send_to(&app, from_origin(method.clone(), path, body, Some(ORIGIN))).await;
         assert_eq!(allowed.status, status, "{route}");
@@ -812,6 +877,88 @@ async fn the_event_stream_of_an_unstarted_hub_is_the_503_problem_with_the_common
     let body: Value = serde_json::from_str(&answer.body).unwrap();
     assert_eq!(body["detail"], "the node is starting");
     assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "stream");
+}
+
+/// The bound of the start and the shutdown of a started application.
+const LIMIT: Duration = Duration::from_secs(10);
+
+/// The router of the application of `config` on an empty static topic, whose tail is paced with
+/// the fetch wait of `config`, with its background work running, once its status route reports
+/// `ready` (bounded by [`LIMIT`]; the polls are spaced by a timer, so paused time advances).
+async fn started(config: &Config) -> (Router, Running) {
+    let topic = StaticTopic::empty();
+    let (adapters, _fetches) = paced_on(&topic, config.kafka.fetch_wait);
+    let application = application(adapters, config).unwrap();
+    let running = application.background.spawn();
+    let app = application.router;
+    tokio::time::timeout(LIMIT, async {
+        while !send_to(&app, request(Method::GET, "/api/events/status", None))
+            .await
+            .body
+            .contains(r#""state":"ready""#)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the node becomes ready");
+    (app, running)
+}
+
+/// The status and the headers of the answer to `request`, whose body is dropped unread: the body
+/// of a subscription does not end.
+async fn head(app: &Router, request: Request<Body>) -> Answer {
+    let response = tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap();
+    Answer {
+        status: response.status(),
+        headers: response.headers().clone(),
+        body: String::new(),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_event_stream_of_a_started_application_opens_with_the_cors_headers_of_an_allowed_origin()
+ {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    let (app, running) = started(&config_with_origins(origins)).await;
+    let path = "/api/events/stream?types=user.created";
+
+    let allowed = head(&app, from_origin(Method::GET, path, None, Some(ORIGIN))).await;
+    let other = head(
+        &app,
+        from_origin(Method::GET, path, None, Some("https://other.example.com")),
+    )
+    .await;
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+
+    assert_eq!(allowed.status, StatusCode::OK);
+    assert_eq!(allowed.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(allowed.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+    assert!(
+        allowed.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
+    assert_common_headers(&allowed, DEFAULT_CONTENT_SECURITY_POLICY, "sse");
+    assert_eq!(other.status, StatusCode::OK);
+    assert_eq!(other.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert!(
+        !other
+            .headers
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+    assert!(
+        other.headers[header::VARY]
+            .to_str()
+            .unwrap()
+            .contains("origin")
+    );
 }
 
 #[test]

@@ -99,6 +99,16 @@ fn white_space_around_the_members_is_removed_and_their_order_does_not_matter() {
     );
 }
 
+#[test]
+fn a_member_name_written_with_an_escape_is_read_as_the_name_it_stands_for() {
+    let value = format!(r#"{{"\u0069d":"{ID}","type":"{TYPE}","occurredAt":"{AT}","data":1}}"#);
+
+    assert_eq!(
+        parse(&value).unwrap().json,
+        envelope(LOWER_ID, TYPE, AT, "1")
+    );
+}
+
 #[rstest]
 #[case::object(r#"{ "a" : 1 , "b" : [ true , null ] }"#, r#"{"a":1,"b":[true,null]}"#)]
 #[case::empty_object("{ }", "{}")]
@@ -184,7 +194,7 @@ fn a_value_that_is_not_utf_8_is_rejected_even_inside_a_member_that_is_ignored() 
 #[case::number("42")]
 #[case::null("null")]
 #[case::duplicate_id(&format!(r#"{{"id":"{ID}","id":"{ID}","type":"{TYPE}","occurredAt":"{AT}","data":1}}"#))]
-#[case::duplicate_escaped_name(&format!(r#"{{"id":"{ID}","id":"{ID}","type":"{TYPE}","occurredAt":"{AT}","data":1}}"#))]
+#[case::duplicate_escaped_name(&format!(r#"{{"id":"{ID}","\u0069d":"{ID}","type":"{TYPE}","occurredAt":"{AT}","data":1}}"#))]
 #[case::duplicate_type(&format!(r#"{{"id":"{ID}","type":"{TYPE}","type":"{TYPE}","occurredAt":"{AT}","data":1}}"#))]
 #[case::duplicate_occurred_at(&format!(r#"{{"id":"{ID}","type":"{TYPE}","occurredAt":"{AT}","occurredAt":"{AT}","data":1}}"#))]
 #[case::duplicate_data(&format!(r#"{{"id":"{ID}","type":"{TYPE}","occurredAt":"{AT}","data":1,"data":1}}"#))]

@@ -643,7 +643,7 @@ impl Subscription {
 pub(crate) enum Inbound { Continue, Reply(Message), Close }
 pub(crate) struct Session { subscription: Subscription }
 impl Session {
-    /// 100 names of 128 characters take 13 135 bytes.
+    /// 100 names of 128 characters take 13 134 bytes.
     pub(crate) const MAX_COMMAND_BYTES: usize = 16_384;
     pub(crate) const fn new(subscription: Subscription) -> Self;
     /// Text -> command; Binary -> error frame; Ping and Pong -> Continue; Close -> Close (every variant named).
