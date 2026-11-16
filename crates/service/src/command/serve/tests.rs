@@ -8,8 +8,10 @@ use std::time::Duration;
 use event_stream_application::Hub;
 use event_stream_domain::Cursor;
 use futures_util::StreamExt as _;
+use health_check_domain::Dependency;
 use shared_domain::BoxError;
 use test_support::log::LogRecorder;
+use test_support::probe::StubProbe;
 use test_support::static_topic::StaticTopic;
 use test_support::topic::{PanickingTopicProbe, ScriptedTopicReplay};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -437,4 +439,50 @@ async fn a_grace_period_shorter_than_the_drain_timeout_forces_the_shutdown() {
     assert_eq!(outcome.unwrap(), Shutdown::Forced);
     assert!(took >= SHORT_GRACE, "{took:?}");
     assert!(took < STREAM_DRAIN_TIMEOUT, "{took:?}");
+}
+
+/// The request budget (`HTTP_REQUEST_TIMEOUT`) of the node whose streams outlive it.
+const REQUEST_BUDGET: Duration = Duration::from_secs(1);
+
+/// NFR-21: the request budget bounds only the time to the response head. On a node whose budget
+/// answers a slow request with the 503 problem, an SSE body and a WebSocket session opened
+/// through the whole router before that request still deliver an event published after it.
+#[tokio::test]
+async fn the_request_budget_ends_a_slow_request_but_not_the_streams_opened_before_it() {
+    let topic = StaticTopic::empty();
+    let mut budgeted = config(&[]);
+    budgeted.kafka.fetch_wait = FETCH_WAIT;
+    budgeted.request_timeout = REQUEST_BUDGET;
+    budgeted.health_probe_timeout = Duration::from_secs(60);
+    let (adapters, _fetches) = paced_on(&topic, FETCH_WAIT);
+    let adapters = adapters.with_probe(Arc::new(StubProbe::hanging(Dependency::Cache)));
+    let served = Served::start(adapters, budgeted).await;
+    wait_until_ready(served.address).await;
+    let mut sse = Sse::open(served.address, &format!("?types={TYPE}")).await;
+    let mut ws = connect(served.address, &format!("?types={TYPE}")).await;
+
+    // The real sockets of this test wait the whole budget: the slow request opens after both
+    // streams and answers once the budget ran out, so each stream is older than the budget.
+    let opened = Instant::now();
+    let slow = get(served.address, "/api/health").await;
+    let waited = opened.elapsed();
+    let _first = topic.append(Some(record(1, TYPE, 0)));
+    sse.read_until("id: 1\n").await;
+    let frame = text(&mut ws).await;
+    let (outcome, _took) = served.signal().await;
+
+    assert_eq!(slow.0, 503, "{}", slow.1);
+    assert!(
+        slow.1.contains("The request exceeded its time budget."),
+        "{}",
+        slow.1
+    );
+    assert!(waited >= REQUEST_BUDGET, "{waited:?}");
+    assert!(
+        sse.read.contains("id: 1\nevent: user.created\ndata: {"),
+        "{}",
+        sse.read
+    );
+    assert!(frame.starts_with(&ws_prefix(1)), "{frame}");
+    assert_eq!(outcome.unwrap(), Shutdown::Drained);
 }
