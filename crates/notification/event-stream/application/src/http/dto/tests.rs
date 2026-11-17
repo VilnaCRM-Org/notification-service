@@ -12,8 +12,9 @@ use validator::Validate as _;
 use event_stream_domain::{Cursor, EventType, InvalidEvent, Sequence};
 
 use super::{
-    Command, EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams, StreamParams,
-    TypesError, WsParams, parse_cursor, parse_names, parse_types, types_problem,
+    Command, CursorFault, EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams,
+    StreamParams, TypesError, WsParams, parse_cursor, parse_names, parse_types, read_cursor,
+    types_problem,
 };
 use crate::query::EventTypeView;
 use crate::status::{NodeState, NodeStatus, StartReason};
@@ -630,4 +631,118 @@ fn an_invalid_parameter_is_400_naming_the_parameter(#[case] text: &str) {
         StatusCode::from_u16(problem.status).unwrap(),
         StatusCode::BAD_REQUEST
     );
+}
+
+/// The fault of the `Last-Event-ID` header.
+const HEADER_FAULT: CursorFault = CursorFault {
+    carrier: "Last-Event-ID",
+};
+
+/// The fault of the `lastEventId` parameter.
+const PARAMETER_FAULT: CursorFault = CursorFault {
+    carrier: "lastEventId",
+};
+
+const HEADER_MESSAGE: &str = "Last-Event-ID must be a decimal unsigned 64-bit integer";
+const PARAMETER_MESSAGE: &str = "lastEventId must be a decimal unsigned 64-bit integer";
+
+/// The parameters a faulty header is read with: none, a valid one and a malformed one.
+const ANY_PARAMETER: [Option<&str>; 3] = [None, Some("5"), Some("abc")];
+
+fn header_value(text: &str) -> HeaderValue {
+    HeaderValue::from_str(text).unwrap()
+}
+
+#[test]
+fn read_cursor_answers_none_without_a_carrier() {
+    assert_eq!(read_cursor(None, None), Ok(None));
+}
+
+#[rstest]
+#[case::zero("0", 0)]
+#[case::one("1", 1)]
+#[case::largest("18446744073709551615", u64::MAX)]
+fn read_cursor_answers_the_cursor_of_the_carrier_given(#[case] text: &str, #[case] expected: u64) {
+    let cursor = Ok(Some(Cursor::new(expected)));
+
+    assert_eq!(read_cursor(Some(&header_value(text)), None), cursor);
+    assert_eq!(read_cursor(None, Some(text)), cursor);
+}
+
+#[rstest]
+#[case::parameter_valid(Some("5"))]
+#[case::parameter_malformed(Some("abc"))]
+#[case::parameter_absent(None)]
+fn read_cursor_answers_the_header_and_never_reads_the_parameter(#[case] parameter: Option<&str>) {
+    assert_eq!(
+        read_cursor(Some(&header_value("8")), parameter),
+        Ok(Some(Cursor::new(8)))
+    );
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::plus("+1")]
+#[case::leading_blank(" 1")]
+#[case::empty("")]
+#[case::overflow("18446744073709551616")]
+fn a_faulty_header_is_the_header_fault_whatever_the_parameter_holds(#[case] text: &str) {
+    let header = header_value(text);
+
+    for parameter in ANY_PARAMETER {
+        assert_eq!(read_cursor(Some(&header), parameter), Err(HEADER_FAULT));
+    }
+}
+
+#[test]
+fn a_header_that_is_not_visible_ascii_text_is_the_header_fault() {
+    let header = HeaderValue::from_bytes(b"\xff1").unwrap();
+
+    for parameter in ANY_PARAMETER {
+        assert_eq!(read_cursor(Some(&header), parameter), Err(HEADER_FAULT));
+    }
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::plus("+1")]
+#[case::leading_blank(" 1")]
+#[case::empty("")]
+#[case::overflow("18446744073709551616")]
+#[case::not_ascii("\u{ff}1")]
+fn a_faulty_parameter_without_a_header_is_the_parameter_fault(#[case] text: &str) {
+    assert_eq!(read_cursor(None, Some(text)), Err(PARAMETER_FAULT));
+}
+
+#[rstest]
+#[case::header(HEADER_FAULT, HEADER_MESSAGE)]
+#[case::parameter(PARAMETER_FAULT, PARAMETER_MESSAGE)]
+fn each_cursor_fault_message_names_its_carrier(#[case] fault: CursorFault, #[case] expected: &str) {
+    assert_eq!(fault.message(), expected);
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+fn a_cursor_fault_message_never_holds_the_value(#[case] text: &str) {
+    let header = read_cursor(Some(&header_value(text)), None).unwrap_err();
+    let parameter = read_cursor(None, Some(text)).unwrap_err();
+
+    assert_eq!(header.message(), HEADER_MESSAGE);
+    assert_eq!(parameter.message(), PARAMETER_MESSAGE);
+    assert!(!header.message().contains(text));
+    assert!(!parameter.message().contains(text));
+}
+
+#[rstest]
+#[case::header(HEADER_FAULT, HEADER_MESSAGE)]
+#[case::parameter(PARAMETER_FAULT, PARAMETER_MESSAGE)]
+fn each_cursor_fault_is_the_400_problem_naming_its_carrier(
+    #[case] fault: CursorFault,
+    #[case] detail: &str,
+) {
+    assert_eq!(bad_request(&fault.bad_request()), detail);
 }

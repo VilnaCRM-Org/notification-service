@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use event_stream_domain::{Cursor, EventType, InvalidEvent};
 use serde::{Deserialize, Serialize};
 use shared_application::http::{Problem, Violation};
@@ -277,7 +277,7 @@ pub(crate) fn parse_types(raw: &str) -> Result<BTreeSet<EventType>, Problem> {
 }
 
 /// The 422 problem of a fault of the types: one violation on `types`.
-fn types_problem(error: TypesError) -> Problem {
+pub(crate) fn types_problem(error: TypesError) -> Problem {
     Problem::validation_failed(vec![Violation {
         property_path: "types".to_owned(),
         message: error.message(),
@@ -285,8 +285,49 @@ fn types_problem(error: TypesError) -> Problem {
     }])
 }
 
+/// A cursor carrier whose value is not a decimal unsigned 64-bit integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CursorFault {
+    /// `Last-Event-ID` or `lastEventId`: the carrier that was read.
+    carrier: &'static str,
+}
+
+impl CursorFault {
+    /// `<carrier> must be a decimal unsigned 64-bit integer`; it never holds the value.
+    fn message(self) -> String {
+        let carrier = self.carrier;
+        format!("{carrier} must be a decimal unsigned 64-bit integer")
+    }
+
+    /// The 400 problem of the REST routes, unchanged (4/FR-16).
+    pub(crate) fn bad_request(self) -> Problem {
+        Problem::new(StatusCode::BAD_REQUEST).with_detail(self.message())
+    }
+}
+
 /// The cursor of a resume: the `Last-Event-ID` header when it is present, else the
-/// `lastEventId` parameter, else none. The other carrier is not read when the header is present.
+/// `lastEventId` parameter, else none. The parameter is not read when the header is present
+/// (4/FR-12).
+///
+/// # Errors
+///
+/// The [`CursorFault`] of the carrier that was read when its value is not a decimal unsigned
+/// 64-bit integer; a header value that is not visible ASCII text is such a value.
+pub(crate) fn read_cursor(
+    header: Option<&HeaderValue>,
+    parameter: Option<&str>,
+) -> Result<Option<Cursor>, CursorFault> {
+    let (text, carrier) = match (header, parameter) {
+        (Some(value), _) => (value.to_str().ok(), CURSOR_HEADER),
+        (None, Some(text)) => (Some(text), CURSOR_PARAMETER),
+        (None, None) => return Ok(None),
+    };
+    text.and_then(|text| Cursor::parse(text).ok())
+        .map(Some)
+        .ok_or(CursorFault { carrier })
+}
+
+/// The cursor of a resume by the rule of [`read_cursor`], for the REST routes.
 ///
 /// # Errors
 ///
@@ -295,21 +336,7 @@ pub(crate) fn parse_cursor(
     headers: &HeaderMap,
     parameter: Option<&str>,
 ) -> Result<Option<Cursor>, Problem> {
-    match (headers.get(CURSOR_HEADER), parameter) {
-        (Some(value), _) => read_cursor(value.to_str().ok(), CURSOR_HEADER).map(Some),
-        (None, Some(text)) => read_cursor(Some(text), CURSOR_PARAMETER).map(Some),
-        (None, None) => Ok(None),
-    }
-}
-
-/// Reads the cursor of one carrier; `None` is a value that is not text.
-fn read_cursor(text: Option<&str>, carrier: &str) -> Result<Cursor, Problem> {
-    text.and_then(|text| Cursor::parse(text).ok())
-        .ok_or_else(|| {
-            Problem::new(StatusCode::BAD_REQUEST).with_detail(format!(
-                "{carrier} must be a decimal unsigned 64-bit integer"
-            ))
-        })
+    read_cursor(headers.get(CURSOR_HEADER), parameter).map_err(CursorFault::bad_request)
 }
 
 /// The wire name of a life stage.
