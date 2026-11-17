@@ -89,7 +89,7 @@ What the design must achieve, from the PRD:
 - The guarantees, the limits and the slow-client handling of bundle 4 unchanged (FR-11, FR-12, FR-18, NFR-1, NFR-6).
 - Every route the service serves an operation of the OpenAPI document and of the Swagger page, a test that fails for a route served without an entry, and the OpenAPI gates and Schemathesis green on every operation (FR-26 to FR-29, NFR-20).
 
-No protected file changes (NFR-15), so this document has no section of protected changes. No bounded context is added: both touched crates are live members of `[workspace].members`.
+No protected file changes (NFR-15) except one that implementation showed to be needed and the maintainer approved on 2026-11-17: the override of `operation-success-response` for the WebSocket operation in `.spectral.yaml` (commit `a374895`, see "What each operation documents"). No bounded context is added: both touched crates are live members of `[workspace].members`.
 
 ## Verified Library Facts
 
@@ -686,7 +686,7 @@ pub fn document() -> utoipa::openapi::OpenApi;
 | `GET /api/docs/{file}` (`api_docs_file_get`) | `file` (path) | `200` with `text/css`, `application/javascript`, `text/html` or `image/png`; `400`, `404` problems; `default` | `swagger-ui.css` |
 
 - Every parameter schema admits the values the service accepts and refuses those it refuses, so Schemathesis's positive cases are accepted and its negative cases refused: the cursor as a decimal of the accepted range, the type list as the grammar of the names, the handshake headers as the values axum's upgrade checks.
-- Every status code the route can answer is listed with its media type and schema; the problems reference `Problem`. Every operation keeps a `default` problem response, which also meets the protected Spectral rules that ask for a 2xx or `default` and a 4xx or `default` response (the WebSocket route answers 101, not 2xx).
+- Every status code the route can answer is listed with its media type and schema; the problems reference `Problem`. Every operation keeps a `default` problem response, which also meets the protected Spectral rules that ask for a 2xx or `default` and a 4xx or `default` response. Spectral's built-in rule `operation-success-response` asks every operation for a 2xx or 3xx answer, which the WebSocket route cannot give: it answers 101. The maintainer approved on 2026-11-17 an override in the protected `.spectral.yaml` (commit `a374895`) that turns that one rule off for `GET /api/events/ws` only; every other rule keeps applying to it.
 - The event schemas `SseFrame` and `GraphQLEvent` describe one event, the convention of OpenAPI 3.2 that Schemathesis reads (Verified Library Facts 8); `GraphQLEvent.data` admits the empty data of `complete` next to the JSON of a result.
 - The descriptions carry the frame formats of `docs/streaming-protocol.md` in short, and the Swagger page renders them with the examples.
 
