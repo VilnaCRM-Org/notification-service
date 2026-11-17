@@ -280,7 +280,7 @@ data: {"data":{"events":{"id":"1043","type":"user.created","data":{"id":"8f14e45
 
 > Assumption: the transport learns the id of each result from per-request data that the resolver fills before it yields the result, and not from the client's selection set, which may omit or alias `id`.
 
-**FR-11 Resume.** The cursor of the subscription is the `Last-Event-ID` request header when it is present, else the `lastEventId` argument, else none. When the header is present, the argument is not read (4/FR-12). Both forms read the header.
+**FR-11 Resume.** The cursor of the subscription is the `Last-Event-ID` request header when it is present, else the `lastEventId` argument, else none. Every carrier that is present must hold a cursor: a malformed `lastEventId` argument is refused also beside a valid header, and when both hold a cursor the header wins (4/FR-12). Both forms read the header.
 
 - A subscription with cursor `c` receives every retained event of its types with an id above `c`, in id order, then live events, with no gap and no duplicate between the phases. The events come from the window, from Kafka, or after the wait of a cursor ahead of the tail, exactly as 4/FR-12 to 4/FR-15 specify, including the cap `EVENT_REPLAY_MAX_EVENTS`, the replay permits, the pages and the clamp to the end of the topic.
 - A subscription without a cursor receives live events only: those with an id above the node's tail position when the subscriber was registered.
@@ -304,7 +304,7 @@ data: {"data":{"events":{"id":"1043","type":"user.created","data":{"id":"8f14e45
 | a name that breaks the pattern | `types` | `pattern` | `An event type must match ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$.` |
 | more than 100 distinct names | `types` | `max_items` | `types must hold 1 to 100 event type names` |
 | a `Last-Event-ID` header that is not a cursor (text, sign, blank, overflow) | `Last-Event-ID` | `format` | `Last-Event-ID must be a decimal unsigned 64-bit integer` |
-| a `lastEventId` argument that is not a cursor, when the header is absent | `lastEventId` | `format` | `lastEventId must be a decimal unsigned 64-bit integer` |
+| a `lastEventId` argument that is not a cursor, also beside a valid header (the header is checked first) | `lastEventId` | `format` | `lastEventId must be a decimal unsigned 64-bit integer` |
 
 - The names are checked in list order and the first fault answers. A repeated name counts once.
 - The types are checked before the cursor, and only the first failing check answers.
@@ -312,7 +312,7 @@ data: {"data":{"events":{"id":"1043","type":"user.created","data":{"id":"8f14e45
 
 > Assumption: invalid arguments are answered inside an accepted event stream, because the graphql-sse protocol requires validation that runs before execution to report through an accepted SSE connection: a 4xx makes an `EventSource` fail without telling the page why, and makes the graphql-sse client retry a request that cannot succeed. "No stream of events is opened" (AC4) therefore means that no hub subscriber and no event exist; the stream carries only the error result.
 
-> Assumption: the type rules, codes and messages are those of the REST routes, so a client meets one rule. A malformed cursor, a 400 on the REST routes, becomes a violation with the code `format` on the carrier that was read, so that it gets `VALIDATION_FAILED` as AC4 asks. The resolver builds a 422 problem and converts it with `problem_to_error`, so the shared helper stays unchanged.
+> Assumption: the type rules, codes and messages are those of the REST routes, so a client meets one rule. A malformed cursor, a 400 on the REST routes, becomes a violation with the code `format` on the first faulty carrier, the header then the argument, so that it gets `VALIDATION_FAILED` as AC4 asks. The resolver builds a 422 problem and converts it with `problem_to_error`, so the shared helper stays unchanged.
 
 **FR-14 One root field.** A subscription operation must satisfy the direct-field rule:
 

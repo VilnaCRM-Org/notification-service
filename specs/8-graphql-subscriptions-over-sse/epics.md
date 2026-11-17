@@ -96,7 +96,7 @@ No protected change. After this epic the event-stream application crate offers t
 
 No protected change. Implemented by: the rust-implementer agent.
 
-Goal: the carrier rule of the cursor (the `Last-Event-ID` header wins, the `lastEventId` parameter is read only without it) lives in one crate-internal function that reports which carrier failed. Story 1.3 can then answer that fault with `VALIDATION_FAILED`, while the REST routes keep their 400. It is a refactor that keeps every behaviour: no answer of the SSE or WebSocket route changes.
+Goal: the carrier rule of the cursor (every carrier that is present must hold a cursor; when both do, the `Last-Event-ID` header wins over the `lastEventId` parameter) lives in one crate-internal function that reports which carrier failed. Story 1.3 can then answer that fault with `VALIDATION_FAILED`, while the REST routes keep their 400. It is a refactor that keeps every behaviour: no answer of the SSE or WebSocket route changes.
 
 **Scope:**
 
@@ -115,7 +115,7 @@ Goal: the carrier rule of the cursor (the `Last-Event-ID` header wins, the `last
 **Acceptance Criteria:**
 
 - **Given** only a header, only a parameter, or neither, **When** `read_cursor` runs with the values `0`, `1` and `18446744073709551615`, **Then** it answers that cursor from the carrier given, and `None` when neither is present
-- **Given** a valid header and a malformed parameter (`abc`), **When** `read_cursor` runs, **Then** it answers the header's cursor and never reads the parameter; **given** both valid, **Then** the header's cursor wins
+- **Given** a valid header and a malformed parameter (`abc`), **When** `read_cursor` runs, **Then** it answers the `lastEventId` fault (a malformed parameter is refused also beside a valid header); **given** both valid, **Then** the header's cursor wins
 - **Given** a header holding `abc`, `-1`, `+1`, ` 1`, an empty value, `18446744073709551616` or a value that is not visible ASCII text, **When** `read_cursor` runs, **Then** it answers `CursorFault` with the carrier `Last-Event-ID`, whatever the parameter holds
 - **Given** no header and a parameter holding one of those faulty values, **When** `read_cursor` runs, **Then** it answers `CursorFault` with the carrier `lastEventId`
 - **Given** each carrier, **When** `CursorFault::message` runs, **Then** it answers `Last-Event-ID must be a decimal unsigned 64-bit integer` or `lastEventId must be a decimal unsigned 64-bit integer`, and never holds the value
@@ -190,7 +190,7 @@ Goal: `EventStreamSubscription::events(types, lastEventId)` checks its arguments
 - **Given** results yielded with `id` selected, aliased or not selected, **When** `take_delivered` is called after each result, **Then** it answers that result's event id, and a second call before the next result answers `None`
 - **Given** each row of FR-13's table (`types: []`, an empty name, a name of 129 characters, `User.Created`, 101 distinct names, a malformed `Last-Event-ID` header, a malformed `lastEventId` argument without the header), **When** the field runs, **Then** the stream yields one error with the `message` `The request failed validation.`, `extensions.code` `VALIDATION_FAILED` and exactly the violation of that row, registers no subscriber, leaves the phase `Pending`, and the `LogRecorder` holds no entry
 - **Given** faulty types and a faulty cursor together, several faulty names, or 100 distinct names with repeats, **When** the field runs, **Then** the types answer before the cursor, the first fault in list order answers, the 100 names are accepted, and no message holds a value of the request
-- **Given** a valid header in the link and a malformed argument, **When** the field runs, **Then** it opens from the header's cursor and does not read the argument; **given** a malformed header and a valid argument, **Then** the violation names `Last-Event-ID`
+- **Given** a valid header in the link and a malformed argument, **When** the field runs, **Then** the violation names `lastEventId` and no stream opens (a malformed argument is refused also beside a valid header); **given** a malformed header and a valid argument, **Then** the violation names `Last-Event-ID`
 - **Given** a hub that is closed, not started or at its cap, **When** a valid subscription runs, **Then** the phase becomes `Refused(Closed)`, `Refused(NotReady)` or `Refused(AtCapacity)` in the precedence of `Subscriptions::open`, one error item follows, nothing is registered, and the resolver writes no log entry (`LogRecorder` empty)
 - **Given** an open subscription, **When** its response stream is dropped, before or after `release`, **Then** its slot is freed and `subscribers` returns to its value before the request
 - **Given** a cursor below the window and a replay that answers `Unavailable`, **When** the released stream runs, **Then** it ends without a further item and `replay failed` is written once at `warn`, with `transport` `graphql-sse` and the error chain

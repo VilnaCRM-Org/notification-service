@@ -179,7 +179,8 @@ The REST routes answer a malformed cursor with a 400 problem. The GraphQL field 
 /// A cursor carrier whose value is not a decimal unsigned 64-bit integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorFault {
-    /// `Last-Event-ID` or `lastEventId`: the carrier that was read.
+    /// `Last-Event-ID` or `lastEventId`: the first carrier, the header then the parameter, whose
+    /// value is not a cursor.
     carrier: &'static str,
 }
 
@@ -192,8 +193,8 @@ impl CursorFault {
     pub(crate) fn violation(self) -> Problem;
 }
 
-/// The header when present, else the parameter, else none; the parameter is not read when the
-/// header is present (4/FR-12).
+/// Every carrier that is present must hold a cursor (the header is checked first); when both do,
+/// the header wins, else the one present, else none (4/FR-12).
 pub(crate) fn read_cursor(
     header: Option<&HeaderValue>,
     parameter: Option<&str>,
@@ -765,7 +766,7 @@ The general rules of bundle 4 apply:
 
 - every row of FR-13's table (message, code, `propertyPath`, no subscriber, phase `Pending`);
 - types checked before the cursor;
-- the header winning over the argument, with the argument not read when the header is present;
+- the header winning over a valid argument, and a malformed argument refused also beside a valid header;
 - a valid subscription registering exactly one subscriber and setting `Opened`;
 - nothing stepping before `release`: no window page and no replay call, recorded by the scripted replay;
 - the hand-over at the gate: a subscription without a cursor that registered (`Opened`) and is not released, with events of its type already in the window before registration; events published before `release` are yielded after it, exactly those, in id order, and none retained before registration;
