@@ -579,12 +579,26 @@ fn each_carrier_reads_a_decimal_u64(#[case] text: &str, #[case] expected: u64) {
 
 #[rstest]
 #[case::both_valid(Some("5"))]
-#[case::parameter_invalid(Some("abc"))]
+#[case::parameter_above_the_header(Some("9"))]
 #[case::parameter_absent(None)]
-fn the_header_wins_over_the_parameter(#[case] parameter: Option<&str>) {
+fn the_header_wins_over_a_valid_parameter(#[case] parameter: Option<&str>) {
     assert_eq!(
         parse_cursor(&header("8"), parameter),
         Ok(Some(Cursor::new(8)))
+    );
+}
+
+#[rstest]
+#[case::empty("")]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+fn an_invalid_parameter_beside_a_valid_header_is_400_naming_the_parameter(#[case] text: &str) {
+    let problem = parse_cursor(&header("1043"), Some(text)).unwrap_err();
+
+    assert_eq!(
+        bad_request(&problem),
+        "lastEventId must be a decimal unsigned 64-bit integer"
     );
 }
 
@@ -679,14 +693,34 @@ fn read_cursor_answers_the_cursor_of_the_carrier_given(#[case] text: &str, #[cas
 }
 
 #[rstest]
-#[case::parameter_valid(Some("5"))]
-#[case::parameter_malformed(Some("abc"))]
+#[case::parameter_below_the_header(Some("5"))]
+#[case::parameter_above_the_header(Some("9"))]
+#[case::parameter_equal_to_the_header(Some("8"))]
+#[case::parameter_largest(Some("18446744073709551615"))]
 #[case::parameter_absent(None)]
-fn read_cursor_answers_the_header_and_never_reads_the_parameter(#[case] parameter: Option<&str>) {
+fn read_cursor_answers_the_header_over_a_valid_parameter(#[case] parameter: Option<&str>) {
     assert_eq!(
         read_cursor(Some(&header_value("8")), parameter),
         Ok(Some(Cursor::new(8)))
     );
+}
+
+#[rstest]
+#[case::empty("")]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+#[case::plus("+1")]
+#[case::leading_blank(" 1")]
+#[case::not_ascii("\u{ff}1")]
+fn a_malformed_parameter_beside_a_valid_header_is_the_parameter_fault(#[case] text: &str) {
+    for header in ["0", "8", "1043", "18446744073709551615"] {
+        assert_eq!(
+            read_cursor(Some(&header_value(header)), Some(text)),
+            Err(PARAMETER_FAULT),
+            "{header} beside {text:?}"
+        );
+    }
 }
 
 #[rstest]
@@ -925,7 +959,13 @@ fn the_parameter_texts_name_the_rules_and_what_the_schemas_cannot_express() {
     assert!(WS_TYPES.contains("Optional"));
     assert!(CURSOR_PARAMETER_TEXT.contains("at most 18446744073709551615"));
     assert!(CURSOR_PARAMETER_TEXT.contains("leading zeros accepted"));
-    assert!(CURSOR_HEADER_TEXT.contains("wins over the parameter"));
+    assert!(CURSOR_HEADER_TEXT.contains("wins over a valid `lastEventId`"));
+    assert!(CURSOR_HEADER_TEXT.contains("still the 400 problem of `lastEventId`"));
+    assert!(CURSOR_PARAMETER_TEXT.contains("also beside a valid `Last-Event-ID` header"));
+    for text in [CURSOR_HEADER_TEXT, CURSOR_PARAMETER_TEXT] {
+        assert!(!text.contains("not read"), "{text}");
+        assert!(!text.contains("is absent"), "{text}");
+    }
     for text in [CONNECTION_TEXT, UPGRADE_TEXT, VERSION_TEXT, KEY_TEXT] {
         assert!(text.contains("400 problem"), "{text}");
     }

@@ -115,7 +115,7 @@ paths:
         - load.test
       - name: lastEventId
         in: query
-        description: 'The cursor of a resume when the `Last-Event-ID` header is absent: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem.'
+        description: 'The cursor of a resume: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events; a valid `Last-Event-ID` header wins over it. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem, also beside a valid `Last-Event-ID` header.'
         required: false
         schema:
           type: string
@@ -123,7 +123,7 @@ paths:
         example: '1043'
       - name: Last-Event-ID
         in: header
-        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over the parameter, which is then not read. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
+        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over a valid `lastEventId`, and a malformed `lastEventId` beside it is still the 400 problem of `lastEventId`. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
         required: false
         schema:
           type: string
@@ -219,7 +219,7 @@ paths:
         - load.test
       - name: lastEventId
         in: query
-        description: 'The cursor of a resume when the `Last-Event-ID` header is absent: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem.'
+        description: 'The cursor of a resume: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events; a valid `Last-Event-ID` header wins over it. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem, also beside a valid `Last-Event-ID` header.'
         required: false
         schema:
           type: string
@@ -259,7 +259,7 @@ paths:
         example: AAAAAAAAAAAAAAAAAAAAAA==
       - name: Last-Event-ID
         in: header
-        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over the parameter, which is then not read. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
+        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over a valid `lastEventId`, and a malformed `lastEventId` beside it is still the 400 problem of `lastEventId`. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
         required: false
         schema:
           type: string

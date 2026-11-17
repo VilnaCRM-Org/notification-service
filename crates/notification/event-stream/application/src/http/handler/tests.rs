@@ -14,7 +14,7 @@ use axum::http::header::{
     UPGRADE,
 };
 use axum::http::response::Parts;
-use axum::http::{HeaderMap, Method, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use event_stream_domain::{
     Cursor, EventType, Offset, StoredEvent, TopicError, TopicRecord, TopicReplay,
 };
@@ -970,6 +970,7 @@ async fn a_hundred_distinct_names_with_repeats_open_a_stream() {
 }
 
 #[rstest]
+#[case::empty("")]
 #[case::text("abc")]
 #[case::negative("-1")]
 #[case::overflow("18446744073709551616")]
@@ -987,8 +988,17 @@ async fn an_invalid_cursor_is_400_naming_its_carrier(#[case] value: &str) {
         &format!("/events/stream?types=a&lastEventId={value}"),
     )
     .await;
+    let beside_a_valid_header = send_request(
+        node.state.clone(),
+        get_after(&format!("/events/stream?types=a&lastEventId={value}"), "5"),
+    )
+    .await;
 
-    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+    for (reply, carrier) in [
+        (by_header, "Last-Event-ID"),
+        (by_parameter, "lastEventId"),
+        (beside_a_valid_header, "lastEventId"),
+    ] {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
         assert_eq!(reply.content_type, PROBLEM);
         assert_eq!(
@@ -997,6 +1007,30 @@ async fn an_invalid_cursor_is_400_naming_its_carrier(#[case] value: &str) {
         );
     }
     assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+/// The request of the Schemathesis check ST201 (schema-violating request accepted): a valid
+/// `Last-Event-ID` beside an empty `lastEventId`, which the parameter schema refuses. It is
+/// refused before the node is asked, so a starting node answers it the same.
+#[tokio::test(start_paused = true)]
+async fn a_valid_header_beside_an_empty_parameter_is_the_400_problem_naming_the_parameter() {
+    for node in [ready(1_000), refusing(8, Life::Unstarted)] {
+        let request = get_after("/events/stream?types=load.test&lastEventId=", "1043");
+
+        let reply = send_request(node.state.clone(), request).await;
+
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.content_type, PROBLEM);
+        assert_eq!(
+            reply.json(),
+            blank_problem(
+                400,
+                "Bad Request",
+                "lastEventId must be a decimal unsigned 64-bit integer"
+            )
+        );
+        assert_eq!(node.hub.subscriber_count(), 0);
+    }
 }
 
 /// What happened to the hub of a refusing node.
@@ -1306,6 +1340,7 @@ async fn invalid_types_on_the_websocket_route_are_422_before_the_503_and_the_upg
 }
 
 #[rstest]
+#[case::empty("")]
 #[case::text("abc")]
 #[case::negative("-1")]
 #[case::overflow("18446744073709551616")]
@@ -1316,6 +1351,10 @@ async fn an_invalid_cursor_on_the_websocket_route_is_400_naming_its_carrier(#[ca
     by_header
         .headers_mut()
         .insert("last-event-id", value.parse().unwrap());
+    let mut beside_a_valid_header = handshake(&format!("/events/ws?types=a&lastEventId={value}"));
+    beside_a_valid_header
+        .headers_mut()
+        .insert("last-event-id", HeaderValue::from_static("1043"));
 
     let by_header = send_request(node.state.clone(), by_header).await;
     let by_parameter = send(
@@ -1323,8 +1362,13 @@ async fn an_invalid_cursor_on_the_websocket_route_is_400_naming_its_carrier(#[ca
         &format!("/events/ws?lastEventId={value}"),
     )
     .await;
+    let beside_a_valid_header = send_request(node.state.clone(), beside_a_valid_header).await;
 
-    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+    for (reply, carrier) in [
+        (by_header, "Last-Event-ID"),
+        (by_parameter, "lastEventId"),
+        (beside_a_valid_header, "lastEventId"),
+    ] {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
         assert_eq!(reply.content_type, PROBLEM);
         assert_eq!(
@@ -1853,7 +1897,7 @@ fn a_cursor_matches_the_documented_schemas_exactly_when_the_routes_accept_it() {
             accepted,
             "the parameter rule on {text:?}"
         );
-        if let Ok(header) = text.parse::<axum::http::HeaderValue>() {
+        if let Ok(header) = text.parse::<HeaderValue>() {
             assert_eq!(
                 read_cursor(Some(&header), None).is_ok(),
                 accepted,

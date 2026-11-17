@@ -28,7 +28,7 @@ use crate::query::EventTypeView;
 use crate::query::list_event_types::ListEventTypes;
 use crate::status::{NodeState, NodeStatus, StartReason};
 
-/// The header that carries the cursor of a resume; it wins over [`CURSOR_PARAMETER`].
+/// The header that carries the cursor of a resume; it wins over a valid [`CURSOR_PARAMETER`].
 const CURSOR_HEADER: &str = "Last-Event-ID";
 
 /// The query parameter that carries the cursor of a resume.
@@ -166,7 +166,7 @@ impl From<NodeStatus> for EventStreamStatusResponse {
 pub struct StreamParams {
     /// Comma-separated event type names.
     pub types: String,
-    /// The cursor of a resume when the `Last-Event-ID` header is absent.
+    /// The cursor of a resume; checked also beside the `Last-Event-ID` header, which wins.
     pub last_event_id: Option<String>,
 }
 
@@ -191,7 +191,7 @@ impl IntoParams for StreamParams {
 pub struct WsParams {
     /// Comma-separated event type names.
     pub types: Option<String>,
-    /// The cursor of a resume when the `Last-Event-ID` header is absent.
+    /// The cursor of a resume; checked also beside the `Last-Event-ID` header, which wins.
     pub last_event_id: Option<String>,
 }
 
@@ -348,18 +348,19 @@ const WS_TYPES: &str = "The event types to deliver from the start, as on the SSE
     400 problem, an invalid list the 422 problem with one violation on `types`.";
 
 /// The description of `lastEventId`.
-const CURSOR_PARAMETER_TEXT: &str = "The cursor of a resume when the `Last-Event-ID` \
-    header is absent: the id of the last event received, a decimal unsigned 64-bit integer \
-    (digits only, at most 18446744073709551615, leading zeros accepted). The stream first \
-    delivers the retained events of the types of the request above it, then live events. A \
-    browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 \
-    problem.";
+const CURSOR_PARAMETER_TEXT: &str = "The cursor of a resume: the id of the last event \
+    received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, \
+    leading zeros accepted). The stream first delivers the retained events of the types of the \
+    request above it, then live events; a valid `Last-Event-ID` header wins over it. A browser \
+    `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem, \
+    also beside a valid `Last-Event-ID` header.";
 
 /// The description of the `Last-Event-ID` header.
 const CURSOR_HEADER_TEXT: &str = "The cursor of a resume, with the grammar of \
-    `lastEventId`; it wins over the parameter, which is then not read. A browser `EventSource` \
-    sends it by itself when it reconnects. Any other value, a value that is not visible ASCII \
-    text included, is the 400 problem.";
+    `lastEventId`; it wins over a valid `lastEventId`, and a malformed `lastEventId` beside it \
+    is still the 400 problem of `lastEventId`. A browser `EventSource` sends it by itself when it \
+    reconnects. Any other value, a value that is not visible ASCII text included, is the 400 \
+    problem.";
 
 /// The description of the `Connection` handshake header.
 const CONNECTION_TEXT: &str = "Must hold `upgrade` in any letter case, as `Upgrade` \
@@ -643,7 +644,8 @@ pub(crate) fn types_problem(error: TypesError) -> Problem {
 /// A cursor carrier whose value is not a decimal unsigned 64-bit integer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorFault {
-    /// `Last-Event-ID` or `lastEventId`: the carrier that was read.
+    /// `Last-Event-ID` or `lastEventId`: the first carrier, the header then the parameter, whose
+    /// value is not a cursor.
     carrier: &'static str,
 }
 
@@ -681,25 +683,29 @@ impl CursorFault {
 }
 
 /// The cursor of a resume: the `Last-Event-ID` header when it is present, else the
-/// `lastEventId` parameter, else none. The parameter is not read when the header is present
-/// (4/FR-12).
+/// `lastEventId` parameter, else none (4/FR-12). Every carrier that is present is checked, the
+/// header first: a malformed parameter is refused also beside a valid header, which then wins.
 ///
 /// # Errors
 ///
-/// The [`CursorFault`] of the carrier that was read when its value is not a decimal unsigned
-/// 64-bit integer; a header value that is not visible ASCII text is such a value.
+/// The [`CursorFault`] of the first carrier, the header then the parameter, whose value is not a
+/// decimal unsigned 64-bit integer; a header value that is not visible ASCII text is such a value.
 pub(crate) fn read_cursor(
     header: Option<&HeaderValue>,
     parameter: Option<&str>,
 ) -> Result<Option<Cursor>, CursorFault> {
-    let (text, fault) = match (header, parameter) {
-        (Some(value), _) => (value.to_str().ok(), CursorFault::HEADER),
-        (None, Some(text)) => (Some(text), CursorFault::PARAMETER),
-        (None, None) => return Ok(None),
-    };
-    text.and_then(|text| Cursor::parse(text).ok())
-        .map(Some)
-        .ok_or(fault)
+    let header = header
+        .map(|value| carried_cursor(value.to_str().ok(), CursorFault::HEADER))
+        .transpose()?;
+    let parameter = parameter
+        .map(|text| carried_cursor(Some(text), CursorFault::PARAMETER))
+        .transpose()?;
+    Ok(header.or(parameter))
+}
+
+/// The cursor of one carrier's text; `None` stands for a header value that is not text.
+fn carried_cursor(text: Option<&str>, fault: CursorFault) -> Result<Cursor, CursorFault> {
+    text.and_then(|text| Cursor::parse(text).ok()).ok_or(fault)
 }
 
 /// The cursor of a resume by the rule of [`read_cursor`], for the REST routes.

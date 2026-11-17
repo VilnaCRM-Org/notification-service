@@ -866,10 +866,6 @@ async fn after_release_kafka_then_the_window_then_live_events_come_in_id_order_o
     r#"subscription { events(types: ["a"]) { id type data } }"#,
     Some("1001")
 )]
-#[case::by_the_header_over_a_malformed_argument(
-    r#"subscription { events(types: ["a"], lastEventId: "abc") { id type data } }"#,
-    Some("1001")
-)]
 #[case::by_the_header_over_a_valid_argument(
     r#"subscription { events(types: ["a"], lastEventId: "1000") { id type data } }"#,
     Some("1001")
@@ -966,6 +962,9 @@ async fn take_delivered_gives_the_id_of_each_result_whatever_the_selection(
 #[case::a_malformed_header(json!({"types": ["a"]}), Some("abc"), "Last-Event-ID", "format", HEADER_MESSAGE)]
 #[case::a_malformed_argument(json!({"types": ["a"], "lastEventId": "abc"}), None, "lastEventId", "format", PARAMETER_MESSAGE)]
 #[case::a_malformed_header_over_a_valid_argument(json!({"types": ["a"], "lastEventId": "5"}), Some("-1"), "Last-Event-ID", "format", HEADER_MESSAGE)]
+#[case::a_malformed_header_over_a_malformed_argument(json!({"types": ["a"], "lastEventId": "abc"}), Some("-1"), "Last-Event-ID", "format", HEADER_MESSAGE)]
+#[case::a_malformed_argument_beside_a_valid_header(json!({"types": ["a"], "lastEventId": "abc"}), Some("1043"), "lastEventId", "format", PARAMETER_MESSAGE)]
+#[case::an_empty_argument_beside_a_valid_header(json!({"types": ["a"], "lastEventId": ""}), Some("1043"), "lastEventId", "format", PARAMETER_MESSAGE)]
 #[case::faulty_types_and_a_faulty_cursor(json!({"types": ["User.Created"], "lastEventId": "abc"}), Some("abc"), "types", "pattern", "An event type must match ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$.")]
 #[case::the_first_faulty_name_in_list_order(json!({"types": ["a", "User.Created", ""]}), None, "types", "pattern", "An event type must match ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$.")]
 #[case::an_empty_name_before_a_pattern_fault(json!({"types": ["", "User.Created"]}), None, "types", "required", "types must not hold an empty event type name")]
