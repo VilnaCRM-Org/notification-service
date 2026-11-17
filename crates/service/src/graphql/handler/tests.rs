@@ -1,26 +1,100 @@
+use std::fmt::Write as _;
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE};
 use axum::http::{Method, Request, Response, StatusCode};
 use axum::routing::post;
+use event_stream_application::graphql::{StreamLink, StreamPhase};
+use event_stream_application::http::EventStreamState;
+use event_stream_application::{
+    Hub, HubSettings, ReplaySettings, StatusSource, StreamSettings, Subscriptions, TailState,
+    Window,
+};
+use event_stream_domain::Cursor;
+use futures_util::StreamExt as _;
 use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
+use shared_infrastructure::bus::InMemoryQueryBus;
+use test_support::static_topic::StaticTopic;
+use tokio::sync::watch;
 use tower::ServiceExt as _;
 
 use super::*;
-use crate::graphql::schema::builder;
+use crate::graphql::schema::{MAX_COMPLEXITY, builder};
 use crate::http::security_headers;
 
-fn router() -> Router {
+/// The bound of every awaited call of the tests on a node's state.
+const LIMIT: Duration = Duration::from_secs(5);
+
+/// The one error of a subscription on the JSON transport (FR-5).
+const TRANSPORT_ERROR: &str = "Subscriptions are not supported on this transport.";
+
+/// The subscription of the JSON-transport tests.
+const SUBSCRIPTION: &str = r#"subscription { events(types: ["a"]) { id } }"#;
+
+fn router_of(schema: ApiSchema) -> Router {
     Router::new()
         .route("/api/graphql", post(execute).get(explorer))
-        .with_state(builder().finish())
+        .with_state(schema)
         .layer(security_headers::layer())
+}
+
+fn router() -> Router {
+    router_of(builder().finish())
 }
 
 async fn send(request: Request<Body>) -> Response<Body> {
     router().oneshot(request).await.unwrap()
+}
+
+/// The state of a started node: its hub has a position and takes up to four subscribers, so a
+/// subscription whose resolver ran would register one.
+fn started_state() -> EventStreamState {
+    let hub = Hub::new(HubSettings {
+        max_subscribers: 4,
+        buffer: 8,
+    });
+    hub.start(Cursor::new(1));
+    let window = Arc::new(Window::new(16, usize::MAX));
+    let (_tail, tail_state) = watch::channel(TailState::default());
+    let subscriptions = Subscriptions::new(
+        Arc::clone(&hub),
+        Arc::clone(&window),
+        Arc::new(StaticTopic::empty()),
+        tail_state.clone(),
+        ReplaySettings {
+            max_events: 1_000,
+            max_data_bytes: 65_536,
+            permits: 1,
+        },
+    );
+    EventStreamState {
+        query_bus: Arc::new(InMemoryQueryBus::new()),
+        subscriptions: Arc::new(subscriptions),
+        status: Arc::new(StatusSource::new(
+            tail_state,
+            window,
+            Arc::<Hub>::clone(&hub),
+        )),
+        hub,
+        settings: StreamSettings {
+            keep_alive: Duration::from_secs(15),
+        },
+    }
+}
+
+/// `body` posted as a GraphQL request without an event-stream `Accept`, answered within
+/// [`LIMIT`] by a router whose schema holds `state`.
+async fn post_to(state: &EventStreamState, body: &Value) -> Response<Body> {
+    let router = router_of(builder().data(state.clone()).finish());
+    tokio::time::timeout(LIMIT, router.oneshot(post_json(&body.to_string())))
+        .await
+        .expect("the request answers in time")
+        .unwrap()
 }
 
 fn post_body(content_type: &str, body: &str) -> Request<Body> {
@@ -143,6 +217,152 @@ async fn a_syntax_error_is_200_with_errors() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert!(json_of(response).await["errors"].is_array());
+}
+
+#[tokio::test]
+async fn a_subscription_on_the_json_transport_is_the_one_transport_error_and_registers_nothing() {
+    let state = started_state();
+
+    let response = post_to(&state, &json!({ "query": SUBSCRIPTION })).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(content_type(&response), "application/json");
+    assert_eq!(
+        json_of(response).await,
+        json!({ "data": null, "errors": [{ "message": TRANSPORT_ERROR }] })
+    );
+    assert_eq!(state.hub.subscriber_count(), 0);
+    assert_eq!(state.status.snapshot().subscribers, 0);
+}
+
+/// The validation error of `subscription { __typename }`, which async-graphql reports twice.
+const UNKNOWN_TYPENAME: &str = r#"Unknown field "__typename" on type "Subscription"."#;
+
+#[rstest]
+#[case::two_root_fields(
+    r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::a_root_fragment_spread(
+    r#"subscription { ...F } fragment F on Subscription { events(types: ["a"]) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::a_skipped_root_field(
+    r#"subscription { events(types: ["a"]) @skip(if: true) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::an_invalid_type_name(
+    r#"subscription { events(types: ["A"]) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::the_typename_of_the_root(
+    "subscription { __typename }",
+    &[UNKNOWN_TYPENAME, UNKNOWN_TYPENAME]
+)]
+#[tokio::test]
+async fn a_subscription_of_any_root_shape_keeps_its_json_answer(
+    #[case] query: &str,
+    #[case] expected: &[&str],
+) {
+    let state = started_state();
+
+    let messages = refusal_of(post_to(&state, &json!({ "query": query })).await).await;
+
+    assert_eq!(messages, expected);
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn the_node_of_the_json_transport_tests_takes_the_subscriber_of_a_streamed_subscription() {
+    let state = started_state();
+    let schema = builder().data(state.clone()).finish();
+    let link = StreamLink::new(None);
+
+    let mut responses =
+        schema.execute_stream(async_graphql::Request::new(SUBSCRIPTION).data(link.clone()));
+    tokio::time::timeout(LIMIT, async {
+        tokio::select! {
+            biased;
+            item = responses.next() => panic!("a result before the release: {item:?}"),
+            () = link.decided() => {}
+        }
+    })
+    .await
+    .expect("the resolver runs in time");
+
+    assert_eq!(link.phase(), StreamPhase::Opened);
+    assert_eq!(state.hub.subscriber_count(), 1);
+    drop(responses);
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// The messages of the errors of a GraphQL answer, whose `data` must be `null`.
+async fn refusal_of(response: Response<Body>) -> Vec<String> {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(content_type(&response), "application/json");
+    let body = json_of(response).await;
+    assert_eq!(body["data"], Value::Null, "{body}");
+    body["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| error["message"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[rstest]
+#[case::two_aliases(r#"subscription { events(types: ["a"]) { a: data b: data } }"#)]
+#[case::one_name_twice(r#"subscription { events(types: ["a"]) { data data } }"#)]
+#[case::through_a_fragment(
+    r#"subscription { events(types: ["a"]) { data ...F } } fragment F on Event { data }"#
+)]
+#[case::through_an_inline_fragment(
+    r#"subscription { events(types: ["a"]) { data ... on Event { data } } }"#
+)]
+#[tokio::test]
+async fn a_subscription_that_selects_the_event_data_twice_is_too_complex(#[case] query: &str) {
+    let state = started_state();
+
+    let messages = refusal_of(post_to(&state, &json!({ "query": query })).await).await;
+
+    assert_eq!(messages, ["Query is too complex."]);
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn a_subscription_that_selects_every_event_field_once_passes_validation() {
+    let state = started_state();
+    let query = r#"subscription { events(types: ["a"]) { id type data } }"#;
+
+    let messages = refusal_of(post_to(&state, &json!({ "query": query })).await).await;
+
+    assert_eq!(messages, [TRANSPORT_ERROR]);
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// A subscription of complexity `1 + 501 + ids`: the field `events`, its `data` once and `ids`
+/// aliased selections of `id`.
+fn data_and_ids(ids: usize) -> String {
+    let mut selection = String::from("data");
+    for n in 0..ids {
+        write!(selection, " i{n}: id").unwrap();
+    }
+    format!(r#"subscription {{ events(types: ["a"]) {{ {selection} }} }}"#)
+}
+
+#[rstest]
+#[case::at_the_limit(MAX_COMPLEXITY - 502, TRANSPORT_ERROR)]
+#[case::one_above_the_limit(MAX_COMPLEXITY - 501, "Query is too complex.")]
+#[tokio::test]
+async fn the_event_data_costs_five_hundred_and_one_under_the_complexity_limit(
+    #[case] ids: usize,
+    #[case] message: &str,
+) {
+    let state = started_state();
+
+    let response = post_to(&state, &json!({ "query": data_and_ids(ids) })).await;
+
+    assert_eq!(refusal_of(response).await, [message]);
 }
 
 /// The attributes of every `script` and `link` element of the page, as `(name, value)` lists.

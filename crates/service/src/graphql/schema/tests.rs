@@ -5,7 +5,17 @@ use async_graphql::{Request, Response};
 
 use super::*;
 
-const EXPECTED_SDL: &str = r#""The status of the event stream on the answering instance; 64-bit values are decimal strings."
+const EXPECTED_SDL: &str = r#""An event of a subscribed type: the same object as a WebSocket frame."
+type Event {
+  "The event object the producer wrote: envelope id, type, occurredAt and data."
+  data: JSON!
+  "Event id: the Kafka offset of the event plus one, in decimal; the cursor of a resume."
+  id: String!
+  "Event type name."
+  type: String!
+}
+
+"The status of the event stream on the answering instance; 64-bit values are decimal strings."
 type EventStreamStatus {
   "Whether the last read of the topic watermarks succeeded."
   brokerReachable: Boolean!
@@ -39,6 +49,9 @@ type EventType {
   name: String!
 }
 
+"A scalar that can represent any JSON value."
+scalar JSON
+
 "Query root."
 type Query {
   "Retrieves the status of the event stream on the answering instance."
@@ -47,12 +60,19 @@ type Query {
   eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!
 }
 
+"Subscription root."
+type Subscription {
+  "Streams every event of the listed types (1 to 100 names); with lastEventId or the Last-Event-ID header, every retained event after that id comes first."
+  events(lastEventId: String, types: [String!]!): Event!
+}
+
 "Directs the executor to include this field or fragment only when the `if` argument is true."
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 "Directs the executor to skip this field or fragment when the `if` argument is true."
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
   query: Query
+  subscription: Subscription
 }
 "#;
 
@@ -62,11 +82,14 @@ fn the_sdl_is_the_documented_schema() {
 }
 
 #[test]
-fn the_sdl_has_the_two_queries_and_nothing_else_to_call() {
+fn the_sdl_has_the_two_queries_the_one_subscription_and_no_mutation() {
     let text = sdl();
 
     assert!(text.contains("eventStreamStatus: EventStreamStatus!"));
     assert!(text.contains("eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!"));
+    assert!(text.contains("type Subscription {"));
+    assert!(text.contains("events(lastEventId: String, types: [String!]!): Event!"));
+    assert!(text.contains("schema {\n  query: Query\n  subscription: Subscription\n}\n"));
     for absent in [
         "node",
         "Connection",
@@ -75,14 +98,39 @@ fn the_sdl_has_the_two_queries_and_nothing_else_to_call() {
         "input ",
         "type Mutation",
         "mutation:",
-        "type Subscription",
     ] {
         assert!(!text.contains(absent), "the SDL contains `{absent}`");
     }
 }
 
 #[test]
-fn the_first_type_is_the_event_stream_status_with_twelve_single_line_fields() {
+fn every_description_is_one_line_and_no_argument_carries_one() {
+    let text = sdl();
+
+    assert!(!text.contains("\"\"\""), "a block description");
+    let descriptions: Vec<&str> = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with('"'))
+        .collect();
+    assert_eq!(descriptions.len(), 27);
+    for line in descriptions {
+        let quoted = line.trim_start();
+        assert!(
+            quoted.len() > 1 && quoted.ends_with('"'),
+            "`{line}` spans lines"
+        );
+        assert!(
+            line.len() - quoted.len() <= 2,
+            "`{line}` is indented as an argument description"
+        );
+    }
+    for line in text.lines().filter(|line| line.contains('(')) {
+        assert!(line.contains(')'), "the signature `{line}` spans lines");
+    }
+}
+
+#[test]
+fn the_first_type_is_the_event_with_three_single_line_fields() {
     let text = sdl();
 
     let first = text
@@ -90,28 +138,18 @@ fn the_first_type_is_the_event_stream_status_with_twelve_single_line_fields() {
         .find(|block| block.lines().any(|line| line.starts_with("type ")))
         .unwrap();
     let mut lines = first.lines().skip_while(|line| !line.starts_with("type "));
-    assert_eq!(lines.next(), Some("type EventStreamStatus {"));
+    assert_eq!(lines.next(), Some("type Event {"));
     let fields: Vec<&str> = lines
         .filter(|line| line.starts_with("  ") && !line.trim_start().starts_with('"'))
         .collect();
     assert_eq!(
         fields,
-        [
-            "  brokerReachable: Boolean!",
-            "  endOffset: String",
-            "  lag: String",
-            "  position: String",
-            "  reason: String",
-            "  rejectedRecords: String!",
-            "  replayCapped: String!",
-            "  retentionLosses: String!",
-            "  state: String!",
-            "  subscribers: Int!",
-            "  windowFirst: String",
-            "  windowLast: String",
-        ]
+        ["  data: JSON!", "  id: String!", "  type: String!"]
     );
     assert!(text.contains("type EventType {\n  \"Name of the event type.\"\n  name: String!\n}"));
+    assert!(text.contains(
+        "\"A scalar that can represent any JSON value.\"\nscalar JSON\n\n\"Query root.\""
+    ));
 }
 
 #[test]
@@ -144,6 +182,38 @@ async fn the_builder_gives_a_schema_with_a_query_root_and_no_mutation_root() {
         .collect();
     messages.dedup();
     assert_eq!(messages, ["Schema is not configured for mutations."]);
+}
+
+#[tokio::test]
+async fn the_builder_gives_a_schema_whose_subscription_root_is_the_event_stream() {
+    let roots = execute(
+        "{ __schema { queryType { name } mutationType { name } subscriptionType { name } } }",
+    )
+    .await;
+    let fields = execute(
+        "{ __type(name: \"Subscription\") { fields { name type { kind ofType { name } } } } }",
+    )
+    .await;
+    let subscription = execute("subscription { events(types: [\"a\"]) { id } }").await;
+
+    assert_eq!(
+        roots.data.into_json().unwrap(),
+        serde_json::json!({ "__schema": {
+            "queryType": { "name": "Query" },
+            "mutationType": null,
+            "subscriptionType": { "name": "Subscription" }
+        } })
+    );
+    assert_eq!(
+        fields.data.into_json().unwrap(),
+        serde_json::json!({ "__type": { "fields": [
+            { "name": "events", "type": { "kind": "NON_NULL", "ofType": { "name": "Event" } } }
+        ] } })
+    );
+    refused_with(
+        &subscription,
+        "Subscriptions are not supported on this transport.",
+    );
 }
 
 /// Executes `query` on the bounded schema within five seconds.
@@ -240,6 +310,8 @@ async fn the_standard_introspection_query_of_the_explorer_is_answered() {
     assert!(response.errors.is_empty(), "{:?}", response.errors);
     let data = response.data.into_json().unwrap();
     assert_eq!(data["__schema"]["queryType"]["name"], "Query");
+    assert_eq!(data["__schema"]["subscriptionType"]["name"], "Subscription");
+    assert!(data["__schema"]["mutationType"].is_null());
 }
 
 #[test]
