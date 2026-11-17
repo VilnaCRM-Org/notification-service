@@ -303,6 +303,16 @@ impl CursorFault {
     pub(crate) fn bad_request(self) -> Problem {
         Problem::new(StatusCode::BAD_REQUEST).with_detail(self.message())
     }
+
+    /// The 422 problem of the GraphQL field (FR-13): one violation whose `propertyPath` is the
+    /// carrier, with the code `format` and the message of the fault.
+    pub(crate) fn violation(self) -> Problem {
+        Problem::validation_failed(vec![Violation {
+            property_path: self.carrier.to_owned(),
+            message: self.message(),
+            code: "format".to_owned(),
+        }])
+    }
 }
 
 /// The cursor of a resume: the `Last-Event-ID` header when it is present, else the

@@ -746,3 +746,44 @@ fn each_cursor_fault_is_the_400_problem_naming_its_carrier(
 ) {
     assert_eq!(bad_request(&fault.bad_request()), detail);
 }
+
+#[rstest]
+#[case::header(HEADER_FAULT, "Last-Event-ID", HEADER_MESSAGE)]
+#[case::parameter(PARAMETER_FAULT, "lastEventId", PARAMETER_MESSAGE)]
+fn each_cursor_fault_is_the_422_problem_with_one_format_violation_on_its_carrier(
+    #[case] fault: CursorFault,
+    #[case] carrier: &str,
+    #[case] message: &str,
+) {
+    let problem = fault.violation();
+
+    assert_eq!(
+        serde_json::to_value(&problem).unwrap(),
+        json!({
+            "type": "/problems/validation-failed",
+            "title": "Unprocessable Entity",
+            "status": 422,
+            "detail": "The request failed validation.",
+            "violations": [{"propertyPath": carrier, "message": message, "code": "format"}],
+        })
+    );
+    assert_eq!(
+        violation(&problem),
+        json!({"propertyPath": carrier, "message": message, "code": "format"})
+    );
+}
+
+#[rstest]
+#[case::text("abc")]
+#[case::negative("-1")]
+#[case::overflow("18446744073709551616")]
+fn a_cursor_violation_never_holds_the_value(#[case] text: &str) {
+    for fault in [
+        read_cursor(Some(&header_value(text)), None).unwrap_err(),
+        read_cursor(None, Some(text)).unwrap_err(),
+    ] {
+        let written = serde_json::to_string(&fault.violation()).unwrap();
+
+        assert!(!written.contains(text), "{written}");
+    }
+}

@@ -12,7 +12,7 @@ mod session;
 mod socket;
 pub mod subscription;
 #[cfg(test)]
-mod test_node;
+pub(crate) mod test_node;
 
 use std::sync::Arc;
 use std::time::Duration;
