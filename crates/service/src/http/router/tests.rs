@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
@@ -17,6 +17,7 @@ use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
 use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
+use crate::http::router::GRAPHQL_PATH;
 use crate::http::security_headers::DEFAULT_CONTENT_SECURITY_POLICY;
 use tower::ServiceExt as _;
 
@@ -1009,4 +1010,287 @@ async fn a_websocket_handshake_of_the_event_stream_from_a_refused_origin_is_the_
     let body: Value = serde_json::from_str(&answer.body).unwrap();
     assert_eq!(body["detail"], "the origin is not allowed");
     assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "ws 403");
+}
+
+/// Every `vary` value of `headers`, split at the commas, trimmed and in lower case, in order.
+fn vary_values(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all(header::VARY)
+        .iter()
+        .flat_map(|value| value.to_str().unwrap().split(','))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect()
+}
+
+/// The names of the headers of an answer, sorted.
+fn header_names(headers: &HeaderMap) -> Vec<&str> {
+    let mut names: Vec<&str> = headers.keys().map(HeaderName::as_str).collect();
+    names.sort_unstable();
+    names
+}
+
+/// The explorer page the router answers in `dev`.
+const EXPLORER_PAGE: &str = include_str!("../../graphql/explorer.html");
+
+/// The headers of the explorer page: those of today plus `vary`.
+const EXPLORER_HEADERS: [&str; 8] = [
+    "content-length",
+    "content-security-policy",
+    "content-type",
+    "referrer-policy",
+    "vary",
+    "x-content-type-options",
+    "x-frame-options",
+    "x-request-id",
+];
+
+/// The headers of the 405 problem of a GET outside `dev`: those of today plus `vary`.
+const METHOD_NOT_ALLOWED_HEADERS: [&str; 9] = [
+    "allow",
+    "content-length",
+    "content-security-policy",
+    "content-type",
+    "referrer-policy",
+    "vary",
+    "x-content-type-options",
+    "x-frame-options",
+    "x-request-id",
+];
+
+/// The headers of a POST answer of the `GraphQL` path, which `vary_accept` leaves as they are.
+const POST_HEADERS: [&str; 7] = [
+    "content-length",
+    "content-security-policy",
+    "content-type",
+    "referrer-policy",
+    "x-content-type-options",
+    "x-frame-options",
+    "x-request-id",
+];
+
+#[tokio::test]
+async fn a_get_or_a_head_of_the_graphql_path_varies_on_accept_in_every_mode() {
+    for method in [Method::GET, Method::HEAD] {
+        let dev = send("dev", request(method.clone(), GRAPHQL_PATH, None)).await;
+        assert_eq!(dev.status, StatusCode::OK, "{method}");
+        assert_eq!(
+            dev.headers[header::CONTENT_TYPE],
+            "text/html; charset=utf-8",
+            "{method}"
+        );
+        assert_eq!(
+            dev.headers[header::CONTENT_SECURITY_POLICY],
+            EXPLORER_CONTENT_SECURITY_POLICY,
+            "{method}"
+        );
+        assert_eq!(vary_values(&dev.headers), ["accept"], "{method}");
+        assert_eq!(header_names(&dev.headers), EXPLORER_HEADERS, "{method}");
+        assert_common_headers(&dev, EXPLORER_CONTENT_SECURITY_POLICY, "explorer");
+
+        for app_env in ["test", "prod"] {
+            let route = format!("{app_env} {method}");
+            let answer = send(app_env, request(method.clone(), GRAPHQL_PATH, None)).await;
+            assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "{route}");
+            assert_eq!(answer.headers[header::ALLOW], "POST", "{route}");
+            assert_eq!(
+                answer.headers[header::CONTENT_TYPE],
+                "application/problem+json",
+                "{route}"
+            );
+            assert_eq!(vary_values(&answer.headers), ["accept"], "{route}");
+            assert_eq!(
+                header_names(&answer.headers),
+                METHOD_NOT_ALLOWED_HEADERS,
+                "{route}"
+            );
+            assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, &route);
+        }
+    }
+    let page = send("dev", request(Method::GET, GRAPHQL_PATH, None)).await;
+    assert_eq!(page.body, EXPLORER_PAGE);
+    let path_with_query = format!("{GRAPHQL_PATH}?query=%7B%20eventTypes%20%7B%20name%20%7D%20%7D");
+    let refused = send("prod", request(Method::GET, &path_with_query, None)).await;
+    assert_eq!(refused.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        refused.body,
+        r#"{"type":"about:blank","title":"Method Not Allowed","status":405}"#
+    );
+    assert_eq!(vary_values(&refused.headers), ["accept"]);
+}
+
+#[tokio::test]
+async fn a_refused_websocket_handshake_on_the_graphql_path_varies_on_accept() {
+    let app = router(adapters(), &config("test")).unwrap();
+    let request = Request::get(GRAPHQL_PATH)
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::SEC_WEBSOCKET_KEY, HANDSHAKE_KEY)
+        .body(Body::empty())
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    // `vary_accept` sits outside the origin check of a handshake, so the 403 carries the value.
+    assert_eq!(answer.status, StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "the origin is not allowed");
+    assert_eq!(vary_values(&answer.headers), ["accept"]);
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "403");
+}
+
+#[tokio::test]
+async fn no_post_answer_and_no_answer_of_another_path_gains_a_vary_value() {
+    let mut limited = config("test");
+    limited.max_body_bytes = 1024;
+    let app = router(adapters(), &limited).unwrap();
+    let oversized = format!(
+        r#"{{"query":"{{ eventTypes {{ name }} }}","padding":"{}"}}"#,
+        "x".repeat(2048)
+    );
+    let posts = [
+        (r#"{"query":"{ eventTypes { name } }"}"#, StatusCode::OK),
+        (r#"{"variables":{}}"#, StatusCode::UNPROCESSABLE_ENTITY),
+        ("{", StatusCode::BAD_REQUEST),
+        (oversized.as_str(), StatusCode::PAYLOAD_TOO_LARGE),
+    ];
+    for (body, status) in posts {
+        let answer = send_to(&app, request(Method::POST, GRAPHQL_PATH, Some(body))).await;
+        assert_eq!(answer.status, status, "{}", answer.body);
+        assert_eq!(header_names(&answer.headers), POST_HEADERS, "{status}");
+        assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "post");
+    }
+    let others = [
+        (Method::GET, "/ping"),
+        (Method::HEAD, "/ping"),
+        (Method::GET, "/api/event-types"),
+        (Method::GET, "/api/events/status"),
+        (Method::GET, "/api/docs/openapi.json"),
+        (Method::GET, "/api/unknown"),
+        (Method::GET, "/api/graphql/"),
+        (Method::DELETE, GRAPHQL_PATH),
+    ];
+    for (method, path) in others {
+        let answer = send_to(&app, request(method.clone(), path, None)).await;
+        assert!(
+            !answer.headers.contains_key(header::VARY),
+            "{method} {path}: {:?}",
+            answer.headers
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_allowed_origin_appends_vary_origin_after_vary_accept() {
+    let origins = crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()]);
+    for (app_env, status) in [
+        ("dev", StatusCode::OK),
+        ("test", StatusCode::METHOD_NOT_ALLOWED),
+    ] {
+        let mut allowing = config(app_env);
+        allowing.allowed_origins = origins.clone();
+        let app = router(adapters(), &allowing).unwrap();
+
+        for origin in [Some(ORIGIN), None] {
+            let route = format!("{app_env} {origin:?}");
+            let answer = send_to(&app, from_origin(Method::GET, GRAPHQL_PATH, None, origin)).await;
+            let values = vary_values(&answer.headers);
+            assert_eq!(answer.status, status, "{route}");
+            assert_eq!(
+                answer.headers.get_all(header::VARY).iter().next().unwrap(),
+                "accept",
+                "{route}"
+            );
+            assert_eq!(
+                values.iter().filter(|value| *value == "accept").count(),
+                1,
+                "{route}: {values:?}"
+            );
+            assert!(values.iter().any(|value| value == "origin"), "{route}");
+        }
+        let allowed = send_to(
+            &app,
+            from_origin(Method::GET, GRAPHQL_PATH, None, Some(ORIGIN)),
+        )
+        .await;
+        assert_eq!(allowed.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], ORIGIN);
+
+        let post = send_to(
+            &app,
+            from_origin(
+                Method::POST,
+                GRAPHQL_PATH,
+                Some(r#"{"query":"{ eventTypes { name } }"}"#),
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        let values = vary_values(&post.headers);
+        assert_eq!(post.status, StatusCode::OK, "{app_env}");
+        assert!(!values.iter().any(|value| value == "accept"), "{values:?}");
+        assert!(values.iter().any(|value| value == "origin"), "{values:?}");
+    }
+}
+
+/// The source of the router, read by the test of the middleware order.
+const ROUTER_SOURCE: &str = include_str!("../router.rs");
+
+/// The layers of `assemble`, outermost first, each by a text that only its own line holds.
+const MIDDLEWARE_ORDER: [&str; 11] = [
+    ".layer(from_fn(sanitize_request_id))",
+    ".layer(SetRequestIdLayer::new(",
+    ".layer(PropagateRequestIdLayer::new(",
+    ".layer(security_headers::layer())",
+    "TraceLayer::new_for_http()",
+    ".option_layer(origin::cors(",
+    ".layer(from_fn(vary_accept))",
+    "origin::websocket_origin,",
+    ".layer(CatchPanicLayer::custom(",
+    "request_timeout))",
+    ".layer(DefaultBodyLimit::max(",
+];
+
+/// The layers as the documentation comment of `assemble` lists them, outermost first, before the
+/// body limit that ends the list.
+const DOCUMENTED_ORDER: [&str; 8] = [
+    "the three request id layers",
+    "security headers",
+    "tracing",
+    "the CORS layer",
+    "`vary_accept`",
+    "the origin check of a WebSocket handshake",
+    "the panic catcher",
+    "the request budget",
+];
+
+/// The offset of each of `markers` in `text`, each of which must occur exactly once.
+fn offsets(text: &str, markers: &[&str]) -> Vec<usize> {
+    markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(text.matches(marker).count(), 1, "{marker} in {text}");
+            text.find(marker).unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn the_middleware_order_is_the_documented_one() {
+    let (before, after) = ROUTER_SOURCE.split_once("pub fn assemble(").unwrap();
+    let code = after.split_once("rest.with_state(state)").unwrap().0;
+    let comment = before
+        .rsplit_once("/// Builds the complete router.")
+        .unwrap()
+        .1
+        .lines()
+        .map(|line| line.trim_start_matches("///").trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let listing = comment.split_once("the outermost: ").unwrap().1;
+    let (listing, _) = listing.split_once("the body limit.").unwrap();
+
+    let in_code = offsets(code, &MIDDLEWARE_ORDER);
+    let in_comment = offsets(listing, &DOCUMENTED_ORDER);
+
+    assert!(in_code.is_sorted(), "{in_code:?}");
+    assert!(in_comment.is_sorted(), "{in_comment:?}");
+    assert!(listing.ends_with("the request budget and "), "{listing}");
 }

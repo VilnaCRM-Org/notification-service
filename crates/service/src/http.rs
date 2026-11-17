@@ -11,6 +11,7 @@ pub mod request_id;
 pub mod router;
 pub mod security_headers;
 pub mod trace;
+pub mod vary;
 
 /// The state of the whole application: one field per bounded context, each extracted with
 /// [`FromRef`] by the handlers of that context.
