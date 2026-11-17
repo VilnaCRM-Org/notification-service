@@ -51,6 +51,8 @@ crates/service/tests/integration/serve.rs
 crates/service/tests/integration/panic.rs
 crates/service/src/openapi.rs
 crates/service/src/openapi/
+crates/service/src/graphql.rs
+crates/service/src/graphql/handler.rs
 crates/service/src/graphql/schema.rs
 crates/service/src/graphql/schema/
 tests/support/

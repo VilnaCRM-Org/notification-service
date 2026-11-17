@@ -9,6 +9,7 @@ use http_body_util::BodyExt as _;
 use serde_json::Value;
 use test_support::probe::StubProbe;
 use test_support::static_topic::StaticTopic;
+use tokio::sync::watch;
 
 use crate::background::Running;
 use crate::bootstrap::tests::wiring::{adapters_on, paced_on};
@@ -16,8 +17,9 @@ use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
+use crate::graphql::schema::builder;
 use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
-use crate::http::router::GRAPHQL_PATH;
+use crate::http::router::{GRAPHQL_PATH, assemble};
 use crate::http::security_headers::DEFAULT_CONTENT_SECURITY_POLICY;
 use tower::ServiceExt as _;
 
@@ -408,6 +410,19 @@ const ALLOWED_EXTRACTORS: [&str; 5] = [
     "ValidatedJson<",
 ];
 
+/// The handlers that may also take the `HeaderMap`, which is infallible: the `GraphQL` handlers
+/// that can answer an event stream read `Accept` and `Last-Event-ID` (the recorded streaming
+/// exception, NFR-13).
+const HEADER_MAP_HANDLERS: [&str; 1] = ["execute"];
+
+/// Whether the handler `handler` may take a parameter of type `kind`.
+fn is_allowed(handler: &str, kind: &str) -> bool {
+    ALLOWED_EXTRACTORS
+        .iter()
+        .any(|allowed| kind.starts_with(allowed))
+        || (kind == "HeaderMap" && HEADER_MAP_HANDLERS.contains(&handler))
+}
+
 /// The handler sources of the crate: every file under `src/http` and `src/graphql` with a
 /// `pub async fn`, except the request id middleware, whose parameters are not extractors.
 const HANDLER_SOURCES: [(&str, &str); 3] = [
@@ -450,10 +465,7 @@ fn disallowed_parameters(source: &str) -> Vec<String> {
                 .split_once(": ")
                 .map_or(parameter, |(_, kind)| kind)
                 .trim();
-            if !ALLOWED_EXTRACTORS
-                .iter()
-                .any(|allowed| kind.starts_with(allowed))
-            {
+            if !is_allowed(name.trim(), kind) {
                 disallowed.push(format!("{}: {parameter}", name.trim()));
             }
         }
@@ -502,6 +514,9 @@ fn handlers_use_only_the_problem_aware_extractors() {
             .contains("ApiPath(file): ApiPath<String>")
     );
     assert!(HANDLER_SOURCES[2].1.contains("ApiJson(body): ApiJson<"));
+    assert!(HANDLER_SOURCES[2].1.contains(
+        "pub async fn execute(\n    State(schema): State<ApiSchema>,\n    headers: HeaderMap,\n"
+    ));
     let mut expected: Vec<String> = HANDLER_SOURCES
         .iter()
         .map(|(file, _)| (*file).to_owned())
@@ -519,8 +534,28 @@ fn handlers_use_only_the_problem_aware_extractors() {
 #[case::raw_json("pub async fn h(State(s): State<ApiSchema>, Json(b): Json<Value>) -> Response {}")]
 #[case::raw_query("pub async fn h(Query(q): Query<Params>) -> Response {}")]
 #[case::raw_body("pub async fn h(body: String) -> Response {}")]
+#[case::header_map_of_another_handler("pub async fn h(headers: HeaderMap) -> Response {}")]
+#[case::header_map_of_the_explorer("pub async fn explorer(headers: HeaderMap) -> Response {}")]
+#[case::a_type_that_starts_like_the_header_map(
+    "pub async fn execute(headers: HeaderMapLike) -> Response {}"
+)]
+#[case::raw_json_of_execute(
+    "pub async fn execute(headers: HeaderMap, Json(b): Json<Value>) -> Response {}"
+)]
 fn the_extractor_check_reports_a_planted_violation(#[case] source: &str) {
     assert_eq!(disallowed_parameters(source).len(), 1, "{source}");
+}
+
+#[test]
+fn the_extractor_check_accepts_the_header_map_of_execute_only() {
+    let source = "pub async fn execute(State(schema): State<ApiSchema>, headers: HeaderMap, \
+        ApiJson(body): ApiJson<Map<String, Value>>) -> Result<Response, Problem> {}";
+
+    assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+    assert_eq!(
+        disallowed_parameters(&source.replace("fn execute", "fn subscribe")),
+        ["subscribe: headers: HeaderMap"]
+    );
 }
 
 #[test]
@@ -1298,4 +1333,119 @@ fn the_middleware_order_is_the_documented_one() {
     assert!(in_code.is_sorted(), "{in_code:?}");
     assert!(in_comment.is_sorted(), "{in_comment:?}");
     assert!(listing.ends_with("the request budget and "), "{listing}");
+}
+
+/// A query bus whose every query waits for ever: a query over SSE that asks it outlasts any
+/// request budget.
+#[derive(Debug)]
+struct PendingQueryBus;
+
+#[async_trait::async_trait]
+impl shared_domain::QueryBus for PendingQueryBus {
+    async fn ask_erased(
+        &self,
+        _query_type: std::any::TypeId,
+        _name: &'static str,
+        _query: shared_domain::ErasedMessage,
+    ) -> Result<shared_domain::ErasedMessage, shared_domain::ErasedBusError> {
+        std::future::pending().await
+    }
+}
+
+/// The router of `config` assembled around a started node whose query bus never answers.
+fn router_with_a_pending_query_bus(config: &Config) -> Router {
+    use event_stream_application::{
+        Hub, HubSettings, ReplaySettings, StatusSource, StreamSettings, Subscriptions, TailState,
+        Window,
+    };
+
+    let hub = Hub::new(HubSettings {
+        max_subscribers: 4,
+        buffer: 8,
+    });
+    hub.start(event_stream_domain::Cursor::new(1));
+    let window = Arc::new(Window::new(16, usize::MAX));
+    let (_tail, tail_state) = watch::channel(TailState::default());
+    let subscriptions = Subscriptions::new(
+        Arc::clone(&hub),
+        Arc::clone(&window),
+        Arc::new(StaticTopic::empty()),
+        tail_state.clone(),
+        ReplaySettings {
+            max_events: 1_000,
+            max_data_bytes: 65_536,
+            permits: 1,
+        },
+    );
+    let event_stream = event_stream_application::http::EventStreamState {
+        query_bus: Arc::new(PendingQueryBus),
+        subscriptions: Arc::new(subscriptions),
+        status: Arc::new(StatusSource::new(
+            tail_state,
+            window,
+            Arc::<Hub>::clone(&hub),
+        )),
+        hub,
+        settings: StreamSettings {
+            keep_alive: config.streams.keep_alive,
+        },
+    };
+    let health_check = health_check_application::HealthCheckState {
+        service: Arc::new(health_check_application::HealthService::new(
+            Vec::new(),
+            config.health_probe_timeout,
+        )),
+    };
+    let schema = builder().data(event_stream.clone()).finish();
+    let state = crate::http::AppState {
+        health_check,
+        event_stream,
+    };
+    assemble(state, schema, config)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_query_over_sse_that_outlasts_the_budget_is_the_503_problem() {
+    let mut config = config("test");
+    config.request_timeout = Duration::from_secs(1);
+    let app = router_with_a_pending_query_bus(&config);
+    let request = Request::post(GRAPHQL_PATH)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(r#"{"query":"{ eventTypes { name } }"}"#))
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "The request exceeded its time budget.");
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "budget");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_query_over_sse_within_the_budget_of_the_assembled_router_is_answered() {
+    let config = config("test");
+    let app = router_with_a_pending_query_bus(&config);
+    let request = Request::post(GRAPHQL_PATH)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(
+            r#"{"query":"{ eventStreamStatus { subscribers } }"}"#,
+        ))
+        .unwrap();
+
+    let answer = send_to(&app, request).await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(
+        answer.body,
+        ":\n\nevent: next\ndata: {\"data\":{\"eventStreamStatus\":{\"subscribers\":0}}}\n\nevent: complete\ndata:\n\n"
+    );
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "sse query");
 }

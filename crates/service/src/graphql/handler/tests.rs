@@ -4,8 +4,12 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE};
-use axum::http::{Method, Request, Response, StatusCode};
+use axum::extract::DefaultBodyLimit;
+use axum::http::header::{
+    CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_SECURITY_POLICY,
+    CONTENT_TYPE, TRANSFER_ENCODING, VARY,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use axum::routing::post;
 use event_stream_application::graphql::{StreamLink, StreamPhase};
 use event_stream_application::http::EventStreamState;
@@ -522,4 +526,317 @@ fn the_pin_check_accepts_exact_versions_only() {
     assert!(!is_pinned("https://unpkg.com/react@latest/umd/react.js"));
     assert!(!is_pinned("https://unpkg.com/react/umd/react.js"));
     assert!(!is_pinned("https://unpkg.com/react@18.3.1"));
+}
+
+// ---- the transport of a POST (FR-2, FR-3, FR-5, FR-6, FR-7) ----
+
+/// The body limit of the router of the transport tests.
+const BODY_LIMIT: usize = 256;
+
+/// The `Accept` fields that do not negotiate an event stream on a POST.
+const JSON_ACCEPTS: [&str; 3] = [
+    "*/*",
+    "application/graphql-response+json, application/graphql+json, application/json, text/event-stream, multipart/mixed",
+    "text/event-stream;q=0",
+];
+
+/// A whole answer of a body that ends.
+#[derive(Debug, PartialEq, Eq)]
+struct Answer {
+    status: StatusCode,
+    content_type: Option<String>,
+    vary: Option<String>,
+    body: String,
+}
+
+/// A GraphQL body above [`BODY_LIMIT`].
+fn oversized() -> String {
+    json!({ "query": "{ __typename }", "pad": "x".repeat(BODY_LIMIT) }).to_string()
+}
+
+/// A POST of `body` with the media type `content_type` and the request headers `headers`.
+fn post_with(content_type: &str, body: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = post_body(content_type, body);
+    for (name, value) in headers {
+        request.headers_mut().append(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    request
+}
+
+/// The response of a router whose schema holds `state` and whose body limit is [`BODY_LIMIT`].
+async fn respond_to(state: &EventStreamState, request: Request<Body>) -> Response<Body> {
+    let router =
+        router_of(builder().data(state.clone()).finish()).layer(DefaultBodyLimit::max(BODY_LIMIT));
+    tokio::time::timeout(LIMIT, router.oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap()
+}
+
+fn header(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .map(|value| value.to_str().unwrap().to_owned())
+}
+
+/// The whole answer of `request`, whose body must end.
+async fn answer_of(state: &EventStreamState, request: Request<Body>) -> Answer {
+    let response = respond_to(state, request).await;
+    let (parts, body) = response.into_parts();
+    let bytes = tokio::time::timeout(LIMIT, body.collect())
+        .await
+        .expect("the body ends in time")
+        .unwrap()
+        .to_bytes();
+    Answer {
+        status: parts.status,
+        content_type: header(&parts.headers, CONTENT_TYPE),
+        vary: header(&parts.headers, VARY),
+        body: String::from_utf8(bytes.to_vec()).unwrap(),
+    }
+}
+
+/// The bodies of the transport tests, with the status a POST without `Accept` answers.
+fn bodies() -> Vec<(&'static str, String, StatusCode)> {
+    vec![
+        (
+            "application/json",
+            json!({ "query": "{ eventStreamStatus { state subscribers } }" }).to_string(),
+            StatusCode::OK,
+        ),
+        (
+            "application/json",
+            json!({ "query": SUBSCRIPTION }).to_string(),
+            StatusCode::OK,
+        ),
+        (
+            "text/plain",
+            json!({ "query": "{ __typename }" }).to_string(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "text/plain",
+            oversized(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "application/json",
+            oversized(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        (
+            "application/json",
+            r#"{"query":"#.to_owned(),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "application/json",
+            "[]".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "application/json",
+            "{}".to_owned(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn a_post_that_does_not_negotiate_an_event_stream_keeps_its_answer() {
+    let state = started_state();
+    for (content_type, body, status) in bodies() {
+        let reference = answer_of(&state, post_with(content_type, &body, &[])).await;
+        assert_eq!(reference.status, status, "{content_type} {body}");
+        assert_eq!(reference.vary, None, "{body}");
+        for accept in JSON_ACCEPTS {
+            let answer = answer_of(
+                &state,
+                post_with(content_type, &body, &[("accept", accept)]),
+            )
+            .await;
+            assert_eq!(answer, reference, "{accept} {body}");
+        }
+    }
+    let subscription = answer_of(
+        &state,
+        post_with(
+            "application/json",
+            &json!({ "query": SUBSCRIPTION }).to_string(),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(
+        subscription.content_type.as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&subscription.body).unwrap(),
+        json!({ "data": null, "errors": [{ "message": TRANSPORT_ERROR }] })
+    );
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn a_post_with_sse_whose_body_is_refused_gets_the_same_problem_and_no_stream() {
+    let state = started_state();
+    for (content_type, body, status) in bodies() {
+        if status == StatusCode::OK {
+            continue;
+        }
+        let reference = answer_of(&state, post_with(content_type, &body, &[])).await;
+        let answer = answer_of(
+            &state,
+            post_with(content_type, &body, &[("accept", "text/event-stream")]),
+        )
+        .await;
+        assert_eq!(answer, reference, "{content_type} {body}");
+        assert_eq!(answer.status, status, "{body}");
+        assert_eq!(
+            answer.content_type.as_deref(),
+            Some("application/problem+json")
+        );
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// The subscription of the event-stream tests, which selects every field of `Event`.
+const EVENTS: &str = r#"subscription { events(types: ["a"]) { id type data } }"#;
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_posted_with_sse_opens_the_event_stream() {
+    let state = started_state();
+    let body = json!({ "query": EVENTS }).to_string();
+
+    let response = respond_to(
+        &state,
+        post_with(
+            "application/json",
+            &body,
+            &[("accept", "text/event-stream")],
+        ),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(headers[CONTENT_TYPE], "text/event-stream");
+    assert_eq!(headers[CACHE_CONTROL], "no-cache");
+    assert_eq!(headers["x-accel-buffering"], "no");
+    assert_eq!(headers[VARY], "accept");
+    assert_eq!(headers.get_all(VARY).iter().count(), 1);
+    for name in [
+        CONNECTION,
+        CONTENT_ENCODING,
+        CONTENT_LENGTH,
+        TRANSFER_ENCODING,
+    ] {
+        assert!(!headers.contains_key(&name), "{name}");
+    }
+    assert_eq!(state.hub.subscriber_count(), 1);
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(LIMIT, body.frame())
+        .await
+        .expect("the first chunk comes in time")
+        .unwrap()
+        .unwrap()
+        .into_data()
+        .unwrap();
+    assert_eq!(first, ":\n\n");
+    drop(body);
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn a_query_posted_with_sse_is_the_json_result_in_one_next_block_then_complete() {
+    let state = started_state();
+    let body = json!({ "query": "{ eventStreamStatus { state subscribers } }" }).to_string();
+    let json = answer_of(&state, post_with("application/json", &body, &[])).await;
+
+    let answer = answer_of(
+        &state,
+        post_with(
+            "application/json",
+            &body,
+            &[("accept", "text/event-stream")],
+        ),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.content_type.as_deref(), Some("text/event-stream"));
+    assert_eq!(answer.vary.as_deref(), Some("accept"));
+    assert_eq!(
+        answer.body,
+        format!(
+            ":\n\nevent: next\ndata: {}\n\nevent: complete\ndata:\n\n",
+            json.body
+        )
+    );
+}
+
+#[tokio::test]
+async fn the_last_event_id_header_of_a_post_is_the_cursor_of_its_subscription() {
+    let state = started_state();
+    let body = json!({ "query": EVENTS }).to_string();
+
+    let answer = answer_of(
+        &state,
+        post_with(
+            "application/json",
+            &body,
+            &[("accept", "text/event-stream"), ("last-event-id", "x")],
+        ),
+    )
+    .await;
+
+    let data = answer
+        .body
+        .strip_prefix(":\n\nevent: next\ndata: ")
+        .and_then(|rest| rest.strip_suffix("\n\nevent: complete\ndata:\n\n"))
+        .unwrap_or_else(|| panic!("{answer:?}"));
+    let result: Value = serde_json::from_str(data).unwrap();
+    assert_eq!(result["data"], Value::Null);
+    assert_eq!(
+        result["errors"][0]["extensions"]["violations"],
+        json!([{
+            "propertyPath": "Last-Event-ID",
+            "message": "Last-Event-ID must be a decimal unsigned 64-bit integer",
+            "code": "format",
+        }])
+    );
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn an_accept_field_alone_chooses_the_transport_of_the_same_request() {
+    let state = started_state();
+    let body = json!({ "query": "{ __typename }" }).to_string();
+
+    let json = answer_of(
+        &state,
+        post_with("application/json", &body, &[("accept", "application/json")]),
+    )
+    .await;
+    let stream = answer_of(
+        &state,
+        post_with(
+            "application/json",
+            &body,
+            &[("accept", "application/json;q=0.5, text/event-stream")],
+        ),
+    )
+    .await;
+
+    assert_eq!(json.content_type.as_deref(), Some("application/json"));
+    assert_eq!(json.body, r#"{"data":{"__typename":"Query"}}"#);
+    assert_eq!(stream.content_type.as_deref(), Some("text/event-stream"));
+    assert_eq!(
+        stream.body,
+        ":\n\nevent: next\ndata: {\"data\":{\"__typename\":\"Query\"}}\n\nevent: complete\ndata:\n\n"
+    );
 }

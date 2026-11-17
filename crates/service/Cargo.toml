@@ -17,6 +17,7 @@ dotenvy.workspace = true
 event-stream-application.workspace = true
 event-stream-domain.workspace = true
 event-stream-infrastructure.workspace = true
+futures-util.workspace = true
 health-check-application.workspace = true
 health-check-domain.workspace = true
 health-check-infrastructure.workspace = true
@@ -37,7 +38,6 @@ utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
 http-body-util.workspace = true
 krafka.workspace = true
 rstest.workspace = true

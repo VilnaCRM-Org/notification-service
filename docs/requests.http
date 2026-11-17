@@ -47,3 +47,35 @@ Content-Type: application/json
 {
   "query": "{ eventStreamStatus { state reason brokerReachable position endOffset lag windowFirst windowLast subscribers rejectedRecords retentionLosses replayCapped } }"
 }
+
+### GraphQL subscription over SSE (POST): 200 text/event-stream that stays open; a comment ":" first and after STREAM_KEEP_ALIVE without a block, then one "next" block per event of the listed types, never "complete"; 503 problem while the node is shutting down, starting or at its subscriber capacity
+# The graphql-sse distinct connections mode: Accept must rank text/event-stream above application/json and application/graphql-response+json; any other POST keeps the JSON transport.
+# Each result is "event: next", "id: <event id>" and "data: {"data":{"events":{...}}}"; resume with the id of the last block in the Last-Event-ID header or the lastEventId argument (the header wins).
+# Invalid arguments and document errors arrive inside the stream as one "next" block with {"data":null,"errors":[...]}, then "event: complete" with a bare "data:" line.
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "query": "subscription ($types: [String!]!) { events(types: $types) { id type data } }",
+  "variables": { "types": ["user.created", "order.paid"] }
+}
+
+### GraphQL subscription over SSE (POST), resumed after the last event id received: every retained event of the types with a higher id comes first
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+Accept: text/event-stream
+Last-Event-ID: 0
+
+{
+  "query": "subscription { events(types: [\"user.created\"]) { id type data } }"
+}
+
+### GraphQL query over SSE (POST): 200 text/event-stream with the comment ":", one "next" block holding the execution result, then "complete" and the end of the body
+POST {{baseUrl}}/api/graphql
+Content-Type: application/json
+Accept: text/event-stream
+
+{
+  "query": "{ eventTypes { name } }"
+}
