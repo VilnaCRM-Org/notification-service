@@ -6,16 +6,19 @@ use rstest::rstest;
 use serde_json::{Value, json};
 use shared_application::http::{Problem, Violation};
 use shared_domain::PageRequest;
-use utoipa::{PartialSchema as _, ToSchema as _};
+use utoipa::{IntoParams, PartialSchema as _, ToSchema as _};
 use validator::Validate as _;
 
 use event_stream_domain::{Cursor, EventType, InvalidEvent, Sequence};
 
 use super::{
-    Command, CursorFault, EventStreamStatusResponse, EventTypeResponse, ListEventTypesParams,
-    StreamParams, TypesError, WsParams, parse_cursor, parse_names, parse_types, read_cursor,
-    types_problem,
+    CONNECTION_TEXT, CURSOR_HEADER_TEXT, CURSOR_PARAMETER_TEXT, CURSOR_PATTERN, Command,
+    CursorFault, CursorHeader, EXAMPLE_CURSOR, EXAMPLE_EVENT, EXAMPLE_TYPE,
+    EventStreamStatusResponse, EventTypeResponse, HandshakeHeaders, KEY_TEXT, ListEventTypesParams,
+    NAME_PATTERN, STREAM_TYPES, SseFrame, StreamParams, TypesError, UPGRADE_TEXT, VERSION_TEXT,
+    WS_TYPES, WsParams, parse_cursor, parse_names, parse_types, read_cursor, types_problem,
 };
+use crate::http::subscription::Subscription;
 use crate::query::EventTypeView;
 use crate::status::{NodeState, NodeStatus, StartReason};
 
@@ -654,6 +657,12 @@ fn header_value(text: &str) -> HeaderValue {
 }
 
 #[test]
+fn each_carrier_has_its_fault() {
+    assert_eq!(CursorFault::HEADER, HEADER_FAULT);
+    assert_eq!(CursorFault::PARAMETER, PARAMETER_FAULT);
+}
+
+#[test]
 fn read_cursor_answers_none_without_a_carrier() {
     assert_eq!(read_cursor(None, None), Ok(None));
 }
@@ -786,4 +795,301 @@ fn a_cursor_violation_never_holds_the_value(#[case] text: &str) {
 
         assert!(!written.contains(text), "{written}");
     }
+}
+
+// ---- documentation of the streaming routes ----
+
+fn parameters<P: IntoParams>() -> Value {
+    serde_json::to_value(P::into_params(|| None)).unwrap()
+}
+
+fn documented_types(required: bool, description: &str) -> Value {
+    json!({
+        "name": "types",
+        "in": "query",
+        "description": description,
+        "required": required,
+        "schema": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": NAME_PATTERN},
+            "minItems": 1,
+            "maxItems": 100,
+        },
+        "style": "form",
+        "explode": false,
+        "example": ["load.test"],
+    })
+}
+
+fn documented_cursor(name: &str, location: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "in": location,
+        "description": description,
+        "required": false,
+        "schema": {"type": "string", "pattern": CURSOR_PATTERN},
+        "example": "1043",
+    })
+}
+
+#[test]
+fn the_stream_parameters_document_the_required_names_and_the_cursor() {
+    assert_eq!(
+        parameters::<StreamParams>(),
+        json!([
+            documented_types(true, STREAM_TYPES),
+            documented_cursor("lastEventId", "query", CURSOR_PARAMETER_TEXT),
+        ])
+    );
+}
+
+#[test]
+fn the_websocket_parameters_document_the_optional_names_and_the_cursor() {
+    assert_eq!(
+        parameters::<WsParams>(),
+        json!([
+            documented_types(false, WS_TYPES),
+            documented_cursor("lastEventId", "query", CURSOR_PARAMETER_TEXT),
+        ])
+    );
+}
+
+#[test]
+fn the_cursor_header_is_an_optional_header_with_the_grammar_of_the_cursor() {
+    assert_eq!(
+        parameters::<CursorHeader>(),
+        json!([documented_cursor(
+            "Last-Event-ID",
+            "header",
+            CURSOR_HEADER_TEXT
+        )])
+    );
+}
+
+fn documented_header(name: &str, description: &str, schema: &Value, example: &str) -> Value {
+    json!({
+        "name": name,
+        "in": "header",
+        "description": description,
+        "required": true,
+        "schema": schema,
+        "example": example,
+    })
+}
+
+#[test]
+fn the_handshake_headers_are_required_with_the_values_the_upgrade_accepts() {
+    assert_eq!(
+        parameters::<HandshakeHeaders>(),
+        json!([
+            documented_header(
+                "Connection",
+                CONNECTION_TEXT,
+                &json!({"type": "string", "pattern": "[Uu][Pp][Gg][Rr][Aa][Dd][Ee]"}),
+                "Upgrade"
+            ),
+            documented_header(
+                "Upgrade",
+                UPGRADE_TEXT,
+                &json!({"type": "string", "pattern": "^[Ww][Ee][Bb][Ss][Oo][Cc][Kk][Ee][Tt]$"}),
+                "websocket"
+            ),
+            documented_header(
+                "Sec-WebSocket-Version",
+                VERSION_TEXT,
+                &json!({"type": "string", "enum": ["13"]}),
+                "13"
+            ),
+            documented_header(
+                "Sec-WebSocket-Key",
+                KEY_TEXT,
+                &json!({"type": "string"}),
+                "AAAAAAAAAAAAAAAAAAAAAA=="
+            ),
+        ])
+    );
+}
+
+#[test]
+fn the_parameter_texts_name_the_rules_and_what_the_schemas_cannot_express() {
+    for text in [STREAM_TYPES, WS_TYPES] {
+        assert!(
+            text.contains("1 to 100 distinct event type names"),
+            "{text}"
+        );
+        assert!(text.contains("A repeated name counts once"), "{text}");
+        assert!(text.contains("cannot express"), "{text}");
+        assert!(text.contains("given twice is the 400 problem"), "{text}");
+        assert!(text.contains("the 422 problem"), "{text}");
+    }
+    assert!(WS_TYPES.contains("Optional"));
+    assert!(CURSOR_PARAMETER_TEXT.contains("at most 18446744073709551615"));
+    assert!(CURSOR_PARAMETER_TEXT.contains("leading zeros accepted"));
+    assert!(CURSOR_HEADER_TEXT.contains("wins over the parameter"));
+    for text in [CONNECTION_TEXT, UPGRADE_TEXT, VERSION_TEXT, KEY_TEXT] {
+        assert!(text.contains("400 problem"), "{text}");
+    }
+}
+
+#[test]
+fn the_name_pattern_is_the_grammar_of_the_event_type_schema() {
+    let event_type = serde_json::to_value(EventTypeResponse::schema()).unwrap();
+
+    assert_eq!(event_type["properties"]["name"]["pattern"], NAME_PATTERN);
+    assert_eq!(NAME_PATTERN, "^[a-z][a-z0-9]*([._-][a-z0-9]+)*$");
+}
+
+#[test]
+fn the_texts_of_the_parameters_state_the_limits_of_the_rules() {
+    let names = format!(
+        "1 to {} distinct event type names separated by commas",
+        Subscription::MAX_TYPES
+    );
+    for text in [STREAM_TYPES, WS_TYPES] {
+        assert!(text.contains(&names), "{text}");
+    }
+    let name = format!(
+        "each of 1 to {} characters matching `{NAME_PATTERN}`",
+        EventType::MAX_CHARS
+    );
+    assert!(STREAM_TYPES.contains(&name), "{STREAM_TYPES}");
+    let largest = format!("at most {}", u64::MAX);
+    assert!(
+        CURSOR_PARAMETER_TEXT.contains(&largest),
+        "{CURSOR_PARAMETER_TEXT}"
+    );
+}
+
+#[test]
+fn the_cursor_pattern_bounds_the_digits_at_the_largest_unsigned_64_bit_integer() {
+    assert!(CURSOR_PATTERN.starts_with("^0*([0-9]{1,19}|"));
+    assert!(CURSOR_PATTERN.ends_with("|1844674407370955161[0-5])$"));
+    assert_eq!(u64::MAX.to_string(), "18446744073709551615");
+}
+
+fn event_object() -> Value {
+    json!({
+        "type": "object",
+        "description": "The event object, the same on both streaming transports.",
+        "required": ["id", "type", "occurredAt", "data"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The envelope id the producer wrote, a UUID in lower case. It identifies the event, not its position: a client deduplicates by it.",
+            },
+            "type": {
+                "type": "string",
+                "description": "The event type name.",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": NAME_PATTERN,
+            },
+            "occurredAt": {
+                "type": "string",
+                "format": "date-time",
+                "description": "The time the producer wrote, an RFC 3339 time in UTC with the suffix `Z` or `+00:00`, unchanged.",
+            },
+            "data": {"description": "The producer's data, any JSON value."},
+        },
+        "additionalProperties": false,
+    })
+}
+
+/// The keys of an object in byte order.
+fn sorted_keys(object: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = object
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn the_frame_schema_is_one_event_whose_data_is_the_event_object_as_json() {
+    let schema = serde_json::to_value(SseFrame::schema()).unwrap();
+
+    assert_eq!(SseFrame::name(), "SseFrame");
+    assert_eq!(schema["type"], "object");
+    assert!(
+        schema["description"]
+            .as_str()
+            .unwrap()
+            .contains("keep-alive")
+    );
+    assert_eq!(schema["required"], json!(["event", "id", "data"]));
+    let properties = &schema["properties"];
+    assert_eq!(
+        properties.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["data", "event", "id"]
+    );
+    let event = &properties["event"];
+    assert_eq!(
+        sorted_keys(event),
+        [
+            "description",
+            "examples",
+            "maxLength",
+            "minLength",
+            "pattern",
+            "type"
+        ]
+    );
+    assert_eq!(event["type"], "string");
+    assert_eq!(event["minLength"], 1);
+    assert_eq!(event["maxLength"], EventType::MAX_CHARS);
+    assert_eq!(event["pattern"], NAME_PATTERN);
+    assert_eq!(event["examples"], json!([EXAMPLE_TYPE]));
+    assert!(
+        event["description"]
+            .as_str()
+            .unwrap()
+            .contains("EventSource")
+    );
+    let id = &properties["id"];
+    assert_eq!(
+        sorted_keys(id),
+        [
+            "description",
+            "examples",
+            "maxLength",
+            "minLength",
+            "pattern",
+            "type"
+        ]
+    );
+    assert_eq!(id["type"], "string");
+    assert_eq!(id["minLength"], 1);
+    assert_eq!(id["maxLength"], u64::MAX.to_string().len());
+    assert_eq!(id["pattern"], "^[1-9][0-9]*$");
+    assert_eq!(id["examples"], json!([EXAMPLE_CURSOR]));
+    assert!(id["description"].as_str().unwrap().contains("resumes"));
+    assert_eq!(
+        properties["data"],
+        json!({
+            "type": "string",
+            "description": "The event object as one line of compact JSON: `id`, `type`, `occurredAt` and `data`, in this order.",
+            "contentMediaType": "application/json",
+            "contentSchema": event_object(),
+            "examples": [EXAMPLE_EVENT],
+        })
+    );
+}
+
+#[test]
+fn the_example_event_is_an_event_object_of_the_load_test_type() {
+    let example: Value = serde_json::from_str(EXAMPLE_EVENT).unwrap();
+
+    let mut members: Vec<&String> = example.as_object().unwrap().keys().collect();
+    members.sort_unstable();
+    assert_eq!(members, ["data", "id", "occurredAt", "type"]);
+    assert!(EXAMPLE_EVENT.starts_with(r#"{"id":"#));
+    assert_eq!(example["type"], "load.test");
+    assert_eq!(
+        serde_json::to_string(&example).unwrap().len(),
+        EXAMPLE_EVENT.len()
+    );
 }

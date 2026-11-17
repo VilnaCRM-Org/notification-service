@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::FromRef;
-use axum::routing::get;
 use shared_domain::QueryBus;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -52,8 +51,9 @@ pub struct EventStreamState {
 
 /// The routes of the event stream, to be nested under `/api`.
 ///
-/// The streaming routes (SSE and WebSocket) are served but are not operations of the `OpenAPI`
-/// document; no route carries a layer that needs a state value.
+/// Every route, the streaming ones (SSE and WebSocket) included, is registered through `routes!`,
+/// so it is an operation of the `OpenAPI` document; no route carries a layer that needs a state
+/// value.
 pub fn router<S>() -> OpenApiRouter<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -62,6 +62,6 @@ where
     OpenApiRouter::new()
         .routes(routes!(handler::list_event_types))
         .routes(routes!(handler::event_stream_status))
-        .route("/events/stream", get(handler::stream))
-        .route("/events/ws", get(handler::ws))
+        .routes(routes!(handler::stream))
+        .routes(routes!(handler::ws))
 }

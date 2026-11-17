@@ -963,17 +963,22 @@ async fn the_event_stream_of_a_started_application_opens_with_the_cors_headers_o
 }
 
 #[test]
-fn the_streaming_routes_are_served_but_not_in_the_openapi_document() {
+fn the_streaming_routes_are_served_and_in_the_openapi_document() {
     let document = serde_json::to_value(crate::openapi::document()).unwrap();
 
     let paths = document["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/events/status"));
-    assert!(
-        paths
-            .keys()
-            .all(|path| !path.contains("stream") && !path.ends_with("/ws")),
-        "{paths:?}"
-    );
+    for path in ["/api/events/stream", "/api/events/ws"] {
+        let item = paths
+            .get(path)
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{path} is not a path of the document: {paths:?}"));
+        assert_eq!(
+            item.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["get"],
+            "{path}"
+        );
+    }
 }
 
 #[tokio::test]

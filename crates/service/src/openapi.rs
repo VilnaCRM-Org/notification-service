@@ -10,7 +10,7 @@ use crate::http::AppState;
 ///
 /// It changes only in a pull request that changes the contract: the major number when a breaking
 /// change is approved, the minor number when operations or fields are added.
-pub const API_VERSION: &str = "2.0.0";
+pub const API_VERSION: &str = "2.1.0";
 
 /// Static metadata of the document; title, description, contact URL and version are set in
 /// [`api_router`].

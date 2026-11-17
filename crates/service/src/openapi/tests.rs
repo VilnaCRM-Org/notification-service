@@ -1,7 +1,10 @@
+use axum::http::StatusCode;
 use rstest::rstest;
 use serde_json::{Value, json};
+use shared_application::http::Problem;
 
 use super::*;
+use crate::http::origin::ORIGIN_NOT_ALLOWED;
 
 fn json_document() -> Value {
     serde_json::to_value(document()).unwrap()
@@ -28,6 +31,20 @@ fn json_document() -> Value {
     "api_events_status_get",
     "EventStream",
     ("Retrieves the event stream status.", "Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.", "200 default")
+)]
+#[case(
+    "/api/events/stream",
+    "get",
+    "api_events_stream_get",
+    "EventStream",
+    ("Opens an event stream of the listed event types.", "Opens a Server-Sent Events stream that delivers every event of the listed types as one frame, in increasing id order: after the cursor of `Last-Event-ID` or `lastEventId` when one is given, live otherwise. The checks run in this order: the query string (400), the types (422), the cursor (400), the node (503); no answer depends on a broker read. docs/streaming-protocol.md describes the protocol.", "200 400 422 503 default")
+)]
+#[case(
+    "/api/events/ws",
+    "get",
+    "api_events_ws_get",
+    "EventStream",
+    ("Upgrades to a WebSocket subscription of the listed event types.", "Upgrades the connection to a WebSocket that delivers every event of its types as one text frame, in increasing id order; the client adds and removes types at run time with commands. The checks run in this order: an `Origin` outside `CORS_ALLOWED_ORIGINS` (403), the query string (400), the types (422), the cursor (400), the node (503), then the upgrade (400 or 426). docs/streaming-protocol.md describes the protocol.", "101 400 403 422 426 503 default")
 )]
 fn documents_every_operation(
     #[case] path: &str,
@@ -63,7 +80,7 @@ fn documents_every_operation(
 }
 
 #[test]
-fn documents_exactly_the_three_operations() {
+fn documents_exactly_the_five_operations_of_the_rest_router() {
     let json = json_document();
     let mut operations = Vec::new();
     for (path, item) in json["paths"].as_object().unwrap() {
@@ -77,6 +94,8 @@ fn documents_exactly_the_three_operations() {
         [
             "get /api/event-types",
             "get /api/events/status",
+            "get /api/events/stream",
+            "get /api/events/ws",
             "get /api/health",
         ]
     );
@@ -108,7 +127,7 @@ fn carries_the_service_identity_and_the_contract_version() {
             env!("CARGO_PKG_DESCRIPTION")
         )
     );
-    assert_eq!(info["version"], "2.0.0");
+    assert_eq!(info["version"], "2.1.0");
     assert_eq!(info["version"], API_VERSION);
     assert_eq!(
         info["contact"],
@@ -153,7 +172,7 @@ fn carries_the_server_the_tags_and_no_security_scheme() {
 }
 
 #[test]
-fn defines_exactly_the_five_schemas() {
+fn defines_exactly_the_six_schemas() {
     let json = json_document();
     let schemas = json["components"]["schemas"].as_object().unwrap();
 
@@ -165,6 +184,7 @@ fn defines_exactly_the_five_schemas() {
             "EventStreamStatus",
             "EventType",
             "Problem",
+            "SseFrame",
             "Violation"
         ]
     );
@@ -217,6 +237,40 @@ fn the_status_schema_carries_the_twelve_fields_and_the_status_route_returns_it()
         json["paths"]["/api/events/status"]["get"]["responses"]["200"]["content"]["application/json"]
             ["schema"],
         json!({"$ref": "#/components/schemas/EventStreamStatus"})
+    );
+}
+
+#[test]
+fn the_streaming_operations_answer_the_frame_schema_and_the_upgrade() {
+    let json = json_document();
+
+    let stream = &json["paths"]["/api/events/stream"]["get"]["responses"]["200"]["content"];
+    assert_eq!(
+        stream["text/event-stream"]["schema"],
+        json!({"$ref": "#/components/schemas/SseFrame"})
+    );
+    let upgraded = &json["paths"]["/api/events/ws"]["get"]["responses"]["101"];
+    assert!(upgraded.get("content").is_none());
+    let mut headers: Vec<&str> = upgraded["headers"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    headers.sort_unstable();
+    assert_eq!(headers, ["Connection", "Sec-WebSocket-Accept", "Upgrade"]);
+}
+
+#[test]
+fn the_refused_origin_example_is_the_answer_of_the_origin_check() {
+    let json = json_document();
+
+    let refused = &json["paths"]["/api/events/ws"]["get"]["responses"]["403"]["content"]["application/problem+json"]
+        ["example"];
+    assert_eq!(
+        *refused,
+        serde_json::to_value(Problem::new(StatusCode::FORBIDDEN).with_detail(ORIGIN_NOT_ALLOWED))
+            .unwrap()
     );
 }
 
