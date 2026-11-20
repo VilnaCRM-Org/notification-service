@@ -778,20 +778,181 @@ async fn invalid_arguments_are_one_validation_error_inside_the_stream_and_regist
     assert_eq!(node.state.status.snapshot().subscribers, 0);
 }
 
-#[tokio::test]
-async fn a_root_fragment_that_runs_nothing_is_the_comment_and_complete() {
+// ---- the one-root-field rule (FR-6 step 3, FR-14, FR-22) ----
+
+/// The `VALIDATION_FAILED` result of a breach of the root rule whose breaking selection starts at
+/// the first `marker` of the one-line `document`: no path, one violation.
+fn root_breach(document: &str, marker: &str) -> Value {
+    let column = document.find(marker).unwrap().saturating_add(1);
+    json!({"data": null, "errors": [{
+        "message": "The request failed validation.",
+        "locations": [{"line": 1, "column": column}],
+        "extensions": {
+            "code": "VALIDATION_FAILED",
+            "violations": [{
+                "propertyPath": "query",
+                "message": "a subscription operation must select exactly one root field",
+                "code": "single_root_field",
+            }],
+        },
+    }]})
+}
+
+/// Answers `request` on a ready node under a `LogRecorder`: the answer must be the event-stream
+/// head and the single result of a breach at `marker`, with no subscriber and no log entry.
+async fn assert_root_breach(request: Request, marker: &str) {
+    let node = Node::ready();
+    let expected = root_breach(&request.query, marker);
+    let (recorder, guard) = LogRecorder::install();
+
+    let response = node.answer_with(request, None).await;
+
+    assert_event_stream_head(&response);
+    let written = chunks(response).await;
+    drop(guard);
+    assert_eq!(single_result(&written), expected);
+    assert_only_protocol_blocks(&written);
+    assert_eq!(node.subscribers(), 0);
+    assert_eq!(node.state.status.snapshot().subscribers, 0);
+    assert_eq!(recorder.lines(), Vec::<LogLine>::new());
+}
+
+#[rstest]
+#[case::two_fields(
+    r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#,
+    "b: events"
+)]
+#[case::the_same_response_name_twice(
+    r#"subscription { events(types: ["a"]) { id } events(types: ["a"]) { type } }"#,
+    "events(types: [\"a\"]) { type }"
+)]
+#[case::a_root_fragment_spread(
+    r#"subscription { ...F } fragment F on Subscription { events(types: ["a"]) { id } }"#,
+    "...F"
+)]
+#[case::a_root_inline_fragment(
+    r#"subscription { ... on Subscription { events(types: ["a"]) { id } } }"#,
+    "... on"
+)]
+#[case::the_typename_alone("subscription { __typename }", "__typename")]
+#[case::the_typename_next_to_events(
+    r#"subscription { events(types: ["a"]) { id } __typename }"#,
+    "__typename"
+)]
+#[case::a_skip_directive(
+    r#"subscription { events(types: ["a"]) @skip(if: false) { id } }"#,
+    "events"
+)]
+#[case::an_include_directive(
+    r#"subscription { events(types: ["a"]) @include(if: true) { id } }"#,
+    "events"
+)]
+#[case::a_breach_that_also_fails_validation(
+    r#"subscription { events(types: ["a"]) { nope } unknownField }"#,
+    "unknownField"
+)]
+#[case::a_breach_with_invalid_arguments(
+    r#"subscription { a: events(types: ["A"]) { id } b: events(types: []) { id } }"#,
+    "b: events"
+)]
+#[tokio::test(start_paused = true)]
+async fn a_breach_of_the_root_rule_is_one_validation_error_inside_the_stream_and_runs_nothing(
+    #[case] document: &str,
+    #[case] marker: &str,
+) {
+    assert_root_breach(Request::new(document), marker).await;
+}
+
+/// A document of four operations: a valid subscription, one with two root fields, one with a
+/// root fragment and a query.
+const OPERATIONS: &str = concat!(
+    r#"subscription Valid { events(types: ["a"]) { id type data } } "#,
+    r#"subscription TwoFields { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } } "#,
+    r"subscription Fragment { ...F } ",
+    r"query Catalog { eventTypes { name } } ",
+    r#"fragment F on Subscription { events(types: ["a"]) { id } }"#,
+);
+
+#[tokio::test(start_paused = true)]
+async fn the_selected_operation_runs_although_another_operation_breaks_the_rule() {
     let node = Node::ready();
 
-    let written = chunks(
-        node.answer(
-            r#"subscription { ...F } fragment F on Subscription { events(types: ["a"]) { id } }"#,
-        )
-        .await,
-    )
-    .await;
+    let response = node
+        .answer_with(Request::new(OPERATIONS).operation_name("Valid"), None)
+        .await;
 
-    assert_eq!(written, [":\n\n", "event: complete\ndata:\n\n"]);
+    assert_event_stream_head(&response);
+    assert_eq!(node.subscribers(), 1);
+    let mut body = response.into_body();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    node.pass(1_043, "a");
+    assert_eq!(chunk(&mut body).await, Some(event_block(1_043)));
+    assert!(quiet(&mut body).await);
+}
+
+#[rstest]
+#[case::two_fields("TwoFields", "b: events")]
+#[case::a_root_fragment("Fragment", "...F")]
+#[tokio::test(start_paused = true)]
+async fn a_selected_operation_that_breaks_the_rule_is_refused(
+    #[case] operation: &str,
+    #[case] marker: &str,
+) {
+    assert_root_breach(Request::new(OPERATIONS).operation_name(operation), marker).await;
+}
+
+#[rstest]
+#[case::the_selected_query(Request::new(OPERATIONS).operation_name("Catalog"))]
+#[case::an_unknown_operation_name(Request::new(OPERATIONS).operation_name("Other"))]
+#[case::several_operations_without_a_name(Request::new(OPERATIONS))]
+#[case::a_name_for_an_anonymous_breach(
+    Request::new(r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#)
+        .operation_name("Anonymous")
+)]
+#[tokio::test(start_paused = true)]
+async fn an_operation_the_rule_does_not_check_keeps_the_answer_of_async_graphql(
+    #[case] request: Request,
+) {
+    let node = Node::ready();
+    let mut reference = Request::new(request.query.clone());
+    reference.operation_name.clone_from(&request.operation_name);
+    let expected = node.json_transport(reference).await;
+
+    let response = node.answer_with(request, None).await;
+
+    assert_event_stream_head(&response);
+    let written = chunks(response).await;
+    assert_eq!(written, single(&expected));
+    let result = single_result(&written);
+    assert_ne!(
+        result["errors"][0]["extensions"]["violations"][0]["code"], "single_root_field",
+        "{result}"
+    );
     assert_eq!(node.subscribers(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn one_aliased_root_field_with_fragments_inside_runs_and_delivers() {
+    let node = Node::ready();
+
+    let response = node
+        .answer(
+            r#"subscription { feed: events(types: ["a"]) { ...F ... on Event { type } } } fragment F on Event { id }"#,
+        )
+        .await;
+
+    assert_event_stream_head(&response);
+    assert_eq!(node.subscribers(), 1);
+    let mut body = response.into_body();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    node.pass(1_043, "a");
+    assert_eq!(
+        chunk(&mut body).await.as_deref(),
+        Some(
+            "event: next\nid: 1043\ndata: {\"data\":{\"feed\":{\"id\":\"1043\",\"type\":\"a\"}}}\n\n"
+        )
+    );
+    assert!(quiet(&mut body).await);
 }
 
 // ---- refusals by the hub (FR-9 (c), FR-16) ----
@@ -939,11 +1100,15 @@ async fn no_entry_is_logged_for_a_query_an_error_an_invalid_argument_or_a_whole_
 
 /// The one entry is the wiring fault of the transport. It also shows that no resolver ran: run
 /// without the state, `eventTypes` would log `MissingState`, and run without the link that
-/// `respond` adds after the check, `events` would log `MissingLink`, each a second entry.
+/// `respond` adds after the check, `events` would log `MissingLink`, each a second entry. The state
+/// is read before the root rule, so a breach of the rule is the 500 problem too.
 #[rstest]
 #[case::a_subscription(EVENTS)]
 #[case::a_query("{ eventTypes { name } }")]
 #[case::a_document_error("{ unknownField }")]
+#[case::a_breach_of_the_root_rule(
+    r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#
+)]
 #[tokio::test]
 async fn a_schema_without_the_stream_state_is_the_500_problem_logged_once_before_anything_runs(
     #[case] document: &str,

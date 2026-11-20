@@ -251,9 +251,29 @@ const UNKNOWN_TYPENAME: &str = r#"Unknown field "__typename" on type "Subscripti
     r#"subscription { ...F } fragment F on Subscription { events(types: ["a"]) { id } }"#,
     &[TRANSPORT_ERROR]
 )]
+#[case::the_same_response_name_twice(
+    r#"subscription { events(types: ["a"]) { id } events(types: ["a"]) { type } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::a_root_inline_fragment(
+    r#"subscription { ... on Subscription { events(types: ["a"]) { id } } }"#,
+    &[TRANSPORT_ERROR]
+)]
 #[case::a_skipped_root_field(
     r#"subscription { events(types: ["a"]) @skip(if: true) { id } }"#,
     &[TRANSPORT_ERROR]
+)]
+#[case::a_root_field_with_a_false_skip(
+    r#"subscription { events(types: ["a"]) @skip(if: false) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::an_included_root_field(
+    r#"subscription { events(types: ["a"]) @include(if: true) { id } }"#,
+    &[TRANSPORT_ERROR]
+)]
+#[case::the_typename_next_to_events(
+    r#"subscription { events(types: ["a"]) { id } __typename }"#,
+    &[UNKNOWN_TYPENAME, UNKNOWN_TYPENAME]
 )]
 #[case::an_invalid_type_name(
     r#"subscription { events(types: ["A"]) { id } }"#,
@@ -808,6 +828,108 @@ async fn the_last_event_id_header_of_a_post_is_the_cursor_of_its_subscription() 
             "message": "Last-Event-ID must be a decimal unsigned 64-bit integer",
             "code": "format",
         }])
+    );
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// Subscriptions that pass document validation and break the one-root-field rule (FR-14).
+const ROOT_BREACHES: [&str; 5] = [
+    r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#,
+    r#"subscription { ...F } fragment F on Subscription { events(types: ["a"]) { id } }"#,
+    r#"subscription { ... on Subscription { events(types: ["a"]) { id } } }"#,
+    r#"subscription { events(types: ["a"]) @skip(if: false) { id } }"#,
+    r#"subscription { events(types: ["a"]) @include(if: true) { id } }"#,
+];
+
+/// The single result of an event-stream body that must be the comment, one `next` and
+/// `complete`.
+fn single_result_of(answer: &Answer) -> Value {
+    let data = answer
+        .body
+        .strip_prefix(":\n\nevent: next\ndata: ")
+        .and_then(|rest| rest.strip_suffix("\n\nevent: complete\ndata:\n\n"))
+        .unwrap_or_else(|| panic!("{answer:?}"));
+    serde_json::from_str(data).unwrap()
+}
+
+#[tokio::test]
+async fn the_root_rule_runs_only_when_the_post_negotiates_an_event_stream() {
+    let state = started_state();
+    for query in ROOT_BREACHES {
+        let body = json!({ "query": query }).to_string();
+        let reference = answer_of(&state, post_with("application/json", &body, &[])).await;
+        assert_eq!(reference.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&reference.body).unwrap(),
+            json!({ "data": null, "errors": [{ "message": TRANSPORT_ERROR }] }),
+            "{query}"
+        );
+        for accept in JSON_ACCEPTS {
+            let answer = answer_of(
+                &state,
+                post_with("application/json", &body, &[("accept", accept)]),
+            )
+            .await;
+            assert_eq!(answer, reference, "{accept} {query}");
+        }
+
+        let stream = answer_of(
+            &state,
+            post_with(
+                "application/json",
+                &body,
+                &[("accept", "text/event-stream")],
+            ),
+        )
+        .await;
+
+        assert_eq!(stream.status, StatusCode::OK);
+        assert_eq!(stream.content_type.as_deref(), Some("text/event-stream"));
+        let result = single_result_of(&stream);
+        assert_eq!(result["data"], Value::Null, "{query}");
+        assert_eq!(result["errors"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            result["errors"][0]["extensions"],
+            json!({
+                "code": "VALIDATION_FAILED",
+                "violations": [{
+                    "propertyPath": "query",
+                    "message": "a subscription operation must select exactly one root field",
+                    "code": "single_root_field",
+                }],
+            }),
+            "{query}"
+        );
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn the_typename_of_the_subscription_root_is_the_rule_error_only_on_the_event_stream() {
+    let state = started_state();
+    let body = json!({ "query": "subscription { __typename }" }).to_string();
+
+    let json = answer_of(&state, post_with("application/json", &body, &[])).await;
+    let stream = answer_of(
+        &state,
+        post_with(
+            "application/json",
+            &body,
+            &[("accept", "text/event-stream")],
+        ),
+    )
+    .await;
+
+    let messages: Vec<Value> = serde_json::from_str::<Value>(&json.body).unwrap()["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| error["message"].clone())
+        .collect();
+    assert_eq!(messages, [UNKNOWN_TYPENAME, UNKNOWN_TYPENAME]);
+    assert_eq!(
+        single_result_of(&stream)["errors"][0]["extensions"]["violations"][0]["code"],
+        "single_root_field"
     );
     assert_eq!(state.hub.subscriber_count(), 0);
 }

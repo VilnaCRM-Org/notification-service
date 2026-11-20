@@ -2,8 +2,10 @@
 //!
 //! The operation is driven before the head, inside the request budget, until the `events` field
 //! registered its hub subscriber, the hub refused it, or the operation produced its first result
-//! (FR-9). The decision is read from the phase of the [`StreamLink`], which the field sets, never
-//! from which future completed first. A refusal is the 503 problem; otherwise the head is written,
+//! (FR-9). A subscription that breaks the one-root-field rule never runs: it is answered inside
+//! the stream with the rule's validation error, before the link exists (FR-6 step 3, FR-14). The
+//! decision is read from the phase of the [`StreamLink`], which the field sets, never from which
+//! future completed first. A refusal is the 503 problem; otherwise the head is written,
 //! then a comment, then the results: one `next` and `complete` for a single result, one `next`
 //! with the event id per event for a subscription, which never writes `complete` (FR-7, FR-8,
 //! FR-19). A subscription body also writes the comment whenever `STREAM_KEEP_ALIVE` passes without
@@ -29,6 +31,7 @@ use shared_application::http::Problem;
 use tokio::time::{Sleep, sleep};
 
 use crate::graphql::schema::ApiSchema;
+use crate::graphql::single_root;
 
 /// The comment block: the first block of every event stream (FR-17).
 const KEEP_ALIVE: &str = ":\n\n";
@@ -57,19 +60,27 @@ struct MissingStreamState;
 /// `subscription rejected` once, or the 500 problem of a schema without `EventStreamState`, which
 /// logs its error chain once before anything runs.
 ///
+/// A subscription that breaks the one-root-field rule is answered as a single result with the
+/// rule's error, after the keep-alive read and before any resolver runs; it logs nothing (FR-14,
+/// FR-22).
+///
 /// The link carries `last_event_id` to the field and reports its phase back. Dropping this future
 /// before it answers, as the request budget does, drops the operation and with it any subscriber
 /// the field registered (FR-9). The budget bounds only this future: the body of a subscription
 /// outlives it.
 pub(crate) async fn respond(
     schema: &ApiSchema,
-    request: async_graphql::Request,
+    mut request: async_graphql::Request,
     last_event_id: Option<HeaderValue>,
 ) -> Response {
     let Some(state) = schema.data::<EventStreamState>() else {
         return Problem::internal(&MissingStreamState).into_response();
     };
     let keep_alive = state.settings.keep_alive;
+    if let Err(error) = single_root::check(&mut request) {
+        let result = async_graphql::Response::from_errors(vec![error]);
+        return stream_answer(single_result(Some(result)));
+    }
     let link = StreamLink::new(last_event_id);
     let mut responses = schema.execute_stream(request.data(link.clone()));
     let first = tokio::select! {
