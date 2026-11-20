@@ -12,18 +12,18 @@ author: bmad-autonomous-planning (create-architecture stage)
 
 # Architecture: GraphQL subscriptions over Server-Sent Events (issue #8)
 
-The issue gained two criteria on 2026-11-17 (every route in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green); the section "OpenAPI Document of Every Route" designs them (`prd.md` FR-26 to FR-29).
+The issue gained two criteria on 2026-11-17 (every route in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green); the section "OpenAPI Document of Every Route" designs them (`prd.md` FR-26 to FR-29). The maintainer's decision M4 of 2026-11-20 on two RustSec advisories adds the section "Durations and Timestamps without humantime" (story 1.4, `prd.md` NFR-21) and the section "Protected Changes".
 
 This document turns `prd.md` of this bundle into a design that can be coded story by story in the existing layers. The PRD binds the requirements, the protocol choices P1 to P20, the messages and the status codes. This document binds where each piece of code lives, how the GraphQL subscription field and the Server-Sent Events transport reuse the hub and the subscription state machine of bundle 4, the request flow, the error and 503 mapping, the contract changes, the tests per layer, the documentation and the decision record.
 
-Every fact about the repository was read in the code on branch `claude/vilnacrm-notification-service-br7s47` at `c36f708`. Every fact about a library was read in the registry source of the locked version (`~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/`), and each is cited in "Verified Library Facts" or where it is used. Decisions of this stage are marked `> Assumption:`. The PRD and this design agree on the direct-field rule of FR-14 and on the extractor exceptions of NFR-13.
+Every fact about the repository was read in the code on branch `claude/vilnacrm-notification-service-br7s47` at `c36f708`, those of the humantime replacement at `c4f83b3` (`research.md` section 9). Every fact about a library was read in the registry source of the locked version (`~/.cargo/registry/src/index.crates.io-*/<crate>-<version>/`), and each is cited in "Verified Library Facts" or where it is used. Decisions of this stage are marked `> Assumption:`. The PRD and this design agree on the direct-field rule of FR-14 and on the extractor exceptions of NFR-13.
 
 Notation: `FR-<n>` and `NFR-<n>` are the requirements of this bundle's `prd.md`; `4/FR-<n>` and `4/NFR-<n>` are those of `specs/4-realtime-event-delivery-hub/prd.md`; `P<n>` are the protocol choices of the PRD's table "Protocol choices".
 
 ## Tech Stack
 
 - Rust toolchain: channel 1.99.1 (`rust-toolchain.toml`), edition 2024, `rust-version` 1.99.1.
-- Crates of `[workspace.dependencies]` that the change uses. None is added to `[workspace.dependencies]` and no workspace feature changes:
+- Crates of `[workspace.dependencies]` that the change uses. One entry changes: story 1.4 replaces `humantime` 2.4.0 with `jiff` 1.0.1 (`prd.md` NFR-21); no other entry and no other workspace feature changes:
 
 | Crate | Requirement (unchanged) | What the change uses it for |
 | --- | --- | --- |
@@ -37,6 +37,7 @@ Notation: `FR-<n>` and `NFR-<n>` are the requirements of this bundle's `prd.md`;
 | `tracing` | 0.1.44 | the existing entries `subscription rejected` and `replay failed` |
 | `utoipa` | 6.0.0, features `axum_extras`, `uuid`, `yaml` | `#[utoipa::path]` of every handler, `IntoParams` and `ToSchema` of the streaming parameters and event schemas, `Parameter::content`, `contentMediaType` and `contentSchema`, `OpenApi::merge` |
 | `utoipa-axum` | 0.3.0 | `OpenApiRouter::routes`, `routes!`, `split_for_parts`, `into_openapi` |
+| `jiff` | 1.0.1, `default-features = false`, features `std` (new, replaces `humantime` 2.4.0, which leaves `[workspace.dependencies]`) | `fmt::friendly::SpanParser::parse_unsigned_duration`, the duration variables of `crates/service/src/config.rs` (story 1.4) |
 | `shared-application` | path | `Problem`, `Violation`, `ApiJson`, `graphql::problem_to_error` (all unchanged) |
 | `event-stream-domain`, `event-stream-application` | path | `Sequence`, `Cursor`, `EventType`; the hub, `Subscriptions`, `Subscription`, `Frame`, `EventStreamState` |
 | `http-body-util`, `rstest`, `tower`, `tokio-tungstenite`, `test-support` | as in the manifests | tests |
@@ -50,16 +51,17 @@ When the rust-backend-sdlc:rust-implementer agent is available, independent stor
 DB rule: parallel agents run only the DB-free targets `make.format` (make format), `make.lint_code` (make lint-code), `make.unit_tests` (make unit-tests), `make.architecture` (make architecture) and `make.complexity` (make complexity); one serialized verify step at a time runs the DB-backed targets `make.setup_test_db` (not available: capability absent), `make.integration_tests` (make integration-tests), `make.tests_with_coverage` (make tests-with-coverage), `make.e2e_tests` (make e2e-tests) and `make.sqlx_prepare` (not available: capability absent). A target that reads not available is skipped and reported.
 
 - Scope: only issue #8; the four commits of issue #7 already on the branch stay as they are.
-- Placement: code changes only in `crates/notification/event-stream/application/src/{graphql.rs,graphql/,http.rs,http/dto.rs,http/handler.rs}` and `crates/service/src/{graphql.rs,graphql/,http.rs,http/,openapi.rs,bootstrap.rs}`, plus tests, features, docs, `workspace.dsl`, `.templatesyncignore` and both snapshots; domain, infrastructure and shared crates stay unchanged.
-- Protected: no protected file and no `[workspace.dependencies]` entry changes; `crates/service` only moves `futures-util` to `[dependencies]`; async-graphql keeps features `uuid` only, never `raw_value`.
+- Placement: code changes only in `crates/notification/event-stream/application/src/{envelope.rs,graphql.rs,graphql/,http.rs,http/dto.rs,http/handler.rs}` and `crates/service/src/{config.rs,graphql.rs,graphql/,http.rs,http/,openapi.rs,bootstrap.rs}`, plus tests, features, docs, `workspace.dsl`, `.templatesyncignore` and both snapshots; domain, infrastructure and shared crates stay unchanged.
+- Protected: no story edits a protected file; the maintainer's approved changes are committed (`.spectral.yaml` a374895, `make/gates.mk` 71aab46, `deny.toml` c4f83b3). Manifests: `futures-util` moved (2.3); story 1.4 alone drops `humantime` everywhere and adds `jiff` 1.0.1 to `crates/service` only, `architecture.toml` unchanged. async-graphql keeps features `uuid` only, never `raw_value`.
+- Advisories: no crate a RustSec advisory marks unmaintained in the build without dev edges; `make.check_security` passes (NFR-21).
 - No suppression: no `#[allow]`, `#[mutants::skip]`, `#[coverage(off)]`, exclusion or lowered bar; `#[expect]` only with a reason.
-- Tools only through make targets; never cargo, docker or a script directly.
+- Tools only through make targets; never cargo, docker or a script directly, except story 1.4's lock refresh `cargo tree -i jiff`.
 - Publish path untouched: `Frame`, `Hub::deliver`, the tail and the window do not change; GraphQL parsing, resolution and encoding run in the connection task.
 - Before the head nothing reads the broker: a subscription takes no step until `StreamLink::release`; the phase before the head runs inside `HTTP_REQUEST_TIMEOUT`.
 - Wire: only `next`, `complete` with a bare `data:`, the comment `:`, and `id:` on subscription results; bytes written by hand, never `axum::response::sse`; no `retry:`, no `connection` header.
 - The JSON transport keeps its bytes; GET answers gain only `Vary: accept`; a GET whose `Accept` admits the stream by a wildcard gets the stream, one without `Accept` keeps today's answer; other methods get `Allow` from axum.
 - Contracts: regenerate `.github/graphql-spec/spec` with `make.generate_graphql_spec` and `.github/openapi-spec/spec.yaml` with `make.generate_openapi_spec` in the story that changes each; no GraphQL description holds node, Connection, update, delete or "input ".
-- OpenAPI: every route registered through `routes!` and documented; no Schemathesis exclusion; a failure that cannot be fixed at its root is escalated to the maintainer.
+- OpenAPI: every route registered through `routes!` and documented; no Schemathesis exclusion beyond the approved one; a failure that cannot be fixed at its root is escalated to the maintainer.
 - Tests: paused tokio time; every await bounded by `tokio::time::timeout`; wire blocks compared byte for byte; broker tests only in the serialized step.
 - Quality: 100 % line and function coverage, zero surviving or timed-out mutants, clippy pedantic, cognitive complexity 8, 50 lines, 5 arguments.
 - No new variable and no new log message; `replay failed` gets the transport `graphql-sse`.
@@ -87,9 +89,10 @@ What the design must achieve, from the PRD:
 - The head written only after the operation registered, was refused or produced its first result, inside the request budget (FR-9), and never after a broker read (NFR-2).
 - Validation answered inside the stream (FR-13 to FR-15), availability before it (FR-16).
 - The guarantees, the limits and the slow-client handling of bundle 4 unchanged (FR-11, FR-12, FR-18, NFR-1, NFR-6).
-- Every route the service serves an operation of the OpenAPI document and of the Swagger page, a test that fails for a route served without an entry, and the OpenAPI gates and Schemathesis green on every operation (FR-26 to FR-29, NFR-20).
+- Every route the service serves an operation of the OpenAPI document and of the Swagger page, a test that fails for a route served without an entry, the OpenAPI gates green on every operation, and Schemathesis green on every operation but `GET /api/events/ws`, which only the approved `71aab46` excludes (FR-26 to FR-29, NFR-20).
+- No crate that a RustSec advisory marks unmaintained in the production build, with the documented duration syntax and the envelope time rule unchanged (NFR-21).
 
-No protected file changes (NFR-15) except one that implementation showed to be needed and the maintainer approved on 2026-11-17: the override of `operation-success-response` for the WebSocket operation in `.spectral.yaml` (commit `a374895`, see "What each operation documents"). No bounded context is added: both touched crates are live members of `[workspace].members`.
+No story edits a protected file (NFR-15). The three protected changes that implementation and the advisories of 2026-11-20 showed to be needed were approved by the maintainer and committed outside the stories; "Protected Changes" lists them. No bounded context is added: both touched crates are live members of `[workspace].members`.
 
 ## Verified Library Facts
 
@@ -138,6 +141,8 @@ No protected file changes (NFR-15) except one that implementation showed to be n
    - The streaming routes are registered with a plain `.route(..)` (`event-stream/application/src/http.rs:65-66`), and `assemble` registers `/api/graphql`, `/ping` and the three documentation routes the same way (`crates/service/src/http/router.rs:59-63`); none of them is in the document. `openapi_json` serves `openapi::document()` (`http/docs.rs:32-34`). The load-test stack runs `APP_ENV: test` (`docker-compose.load_test.override.yml:5`).
 7. **utoipa 6.0.0 and utoipa-axum 0.3.0:** `OpenApiRouter::routes` registers the annotated path verbatim in the axum router and in the document (`utoipa-axum-0.3.0/src/router.rs:215-249`); `OpenApiRouter::route` documents nothing (`:251`). `Parameter` has `content` (`utoipa-6.0.0/src/openapi/path.rs:840`) and a string schema has `content_media_type` and `content_schema` (`src/openapi/schema.rs:1352-1361`).
 8. **Schemathesis 4.33.1** (the image of `make/tool-versions.mk:38`, read from its wheel): an event stream is read until it ends, 20 events arrive or 10 s pass, and is then checked as a response cut short (`schemathesis/core/transport.py:56-90`, `transport/requests.py:320-335`); each event `{data, event, id?, retry?}` is validated against the `text/event-stream` schema, with `contentMediaType` and `contentSchema` (`core/deserialization.py:223-256`, `specs/openapi/validation.py:140-163`); requests carry `Accept: */*` (`reporting/ndjson.py:70`); `positive_data_acceptance` expects 2xx, 3xx, 401, 403, 404, 409, 429 or 5xx, `negative_data_rejection` 400, 401, 403, 404, 405, 406, 409, 415, 422, 428, 429 or 5xx (`config/_checks.py:13-29`); a connection dropped before its response is resent once (`transport/requests.py:297-315`).
+9. **jiff 1.0.1** (`research.md` section 9.4, read from the crate file of the index, licence `Unlicense OR MIT`, `rust-version` 1.85, edition 2024): `fmt::friendly::SpanParser::new()` is `const`, and `parse_unsigned_duration` returns a `core::time::Duration` (`src/fmt/friendly/parser.rs:110`, `:289-307`). It reads numbers with lower-case units from hours down to nanoseconds, largest first, with optional ASCII spaces, commas, a fraction (`.` or `,`), a sign and the clock form `H:MM:SS`; a negative value, a unit of days or longer, a repeated unit, a number without a unit and a leading space fail (`src/fmt/friendly/parser.rs:311-470`, `src/fmt/util.rs:73-99`, `:499-530`, `:1029`). `Timestamp::MAX` is `9999-12-30T22:00:00.999999999Z` (`src/timestamp.rs:350`), and fractions have at most nine digits (`src/fmt/util.rs:776`). Without default features and with `std`, its only other crate compiled on this platform is `jiff-core` 1.0.1 (`Unlicense OR MIT`). `Cargo.lock` records the non-optional dependencies of every target, so it also gains `jiff-static` 1.0.1 (`Unlicense OR MIT`, required as `=1.0.1` behind `cfg(any())`, never compiled) and `portable-atomic-util` 0.2.8 (`Apache-2.0 OR MIT`, behind `cfg(not(target_has_atomic = "ptr"))`, not compiled on x86_64 or aarch64); their own dependencies `jiff-core`, `proc-macro2`, `quote`, `syn` 3.0.10 and `portable-atomic` 1.15.0 are already locked at versions that satisfy them (`Cargo.toml` of jiff 1.0.1, `[target."cfg(any())".dependencies]` and `[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]`; the crates.io index).
+10. **humantime 2.4.0:** `parse_duration` reads the units `ns` to `h` under the same labels as jiff, plus days, weeks, months (`M`) and years (`src/duration.rs:323-332`); it returns zero for the bare text `0` (`:364-367`), skips any Unicode space before and inside a number (`:132`, `:180`), reads a dot fraction (`:136-139`), refuses a sign, a comma and a colon (`:141-143`, `:181-183`), and adds a unit written twice (`:254-267`). `parse_rfc3339` checks the fixed positions of `YYYY-MM-DDTHH:MM:SS`, year at least 1970, month, day within the month (Gregorian leap years), hour 23, minute 59, second 60 read as 59 at any time, any number of fraction digits, at most the last second of 9999 (`src/date.rs:84-197`).
 
 ## Component Placement
 
@@ -164,6 +169,9 @@ Every new or changed component, in the order a request meets it:
 | `crates/notification/event-stream/application/src/http/handler.rs`, `http/dto.rs` | `#[utoipa::path]` of `stream` and `ws`; `IntoParams` of `StreamParams` and `WsParams`; the header parameters and the event and frame schemas | changed | FR-26 |
 | `crates/service/src/openapi.rs` (+ `openapi/tests.rs`) | `graphql_router`, `operational_router`, `document()` merging the three routers; `API_VERSION` 2.1.0; the tags `GraphQL` and `Documentation`; the completeness oracles | changed | FR-26 to FR-28 |
 | `crates/service/src/graphql/handler.rs`, `http/ping.rs`, `http/docs.rs` | `#[utoipa::path]` of `execute`, `subscribe`, `subscribe_or_explore`, `ping`, `docs_page`, `openapi_json` and `docs_asset` (one segment) | changed | FR-26 |
+| `crates/service/src/config.rs` (+ `config/tests.rs`, `config/tests/kafka.rs`) | `parse_duration`, used by `ranged_duration` and `duration` | changed | NFR-21 |
+| `crates/notification/event-stream/application/src/envelope.rs` (+ `envelope/tests.rs`) | `is_utc_time` with its own calendar rule in place of `humantime::parse_rfc3339` | changed | NFR-21 |
+| `Cargo.toml`, `Cargo.lock`, `crates/service/Cargo.toml`, `crates/notification/event-stream/application/Cargo.toml` | `humantime` out, `jiff` into `[workspace.dependencies]` and `crates/service` | changed | NFR-21 |
 
 > Assumption: the resolver and its objects live in the event-stream application crate's `graphql` module, and the transport lives in the composition root. AD-18 puts the schema and its transports in the composition root. The crate's module rule lets only `http` and `graphql` import `async_graphql`, and the resolver reaches `parse_names`, `types_problem`, the cursor rule and `Subscriptions::open` crate-internally, as `EventStreamQuery` reaches `list_types`. The transport never names a type of the hub other than `HubError` and `Sequence`.
 
@@ -642,7 +650,7 @@ The CORS layer of `CORS_ALLOWED_ORIGINS` already allows `GET` and `POST` and the
 
 ## OpenAPI Document of Every Route
 
-This section designs FR-26 to FR-29 and NFR-20: every route the service serves becomes an operation of the OpenAPI document, the Swagger page shows it, a test fails for a route served without an entry, and the OpenAPI gates and Schemathesis pass on every operation.
+This section designs FR-26 to FR-29 and NFR-20: every route the service serves becomes an operation of the OpenAPI document, the Swagger page shows it, a test fails for a route served without an entry, the OpenAPI gates pass on every operation, and Schemathesis passes on every operation but `GET /api/events/ws`, which only the approved `71aab46` excludes.
 
 ### One registration per route
 
@@ -708,7 +716,7 @@ In `crates/service/src/openapi/tests.rs`:
 
 ### Schemathesis on every operation (FR-29, NFR-20)
 
-`make.schemathesis_validate` keeps its protected flags (`--checks all --phases=examples,coverage`). What each streaming operation meets, from Verified Library Facts 8:
+`make.schemathesis_validate` keeps its protected flags (`--checks all --phases=examples,coverage`), amended only by the approved `--exclude-operation-id api_events_ws_get` (`71aab46`, see "Protected Changes"). What each streaming operation meets, from Verified Library Facts 8 (the WebSocket row as designed before that exclusion):
 
 | Operation | Schema-valid requests | Schema-invalid requests |
 | --- | --- | --- |
@@ -718,7 +726,7 @@ In `crates/service/src/openapi/tests.rs`:
 | `GET /api/graphql` | `Accept: */*` negotiates the event stream (GET rule): a single result and `complete`, or a subscription stream read to 20 events or 10 s | missing `query`: 400; `variables` or `extensions` not an object: 422; too long: 414 |
 | `PUT`, `DELETE`, `PATCH` of any path | 405 with `Allow` | not applicable |
 
-The story that completes the document runs the gate. A failure is fixed at its root in the document or the code. None is expected to need an exclusion; should one prove impossible to fix, the story stops and escalates with the failing check, the reason and the exact exclusion (an `--exclude-operation-id` or a per-operation setting, and the file it would change, `make/gates.mk` being protected), and the operation stays on the Swagger page.
+The story that completes the document runs the gate. A failure is fixed at its root in the document or the code. None is expected to need an exclusion; should one prove impossible to fix, the story stops and escalates with the failing check, the reason and the exact exclusion (an `--exclude-operation-id` or a per-operation setting, and the file it would change, `make/gates.mk` being protected), and the operation stays on the Swagger page. The one exclusion made, `GET /api/events/ws`, went this way and was approved by the maintainer (see "Protected Changes").
 
 ### Protected tests of the OpenAPI gates
 
@@ -726,6 +734,74 @@ The story that completes the document runs the gate. A failure is fixed at its r
 - G19 removes the required `title` of `Problem`, which every problem response references, and oasdiff still reports `response-required-property-removed`.
 - G21 plants an undocumented path; the run, now longer by the streaming cases, still ends and fails naming it.
 - `scripts/check-docs.sh` keeps accepting `/api/...` and `/ping` citations through the first segments of the snapshot's paths.
+
+## Durations and Timestamps without humantime
+
+This section designs story 1.4 (`prd.md` NFR-21, maintainer decision M4 of 2026-11-20). `humantime` leaves the production build: jiff parses the durations of the composition root, and the envelope parser checks its time with a rule of its own. No behaviour that `docs/environment.md` or a test names changes, and nothing else moves. The facts are in `research.md` section 9 and in Verified Library Facts 9 and 10.
+
+### `crates/service/src/config.rs`
+
+```rust
+/// jiff's friendly duration format: numbers with the units `h`, `m`, `s`, `ms`, `us` or `ns`
+/// (or their long names), largest unit first, such as `500ms`, `2s`, `1m` or `1m30s`.
+static DURATION_PARSER: SpanParser = SpanParser::new();
+
+/// A duration of that syntax or the bare `0`, or `None` for any other text, a negative value or a
+/// unit of days or longer.
+fn parse_duration(value: &str) -> Option<Duration> {
+    if value == "0" {
+        return Some(Duration::ZERO);
+    }
+    DURATION_PARSER.parse_unsigned_duration(value).ok()
+}
+```
+
+- `ranged_duration` keeps a value that `parse_duration` reads and that lies in the rule's range; `duration` maps `None` to its reason. The six `DurationRule` constants, the two reasons `must be a duration from <range>` and `must be a duration such as 500ms, 2s or 1m`, and every call site stay as they are.
+- `config/tests/kafka.rs`: `each_kafka_duration_accepts_its_bounds` gets an expected `Duration` per case (`Duration::from_secs(1)`, `Duration::from_millis(100)`, ...) in place of `humantime::parse_duration(raw)`, so the code under test is not its own oracle.
+- `config/tests.rs`: a table test that reads, through `SHUTDOWN_GRACE_PERIOD` (unranged and under no cross-field rule, so every readable value reaches the result; `HTTP_REQUEST_TIMEOUT` must exceed `HEALTH_PROBE_TIMEOUT`, which `valid()` sets to 4 s, and serves the refusals only), every value of `research.md` section 9.3 that no range test reads (`300ms`, `500ms`, `2s`, `3001ms`, `1m` as 60 s, `2m`, `10m`) and compares the `Duration`; and every edge that the change could move, each pinned with its expected result (`research.md` section 9.4):
+  - read: `0` as `Duration::ZERO` (kept by the guard), `+2s` as 2 s, `1,5s` as 1 500 ms and `01:30:00` as 5 400 s; and, as edges that do not move, `1.5s` as 1 500 ms and `1m 30s` as 90 s;
+  - refused with `must be a duration such as 500ms, 2s or 1m`: `1d`, `2w`, `1M`, `1y`, `30s1m`, `1h1h`, ` 2s` (a leading space), `1 0s` (a space inside a number) and `1\u{a0}s` (a no-break space before the unit);
+  - the existing refusals (`""`, `-2s`, `fast`, `1 fortnight`, `later`, `soon`, every value one step outside a range) pass unchanged.
+
+> Assumption: the parser is one `static` `SpanParser` behind one private function that both readers call, so the grammar lives in one place and the mutation run meets one call. `parse_unsigned_duration` is used rather than `SignedDuration::from_str`, because it reads only the friendly format (no ISO 8601 `PT2S`) and refuses a negative value itself.
+
+> Assumption: the bare `0` keeps today's reading, `Duration::ZERO`, through the one-line guard in `parse_duration`. humantime documents and implements `0` as its one value without a unit, jiff refuses it for want of a unit, and an operator who set an unranged variable such as `SHUTDOWN_GRACE_PERIOD`, `SQS_CONNECT_TIMEOUT` or `SQS_OPERATION_TIMEOUT` to `0` would otherwise see the node refuse to start after an upgrade; a ranged variable still refuses `0` through its range, as today. The other moved edges are not documented, used by no file of the repository (`research.md` section 9.3) and take jiff's answer: a sign, a comma fraction and the clock form are read; a repeated unit, a unit of days or longer and a space before or inside a number are refused with the unchanged reason.
+
+### `crates/notification/event-stream/application/src/envelope.rs`
+
+`is_utc_time` keeps its suffix strip and its fraction check, and `humantime::parse_rfc3339(text).is_ok()` becomes a private rule over the first 19 bytes of the body:
+
+```rust
+/// `YYYY-MM-DDTHH:MM:SS` from 1970 to 9999: digits and separators at their positions, a day of
+/// the calendar (Gregorian leap years), hour 0 to 23, minute 0 to 59, second 0 to 60 (a leap
+/// second is accepted at any minute, as before).
+fn is_calendar_time(body: &[u8]) -> bool;
+/// The days of `month` in `year`; 0 for a month outside 1 to 12.
+fn days_in_month(year: u16, month: u8) -> u8;
+/// Divisible by 4 and not by 100, or divisible by 400.
+fn is_leap_year(year: u16) -> bool;
+```
+
+- The separators are `-` at bytes 4 and 7, `T` at byte 10 and `:` at bytes 13 and 16; every other byte from 0 to 18 is an ASCII digit, and each field is read from its digits.
+- The year is at least 1970 (four digits keep it at most 9999); the day is from 1 to `days_in_month(year, month)`, which is 0 for month 0 or a month above 12; the hour is at most 23, the minute at most 59, the second at most 60.
+- The documentation comment of `is_utc_time` states this rule and no longer names a crate. Each function stays within the complexity bars (cognitive complexity 8, 50 lines, 5 arguments).
+- `envelope/tests.rs`: every existing case passes unchanged. The new cases are answered as `humantime::parse_rfc3339` answers them today (`research.md` section 9.5):
+  - accepted: `2026-11-14T10:00:60Z`, `9999-12-31T23:59:60Z`, `2024-02-29T10:00:00Z`, `2000-02-29T10:00:00Z`, `2026-11-30T10:00:00Z`, `2026-12-31T23:59:59+00:00`, and fractions of 10 and of 30 digits;
+  - refused: `2026-11-14T10:00:61Z`, `2026-11-14T10:60:00Z`, `2026-11-31T10:00:00Z`, `2026-04-31T10:00:00Z`, `2026-02-29T10:00:00Z`, `2100-02-29T10:00:00Z`, `2026-00-14T10:00:00Z`, `2026-11-00T10:00:00Z`, `0000-01-01T00:00:00Z`, `2026-11-14T10:00:00+05:30`, a letter in each field, a wrong separator at each of the five positions, a sign inside a field (`2026-+1-14T10:00:00Z`) and a full-width digit;
+  - both sides of every bound, so that no mutant survives: year 1969 and 1970; month 0, 1, 12 and 13; day 0 and 1; the last day and the next for months of 28, 29, 30 and 31 days; hour 23 and 24; minute 59 and 60; second 60 and 61; the leap-year rules on 2024, 2026, 2100 and 2000.
+
+> Assumption: the rule reads bytes and uses no crate. The application layer's allow-list in the protected `architecture.toml` names `humantime` and not `jiff`, and the maintainer approved only the `deny.toml` change; besides, jiff's timestamps end at `9999-12-30T22:00:00.999999999Z` and read at most nine fraction digits (Verified Library Facts 9), so jiff would refuse `9999-12-31T23:59:59Z` (test `last_second_of_9999`) and the longer fractions that are accepted today. The fixed positions and bounds are those humantime checks (Verified Library Facts 10), so the rule accepts and refuses exactly the same strings.
+
+### Manifests, the lock and the documentation
+
+- `Cargo.toml`, `[workspace.dependencies]`: `humantime = "2.4.0"` is removed, and `jiff = { version = "1.0.1", default-features = false, features = ["std"] }` takes its place in the sorted list, between `futures-util` and `krafka`.
+- `crates/service/Cargo.toml`: `humantime.workspace = true` becomes `jiff.workspace = true` in `[dependencies]`.
+- `crates/notification/event-stream/application/Cargo.toml`: `humantime.workspace = true` is removed, and nothing is added.
+- `Cargo.lock` is regenerated by cargo, never by hand and never through `make update`, because every make target that compiles runs cargo with `--locked` and `make update` would raise other crates. As the story's first step, right after the three manifest edits, the implementer runs once the rust-implementer's allowed dependency probe `cargo tree -i jiff` without `--locked`: it resolves the changed manifests, writes only the minimal lock change, keeps every version already locked, and shows `service` as the only dependent of `jiff`. It then runs the maintainer's check `cargo tree --workspace -e no-dev -i humantime` and records its empty output. The lock gains exactly `jiff` 1.0.1, `jiff-core` 1.0.1, `jiff-static` 1.0.1 (pinned with `=` behind `cfg(any())`, never compiled) and `portable-atomic-util` 0.2.8 (behind `cfg(not(target_has_atomic = "ptr"))`, not compiled on x86_64 or aarch64), and raises no version that is already locked; `service` lists `jiff` in place of `humantime`; `event-stream-application` lists neither; `humantime` 2.4.0 stays with `cucumber` as its only dependent. Until the lock matches the manifests, the `--locked` targets of the other stories of the wave fail in the shared tree, so the refresh comes first.
+- `docs/environment.md` line 9 names the accepted syntax without a crate: numbers with a unit `h`, `m` (minutes), `s`, `ms`, `us` or `ns`, long names such as `min` or `seconds` allowed, largest unit first, for example `500ms`, `2s`, `1m` or `1m30s`, and `0` alone for zero; units of days and longer refused.
+- Not changed: `deny.toml` (the approved entries are committed, `c4f83b3`), `architecture.toml` (its unused `humantime` entry stays), `tests/e2e` (cucumber keeps `humantime` as a dev dependency).
+
+After the story the graph without dev edges holds no `humantime`, so the maintainer's check `cargo tree --workspace -e no-dev -i humantime` prints nothing and the reason of the first `deny.toml` entry holds; `make.check_security` passes (advisories with the two approved entries; licences, `jiff`, `jiff-core` and `jiff-static` (`Unlicense OR MIT`) and `portable-atomic-util` (`Apache-2.0 OR MIT`), each admitted through `MIT`; bans, no unused workspace dependency; sources); `make.architecture` and `make.unused_dependencies` pass with `architecture.toml` unchanged.
 
 ## Contract and Snapshot Changes
 
@@ -834,7 +910,7 @@ The `dto.rs` tests cover `CursorFault::violation` and `read_cursor`. The existin
 
 `features/graphql.feature` and `features/http_errors.feature` pass unchanged.
 
-**Coverage and mutation.** One coverage run over `--lib --bins --test integration` must report 100 % of lines and functions; the Gherkin suite is not instrumented, so unit and integration tests reach every line. The diff mutation run must report zero survivors. Mutants on the qvalue parser, the decoder, the root rule and the wire encoders are killed by the table tests above.
+**Coverage and mutation.** One coverage run over `--lib --bins --test integration` must report 100 % of lines and functions; the Gherkin suite is not instrumented, so unit and integration tests reach every line. The diff mutation run must report zero survivors. Mutants on the qvalue parser, the decoder, the root rule and the wire encoders are killed by the table tests above, and those on the duration reader and the envelope's calendar rule by the tests of "Durations and Timestamps without humantime".
 
 ## Load Test
 
@@ -862,6 +938,7 @@ The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unch
 | `.templatesyncignore` | `crates/service/src/graphql.rs`, `crates/service/src/graphql/handler.rs`, `crates/service/src/http/ping.rs`, `crates/service/src/http/ping/`, `crates/service/src/http/docs.rs` and `crates/service/src/http/docs/` |
 | `docs/adr/0022-every-route-in-the-openapi-document.md` | new (see "Decision Record") |
 | `docs/adr/README.md`, `docs/architecture.md`, `docs/streaming-protocol.md` | a row for 0022, the rows of 0006 and 0007 marked "(amended by 0022)"; "outside the OpenAPI document" replaced by a pointer to the Swagger page; the GET rule of the negotiation and its `dev` effect on curl |
+| `docs/environment.md` | line 9: the accepted duration syntax without naming a crate (story 1.4, see "Durations and Timestamps without humantime") |
 
 `make.docs_check` passes in the story that changes each document.
 
@@ -886,7 +963,19 @@ The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unch
 3. **Streaming operations:** the event schema of one event (the OpenAPI 3.2 convention), the 101 of the WebSocket route with its handshake headers and its frames in the description.
 4. **The GET rule of the negotiation:** a wildcard admits the event stream on GET; a missing `Accept` keeps the 405.
 5. **Completeness tests:** the source oracle, the exact operation set, every operation served.
-6. **Schemathesis:** every operation tested with the protected flags; a failure fixed at its root; an exclusion only as a maintainer's decision after an escalation, never in this change.
+6. **Schemathesis:** the operations tested with the protected flags; a failure fixed at its root; an exclusion only as a maintainer's decision after an escalation, never by a story. The one such decision excludes `GET /api/events/ws` (`71aab46`), whose valid 101 Schemathesis reports as a failure; the operation stays on the Swagger page, and the other ten are tested.
+
+## Protected Changes
+
+The rust-implementer agent never edits a protected path (`protected-config.toml`), and the plugin refuses a story commit that changes one. Each change below proved necessary after planning, was approved by the maintainer under the label `approved-config-change`, and was committed as its own commit outside the stories. No other protected file changes for issue #8.
+
+| File | Exact change | Commit | Approved | Why |
+| --- | --- | --- | --- | --- |
+| `.spectral.yaml` | six lines: an override that turns the built-in rule `operation-success-response` off for `GET /api/events/ws` only; every other rule keeps applying to it | `a374895` | 2026-11-17 | the WebSocket route answers `101 Switching Protocols`, and the rule asks every operation for a 2xx or 3xx answer (story 4.4) |
+| `make/gates.mk` | one line: `SCHEMATHESIS_FLAGS` gains `--exclude-operation-id api_events_ws_get` | `71aab46` | 2026-11-17 | Schemathesis 4.33.1 reports the valid handshake's `101` as a failure (ST101, ST202) and no change to the service can give it another answer; the operation stays documented on the Swagger page |
+| `deny.toml` | two entries in `[advisories] ignore`: `{ id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, not vulnerable, and has no safe upgrade; it remains only through cucumber 0.23.0 (the newest release), a dev-dependency of the end-to-end tests. Remove when cucumber drops it." }` and `{ id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable, and has no safe upgrade; it enters only through the test-util feature of aws-smithy-http-client, enabled by the dev-dependency aws-smithy-mocks, so the production binary never compiles it. Remove with SQS." }` | `c4f83b3` | 2026-11-20 | the two advisories, published after 2026-11-17, made `make.check_security` fail on `main` and on this branch; neither crate is vulnerable or has a safe upgrade; after story 1.4 both are reached only through dev edges (NFR-21, M4) |
+
+Story 5.1 checks this list against the protected files that `git diff --name-only c36f708..HEAD` names. `make.ci_preflight` runs with `CONFIG_CHANGE_APPROVED=true` only while pull request #9 carries `approved-config-change` for these changes and for the three lines of issue #7.
 
 ## Build Order
 
@@ -898,8 +987,9 @@ The epics stage cuts the stories. This order keeps each step testable with the D
 4. **Transport and wiring:** `event_stream.rs` (first without, then with the keep-alive timer), the handlers, `vary.rs`, the router, the bootstrap line of `QueryStringLimit`, the manifest; the router, CORS and oracle tests; the `.templatesyncignore` entry for `handler.rs`. Depends on 1, 2 and 3.
 5. **Broker integration and end-to-end tests** (serialized verify step). Depends on 4.
 6. **K6 subscriber, documentation, ADR 0021, `workspace.dsl`.** Depends on 4.
-7. **Verification** of every local gate of `make ci` (NFR-15). Depends on 5, 6 and 8.
+7. **Verification** of every local gate of `make ci` (NFR-15). Depends on 5, 6, 8 and 9.
 8. **OpenAPI document:** first the streaming routes of the event-stream crate (annotations, parameters, `routes!`), then the GraphQL, liveness and documentation routes, the merge of the three routers, the completeness tests, the snapshot, ADR 0022 and the Schemathesis run. Depends on 1 and on the GET form of 4.
+9. **Durations and timestamps without humantime** (added on 2026-11-20): the manifests and the lock first, then `config.rs` with jiff, the envelope's calendar rule and `docs/environment.md` (see "Durations and Timestamps without humantime"). Depends on nothing that is not done: it shares only `crates/service/Cargo.toml` with step 4, which is done, so it runs next to steps 5 to 8.
 
 ## Failure Modes
 
@@ -918,3 +1008,5 @@ The epics stage cuts the stories. This order keeps each step testable with the D
 | A wiring fault (settings, link or state missing) | the transport cannot run | a 500 problem or an `INTERNAL_SERVER_ERROR` result, logged once; covered by unit tests |
 | A route is added with a plain `.route(..)` | it is served without an entry | the source oracle of `openapi/tests.rs` fails, naming the file and line |
 | Schemathesis refuses a streaming operation | `make.schemathesis_validate` fails | fixed at its root in the document or the code; an unfixable case is escalated with the exact exclusion, never excluded by the plan |
+| A RustSec advisory marks a crate unmaintained | `make.check_security` fails | a crate of the production build is replaced (story 1.4 for humantime); a crate that only dev edges reach is ignored in `deny.toml` with its reason and removal condition, only as a protected change the maintainer approved (NFR-21) |
+| A duration or `occurredAt` value would read differently after humantime leaves | a node would accept a configuration or an event it refused, or the reverse | the tests of story 1.4 pin every documented value, the moved duration edges and every edge of the time rule |

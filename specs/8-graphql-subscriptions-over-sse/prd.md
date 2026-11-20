@@ -11,7 +11,7 @@ author: bmad-autonomous-planning (create-prd stage)
 
 # PRD: GraphQL subscriptions over Server-Sent Events (issue #8)
 
-Source: <https://github.com/VilnaCRM-Org/notification-service/issues/8>, as read on 2026-11-16 and again on 2026-11-17, after the maintainer's decision of 2026-11-17 added two criteria (every route of the service in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green). Bundle: `specs/8-graphql-subscriptions-over-sse/`. Context: `notification/event-stream` (application layer) and the composition root `crates/service`. Inputs: `research.md` (its section 8 holds the resolved questions), `product-brief.md` (success criteria S1 to S12) and the maintainer decisions M1 to M3 named there.
+Source: <https://github.com/VilnaCRM-Org/notification-service/issues/8>, as read on 2026-11-16 and again on 2026-11-17, after the maintainer's decision of 2026-11-17 added two criteria (every route of the service in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green). Bundle: `specs/8-graphql-subscriptions-over-sse/`. Context: `notification/event-stream` (application layer) and the composition root `crates/service`. Inputs: `research.md` (its section 8 holds the resolved questions), `product-brief.md` (success criteria S1 to S15) and the maintainer decisions M1 to M3 named there. Decision M4 of 2026-11-20 (answer "Ignore both, replace ours"): the RustSec advisories RUSTSEC-2026-0542 (humantime) and RUSTSEC-2026-0543 (chrono), published after 2026-11-17, made `make check-security` fail; both are ignored in the protected `deny.toml` by two approved entries with a reason and a removal condition, and humantime is replaced in the two service crates in this pull request (NFR-21, NFR-15, `research.md` section 9).
 
 Notation:
 
@@ -35,7 +35,7 @@ How it works:
 - The transport is chosen by the `Accept` header on the existing path. A request that does not ask for an event stream keeps today's JSON answer.
 - An invalid operation is answered inside an accepted event stream, with `VALIDATION_FAILED` or the GraphQL document errors, then `complete`, as the protocol requires. A node that cannot take the subscription answers the 503 problem of the REST streaming routes before any stream, and graphql-sse clients retry it.
 - Every route the service serves becomes an operation of the OpenAPI document and of the Swagger page at `/api/docs`, fully documented: the two streaming routes, both forms of the GraphQL endpoint, the liveness probe and the documentation routes join the three REST operations, and a test fails when a route is served without an entry (FR-26 to FR-29, maintainer decision of 2026-11-17).
-- The change adds no configuration variable, no dependency, no protected change, no bounded context and no state shared between requests.
+- The change adds no configuration variable, no bounded context and no state shared between requests. Its one dependency change replaces `humantime` with `jiff` in `crates/service` and drops it from the event-stream application crate (NFR-21, M4). Its protected changes are the three the maintainer approved, committed outside the stories (NFR-15).
 
 ### Protocol choices
 
@@ -535,11 +535,11 @@ The tags gain `GraphQL` and `Documentation`, each with a description. `API_VERSI
 - `make.validate_contract_snapshots` reports no drift;
 - `make.validate_openapi_spec` (Spectral with the protected `.spectral.yaml`) reports no finding;
 - `make.openapi_diff` reports no breaking change, so no `approved-breaking-change` label is needed: the change adds operations, tags and schemas and removes nothing;
-- `make.schemathesis_validate` (`--checks all --phases=examples,coverage` against the production image in the load-test stack) passes with every operation of FR-26 tested, the streaming ones included.
+- `make.schemathesis_validate` (`--checks all --phases=examples,coverage` against the production image in the load-test stack, with the protected flags as amended by the approved `71aab46`) passes with ten of the eleven operations of FR-26 tested, the other streaming ones included; `GET /api/events/ws` is excluded only by that approved change and stays documented on the Swagger page.
 
-A Schemathesis failure on a streaming operation is fixed at its root: in the document (a schema that admits a value the service refuses, a missing status code or header, an event schema that does not match the frames) or in the code (an answer that contradicts the documented contract). No operation is excluded from Schemathesis and no check is disabled or relaxed by this plan. Should a failure be impossible to fix at its root, the story stops and escalates to the maintainer with the failing check, the reason and the exact exclusion that would remove it (where it lives, which operation, which check); an exclusion in a protected file such as `make/gates.mk` goes through the label `approved-config-change`, and the operation stays documented on the Swagger page either way.
+A Schemathesis failure on a streaming operation is fixed at its root: in the document (a schema that admits a value the service refuses, a missing status code or header, an event schema that does not match the frames) or in the code (an answer that contradicts the documented contract). Apart from the approved exclusion of `GET /api/events/ws` (`71aab46`), no operation is excluded from Schemathesis and no check is disabled or relaxed. Should a failure be impossible to fix at its root, the story stops and escalates to the maintainer with the failing check, the reason and the exact exclusion that would remove it (where it lives, which operation, which check); an exclusion in a protected file such as `make/gates.mk` goes through the label `approved-config-change`, and the operation stays documented on the Swagger page either way.
 
-> Assumption: no exclusion is planned, because Schemathesis 4.33.1 can test every operation of FR-26 (`research.md` section 3.11): it reads an event stream until the stream ends, 20 events arrive or its 10 s request timeout passes, and treats a stream cut short as a normal response; it validates each event against a `text/event-stream` schema of one event; it sends `Accept: */*`, which the GET rule of FR-2 answers with an event stream instead of the 405 that its check `positive_data_acceptance` would refuse; and it accepts a documented 101. The escalation path is the issue's own rule for a failure that cannot be fixed at its root.
+> Assumption: no exclusion is planned, because Schemathesis 4.33.1 can test every operation of FR-26 (`research.md` section 3.11): it reads an event stream until the stream ends, 20 events arrive or its 10 s request timeout passes, and treats a stream cut short as a normal response; it validates each event against a `text/event-stream` schema of one event; it sends `Accept: */*`, which the GET rule of FR-2 answers with an event stream instead of the 405 that its check `positive_data_acceptance` would refuse; and it accepts a documented 101. The escalation path is the issue's own rule for a failure that cannot be fixed at its root. Amended on 2026-11-20: the run on `4dfd92e` showed that Schemathesis reports the valid handshake's 101 as a failure (ST101, ST202); the escalation path ran as written, and the maintainer approved the exclusion of `GET /api/events/ws` alone (`71aab46`).
 
 ### Traceability
 
@@ -555,8 +555,9 @@ A Schemathesis failure on a streaming operation is fixed at its root: in the doc
 | AC8. A page of an origin of `CORS_ALLOWED_ORIGINS` can open the subscription; without the variable no other origin can | FR-21, FR-4 | S9 |
 | AC9. The OpenAPI document and the Swagger page list every route (at least the seven named), each with its parameters, request body, every status code (`200 text/event-stream` or `101` with the frame format, the 400, 403, 422 and 503 problems) and examples; a test fails when a route is served without an entry | FR-26, FR-27, FR-28, FR-25 (ADR 0022) | S13 |
 | AC10. `make validate-openapi-spec`, `make openapi-diff` (no breaking change) and `make schemathesis-validate` pass; a streaming endpoint is excluded from Schemathesis only when it cannot be tested, with the reason, and stays on the Swagger page | FR-29, FR-2 (GET rule), NFR-16, NFR-20 | S14 |
-| AC11. `docs/streaming-protocol.md` and `docs/requests.http` describe it; every local gate of `make ci` passes, 100 % coverage, no surviving mutant | FR-23, FR-24, FR-25, NFR-10, NFR-11, NFR-12, NFR-13, NFR-14, NFR-15, NFR-16, NFR-19 | S11, S12 |
+| AC11. `docs/streaming-protocol.md` and `docs/requests.http` describe it; every local gate of `make ci` passes, 100 % coverage, no surviving mutant | FR-23, FR-24, FR-25, NFR-10, NFR-11, NFR-12, NFR-13, NFR-14, NFR-15, NFR-16, NFR-19, NFR-21 | S11, S12 |
 | M1. graphql-sse over SSE with GraphQL over HTTP formats, every protocol choice recorded | FR-2 to FR-8, FR-25 (ADR 0021) | S11 |
+| M4. (2026-11-20) RUSTSEC-2026-0542 and RUSTSEC-2026-0543 ignored in `deny.toml` by the two approved entries; humantime replaced in the two service crates in this pull request, keeping the documented duration syntax and the envelope time rule | NFR-21, NFR-15, NFR-17 | S15 |
 
 ## Non-Functional Requirements
 
@@ -623,7 +624,7 @@ No `#[allow]` is used, and an `#[expect]` carries a reason. Timers use tokio tim
 The rest stays fixed:
 
 - The domain and infrastructure crates of the context, and the shared crates, are not changed. `shared_application::graphql` is unchanged.
-- No crate is added to `[workspace.dependencies]`, and a crate adds a workspace dependency to its own manifest only within its layer's allow-list. The application layer uses neither `tokio-stream` nor `async-stream`. No allow-list changes.
+- No crate is added to `[workspace.dependencies]` except `jiff`, which replaces `humantime` there (NFR-21, story 1.4). A crate adds a workspace dependency to its own manifest only within its layer's allow-list: `jiff` goes to `crates/service` only, whose layer allows every crate, and the event-stream application crate drops `humantime` and adds nothing. The application layer uses neither `tokio-stream` nor `async-stream`. No allow-list changes.
 - The GraphQL handlers `execute`, `subscribe` and `subscribe_or_explore` take `HeaderMap`, the recorded streaming exception; `subscribe` and `subscribe_or_explore` also take `RawQuery`, to bound and strictly parse the raw query string. The extractor oracle of the router tests names these two exceptions for these three handlers only.
 - **The OpenAPI document (FR-26, FR-27):** the `#[utoipa::path]` annotations of the two streaming handlers and the `IntoParams` of their parameters live in the `http` module of the event-stream application crate, whose router registers them through `routes!`; the annotations of the GraphQL, liveness and documentation handlers and the merge of the three routers (REST, GraphQL, operational) live in `crates/service`.
 - `make.architecture`, `make.check_crate_isolation`, `make.unused_dependencies` and `make.validate_architecture_model` pass.
@@ -634,7 +635,13 @@ The rest stays fixed:
 - The wire blocks are compared byte for byte, and the JSON of results is compared with `serde_json`.
 - The integration and end-to-end tests run through `make.integration_tests` and `make.e2e_tests` under the serialized verify step.
 
-**NFR-15 Protected files and the local gates.** No protected file (`protected-config.toml`) changes, so this PRD has no "Protected Changes" section and needs no `approved-config-change` label. Every gate of `make ci` that runs locally passes, through the stage keys `make.ci_preflight`, `make.ci_static_analysis`, `make.ci_tests`, `make.ci_contracts`, `make.ci_mutation`, `make.ci_delivery` and `make.ci_cli`.
+**NFR-15 Protected files and the local gates.** No story edits a protected file (`protected-config.toml`). The protected changes of pull request #9 for issue #8 are exactly the three the maintainer approved under the label `approved-config-change`, each committed on its own outside the stories and recorded in `architecture.md` "Protected Changes":
+
+- the override of Spectral's `operation-success-response` for `GET /api/events/ws` in `.spectral.yaml` (`a374895`, 2026-11-17);
+- the exclusion of that operation from Schemathesis in `make/gates.mk` (`71aab46`, 2026-11-17);
+- the two `[advisories] ignore` entries RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml`, each with its reason and removal condition (`c4f83b3`, 2026-11-20, M4, NFR-21).
+
+Every gate of `make ci` that runs locally passes, through the stage keys `make.ci_preflight`, `make.ci_static_analysis`, `make.ci_tests`, `make.ci_contracts`, `make.ci_mutation`, `make.ci_delivery` and `make.ci_cli`.
 
 ### Compatibility
 
@@ -649,7 +656,8 @@ The rest stays fixed:
 **NFR-17 Existing behaviour.** Every request that does not negotiate SSE keeps its status and body (FR-5). Its headers change only by `Vary: Accept` on GET answers and by the `Allow` value of other methods. A GET whose `Accept` admits the event stream only through a wildcard now negotiates SSE (FR-2); a GET without an `Accept` field, which every existing test sends, does not. The rest is unchanged too:
 
 - the routes `/api/events/stream` and `/api/events/ws`, their answers and their frames;
-- the configuration variables, of which none is added or changed;
+- the configuration variables, of which none is added or changed, and every duration value that `docs/environment.md` and the configuration tests name, which parses to the same `Duration` with the same range and reason after humantime leaves (NFR-21);
+- the envelope's `occurredAt` rule, which accepts and refuses the same strings (NFR-21);
 - the exit statuses of `serve`.
 
 The existing tests of these behaviours pass unchanged (`features/graphql.feature`, `features/http_errors.feature`, the router tests of the JSON transport). Only the oracles named in `research.md` section 2.5 change:
@@ -657,7 +665,8 @@ The existing tests of these behaviours pass unchanged (`features/graphql.feature
 - the schema test's ban on `type Subscription`, its first-type oracle, and the full-SDL oracle `EXPECTED_SDL` / `the_sdl_is_the_documented_schema`, which becomes the SDL of FR-1;
 - the extractor oracle (NFR-13);
 - the router-test helper `has_cors_headers`, which today counts any `vary` header as a CORS header and is narrowed to an `access-control-*` header or a `vary` value `origin`, because every GET answer now carries `vary: accept`;
-- the OpenAPI oracles of `crates/service/src/openapi/tests.rs` (`documents_exactly_the_three_operations`, `leaves_the_liveness_route_and_the_docs_routes_out`, `defines_exactly_the_five_schemas`, the contract version) and the documentation comments of the event-stream router and handlers that say the streaming routes are not operations of the document, which become the oracles and texts of FR-26 and FR-27.
+- the OpenAPI oracles of `crates/service/src/openapi/tests.rs` (`documents_exactly_the_three_operations`, `leaves_the_liveness_route_and_the_docs_routes_out`, `defines_exactly_the_five_schemas`, the contract version) and the documentation comments of the event-stream router and handlers that say the streaming routes are not operations of the document, which become the oracles and texts of FR-26 and FR-27;
+- the expected value of `each_kafka_duration_accepts_its_bounds` (`crates/service/src/config/tests/kafka.rs`), which `humantime::parse_duration` computes today and a `Duration` literal per case states after story 1.4 (NFR-21).
 
 **NFR-18 Client compatibility.** The service works with these clients:
 
@@ -676,7 +685,18 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 
 ### Contract testing
 
-**NFR-20 Schemathesis tests every operation within its own bounds.** `make.schemathesis_validate` exercises every operation of FR-26 in both of its phases and ends without a timeout of its own: every event stream is read until it ends, 20 events arrive or 10 s pass, every WebSocket handshake ends with its 101 or its 4xx problem, and no request of the run waits for a broker read before its head (NFR-2). The examples of the streaming operations subscribe to `load.test`, the type the load-test publisher writes, so an example stream reaches its 20 events instead of its timeout. The load-test stack, its publisher and the protected Schemathesis flags (`make/gates.mk`) do not change.
+**NFR-20 Schemathesis tests every operation within its own bounds.** `make.schemathesis_validate` exercises every operation of FR-26 in both of its phases, except `GET /api/events/ws`, which only the approved `71aab46` excludes and which stays documented on the Swagger page, and ends without a timeout of its own: every event stream is read until it ends, 20 events arrive or 10 s pass, and no request of the run waits for a broker read before its head (NFR-2). The examples of the streaming operations subscribe to `load.test`, the type the load-test publisher writes, so an example stream reaches its 20 events instead of its timeout. The load-test stack and its publisher do not change, and the protected Schemathesis flags (`make/gates.mk`) change only by that approved exclusion.
+
+### Supply chain
+
+**NFR-21 No unmaintained crate in the production build.** The production build, the dependency graph of the workspace members without dev edges, holds no crate that a RustSec advisory marks unmaintained, and `make.check_security` (cargo deny with the protected `deny.toml`) passes. A crate that such an advisory marks and that only dev edges reach may stay as an entry of `[advisories] ignore` in `deny.toml`, with its reason and its removal condition, added only as a protected change the maintainer approved. For the two advisories of M4:
+
+- RUSTSEC-2026-0542, `humantime` 2.4.0: story 1.4 removes `humantime` from `[workspace.dependencies]` and from the manifests of `crates/service` and of the event-stream application crate. `crates/service` parses its durations with `jiff` 1.0.1 (licence `Unlicense OR MIT`, which `deny.toml` admits through `MIT`; the lock also gains `jiff-core`, `jiff-static` and `portable-atomic-util`, all admitted through `MIT`), and the envelope parser checks `occurredAt` with a rule of its own that needs no crate. `humantime` then remains only through `cucumber` 0.23.0, which only the `[dev-dependencies]` of `tests/e2e` name, so the maintainer's check `cargo tree --workspace -e no-dev -i humantime` prints nothing and the reason of the `deny.toml` entry holds. The entry is removed when cucumber drops the crate.
+- RUSTSEC-2026-0543, `chrono` 0.4.45: nothing changes. It enters only through the `test-util` feature of `aws-smithy-http-client`, which the dev-dependency `aws-smithy-mocks` of the health-check infrastructure crate enables, so the production binary never compiles it. The entry is removed with SQS.
+- Behaviour is kept. Every duration value that `docs/environment.md`, `.env`, `.env.test` and the configuration tests name parses to the same `Duration`; the six ranges and the two reasons `must be a duration from <range>` and `must be a duration such as 500ms, 2s or 1m` are unchanged; a dot fraction such as `1.5s` reads as before. The bare `0` keeps its reading, `Duration::ZERO`. The edges that move are documented nowhere and used by no file, and each is pinned by a test: units of days and longer (`1d`, `2w`, `1M`, `1y`), units out of order (`30s1m`), a repeated unit (`1h1h`), a space before or inside a number (` 2s`, `1 0s`) and a space that is not ASCII before the unit, all accepted today, are refused with those reasons; a leading `+` (`+2s`), a comma fraction (`1,5s`) and the clock form (`01:30:00`), all refused today, are read. `occurredAt` accepts and refuses exactly the strings it does today, and the existing envelope tests pass unchanged. `docs/environment.md` names the accepted duration syntax without naming a crate.
+- `make.architecture` passes with `architecture.toml` unchanged, `make.unused_dependencies` reports nothing, and `make.tests_with_coverage` and `make.mutation_tests_diff` hold the bars of NFR-10 and NFR-11 for the changed code.
+
+> Assumption: the durations are parsed with jiff's friendly format, which reads every documented and tested value to the same `Duration` and refuses negative values, and units of days and longer are refused, because no file of the repository uses them and jiff's duration parser does not read them (`research.md` sections 9.3 and 9.4). The bare `0`, which humantime reads as zero through an explicit special case and jiff refuses for want of a unit, keeps today's reading through a one-line guard in `parse_duration`, because an operator may have set `SQS_CONNECT_TIMEOUT`, `SQS_OPERATION_TIMEOUT` or `SHUTDOWN_GRACE_PERIOD` to `0` and the node would otherwise refuse to start after an upgrade. The other moved edges take jiff's answer, because they are documented nowhere and no file uses them. The envelope keeps a rule of its own because the protected `architecture.toml` lets the application layer use `humantime` but not `jiff`, and because jiff's timestamps end at `9999-12-30T22:00:00.999999999Z` and read at most nine fraction digits, so it would refuse strings that are accepted today (`research.md` section 9.5).
 
 ## Product Scope
 
@@ -688,7 +708,8 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 - `VALIDATION_FAILED` inside the stream, the one-root-field rule, and the 503 problem before the stream.
 - The keep-alive, the ends of a stream, and browser access through the existing allow-list.
 - The tests of FR-23, the GraphQL subscriber of the K6 scenario, the documentation of FR-25, ADR 0021, the architecture model and the `.templatesyncignore` entries.
-- Every route of the service in the OpenAPI document and on the Swagger page, the route-completeness tests, the regenerated OpenAPI snapshot with `API_VERSION` 2.1.0, ADR 0022, and the OpenAPI gates and Schemathesis green on every operation (FR-26 to FR-29).
+- Every route of the service in the OpenAPI document and on the Swagger page, the route-completeness tests, the regenerated OpenAPI snapshot with `API_VERSION` 2.1.0, ADR 0022, and the OpenAPI gates green on every operation and Schemathesis green on every operation but the approved exclusion of `GET /api/events/ws` (FR-26 to FR-29).
+- `humantime` out of the production build: jiff for the durations of `crates/service`, a rule without a crate for the envelope time, the documented syntax kept, and the two approved `deny.toml` entries of 2026-11-20 (NFR-21, M4).
 
 ### Out of scope
 
@@ -709,7 +730,10 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 | More than one root field per subscription, or batched requests | Refused by design (FR-14, FR-3). |
 | `Accept` in the CORS allow-list for values that are not safelisted | Not needed by the reference clients; a later issue if a client needs it. |
 | An AsyncAPI document of the WebSocket and event-stream messages | Not planned; the OpenAPI document describes the frames in its responses (FR-26). |
-| Exclusions from Schemathesis or relaxed Schemathesis checks | Not planned; a failure that cannot be fixed at its root is escalated to the maintainer (FR-29). |
+| Further exclusions from Schemathesis or relaxed Schemathesis checks | Not planned; the one exclusion, `GET /api/events/ws`, is the maintainer's approved `71aab46`, and any other failure that cannot be fixed at its root is escalated to the maintainer (FR-29). |
+| Replacing `cucumber` 0.23.0 or `aws-smithy-mocks`, the dev-only holders of `humantime` and `chrono` | Each `deny.toml` entry carries its removal condition: when cucumber drops humantime; with SQS. |
+| Removing the unused `humantime` entry of the application layer's allow-list in the protected `architecture.toml` | A later protected change; the architecture gate does not report an unused entry. |
+| Duration units of days and longer in configuration values | Not planned; no file uses them, and they are refused with the unchanged reasons (NFR-21). |
 
 ### Delivery guarantees
 

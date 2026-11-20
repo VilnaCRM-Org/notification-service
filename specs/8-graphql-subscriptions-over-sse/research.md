@@ -1,6 +1,6 @@
 # Research: GraphQL subscriptions over Server-Sent Events (issue #8)
 
-Bundle `specs/8-graphql-subscriptions-over-sse/`, issue #8 as read on 2026-11-16 and again on 2026-11-17 (the maintainer's decision of 2026-11-17 added two criteria: every route in the OpenAPI document and on the Swagger page, and the OpenAPI gates and Schemathesis green), branch `claude/vilnacrm-notification-service-br7s47`, head `c36f708`. Pull request #9 also carries the finished cleanup of issue #7 (four commits, `07c2ff7` to `c36f708`). This bundle plans only issue #8.
+Bundle `specs/8-graphql-subscriptions-over-sse/`, issue #8 as read on 2026-11-16 and again on 2026-11-17 (the maintainer's decision of 2026-11-17 added two criteria: every route in the OpenAPI document and on the Swagger page, and the OpenAPI gates and Schemathesis green), branch `claude/vilnacrm-notification-service-br7s47`, head `c36f708`. Pull request #9 also carries the finished cleanup of issue #7 (four commits, `07c2ff7` to `c36f708`). This bundle plans only issue #8. On 2026-11-20 the maintainer decided how to answer two RustSec advisories that made `make check-security` fail (M4); section 9 holds the facts, read on branch head `c4f83b3`, and the plan's answer, story 1.4.
 
 Inputs of this stage:
 
@@ -9,6 +9,7 @@ Inputs of this stage:
   - M1: subscriptions travel over Server-Sent Events, following the GraphQL over SSE protocol of the graphql-sse project and the GraphQL over HTTP specification for the request formats, with every protocol choice recorded with its reason;
   - M2: the plan is made with BMAD through the rust-backend-sdlc plugin;
   - M3: only issue #8 is planned;
+  - M4 (2026-11-20, the answer "Ignore both, replace ours"): RUSTSEC-2026-0542 (humantime) and RUSTSEC-2026-0543 (chrono) are ignored in the protected `deny.toml` by exactly the two approved entries, and one new story of this pull request replaces humantime in the two service crates (section 9);
 - the analyst's protocol research and codebase notes of 2026-11-16;
 - the repository itself, read again for this file.
 
@@ -153,7 +154,7 @@ Source key (as in the analyst's research):
 
 - **Allow-lists.** The application layer may use `async-graphql`, `axum`, `futures-util`, `serde_json`, `tokio` and the rest of its list. It may not use `tokio-stream` or `async-stream`. The composition root allows `*` [V `architecture.toml:22-52`, `:76-80`].
   - Everything this change needs is in `async-graphql` (`Subscription`, `MergedSubscription`, `Json`, `execute_stream`, extensions), `futures-util` and `tokio` [V AG `lib.rs`, `schema.rs:573-660`, `types/json.rs:79-96`].
-  - No protected file needs to change, so this bundle has no "Protected Changes" section [I].
+  - No protected file needs to change for these crates [I]. The protected changes approved after this research are listed in section 6.
 - **Template sync.** These template files would be edited and are not yet in `.templatesyncignore` [V `git log --diff-filter=A`: added by "Initial commit"]:
   - `crates/service/src/graphql/handler.rs`;
   - `crates/service/src/graphql.rs`, when a module is added.
@@ -346,17 +347,22 @@ Source key (as in the analyst's research):
 | `event-stream/application/src/http.rs`, `http/handler.rs`, `http/dto.rs` | the streaming routes registered through `routes!`, their `#[utoipa::path]` annotations and the `IntoParams` of their parameters | listed |
 | `crates/service/src/openapi.rs` (+ `openapi/tests.rs`), `http/router.rs`, `graphql/handler.rs`, `http/ping.rs`, `http/docs.rs` | the three routers merged into one document, the annotations of the GraphQL, liveness and documentation handlers, the completeness oracles | `openapi*`, `router.rs` listed; add `ping.rs`, `ping/`, `docs.rs` and `docs/` |
 | `.github/openapi-spec/spec.yaml`, `docs/adr/0022-*.md`, `features/api_docs.feature` | the regenerated document with eleven operations; the decision record; a scenario that finds every operation | listed |
+| `Cargo.toml`, `Cargo.lock`, `crates/service/Cargo.toml`, `crates/notification/event-stream/application/Cargo.toml`, `crates/service/src/config.rs` (+ `config/tests.rs`, `config/tests/kafka.rs`), `event-stream/application/src/envelope.rs` (+ `envelope/tests.rs`), `docs/environment.md` | humantime out of the production build: jiff parses the durations, the envelope checks its time without a crate (section 9, story 1.4) | listed (`Cargo.toml`, `Cargo.lock`, `crates/service/Cargo.toml`, `config.rs`, `config/`, `crates/notification/`, `docs/environment.md`) |
 
 ## 6. Protected files
 
-- No protected file changes:
+- As researched on 2026-11-16 and 2026-11-17, no protected file changes:
   - the allow-lists already cover the crates (section 2.7);
   - the CORS allow-list already covers the headers (section 2.4);
   - G20 keeps its meaning with the new first type (section 2.5);
   - the `subscriptions` load budgets are not protected (section 2.6);
   - the OpenAPI document only gains operations, Spectral's protected rules are met with a `default` problem response on every operation, and G17, G19 and G21 keep their meaning (section 2.8);
   - Schemathesis can test every operation with its protected flags unchanged (section 3.11), so no exclusion in `make/gates.mk` is planned.
-- The test oracles that change (section 2.5) are ordinary test files. The bundle has no "Protected Changes" section.
+- Amended on 2026-11-20: three protected changes proved necessary after this research. Each was approved by the maintainer under `approved-config-change`, committed outside the stories, and is recorded in `architecture.md` "Protected Changes":
+  - the override of `operation-success-response` for the WebSocket operation in `.spectral.yaml` (`a374895`, 2026-11-17);
+  - the exclusion of that operation from Schemathesis in `make/gates.mk` (`71aab46`, 2026-11-17);
+  - the two `[advisories] ignore` entries of RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml` (`c4f83b3`, 2026-11-20, section 9).
+- The test oracles that change (section 2.5) are ordinary test files.
 
 ## 7. Risks
 
@@ -378,6 +384,9 @@ Source key (as in the analyst's research):
 | `Accept: */*` from Schemathesis gets the 405 of a GET of `/api/graphql` | high, found | the GET rule of FR-2: a wildcard admits the event stream on GET; a missing `Accept` keeps the 405 |
 | The Schemathesis run grows by up to 10 s per silent streaming case | low | examples subscribe to `load.test`; the run ends by Schemathesis's own bounds (NFR-20) |
 | A route added later bypasses the document | medium | the source oracle fails on any `.route(`, `.route_service(` or `.nest_service(` call (FR-27) |
+| A duration or an `occurredAt` value accepted today is refused after humantime leaves, or the reverse (sections 9.4, 9.5) | medium | every documented and tested duration keeps its `Duration`, its range and its reason, and every moved edge is pinned by a test (units of days and longer, `1M`, a repeated unit, a sign, a comma fraction, the clock form, a space before or inside a number, the bare `0`, which keeps its reading); the envelope keeps a fixed-position rule of its own and adds a test for every edge (leap second, day 31 of a 30-day month, February 29, more than nine fraction digits) |
+| jiff 1.0.1 was published on 2026-11-18 | low | used only through `SpanParser::parse_unsigned_duration`, pinned by the duration tests; `make.check_security` checks its advisories and licence |
+| The protected `architecture.toml` lets the application layer use `humantime` and not `jiff` | found | the envelope check needs no crate (section 9.5); jiff enters only the composition root, whose layer allows every crate |
 
 ## 8. Open questions resolved
 
@@ -453,3 +462,71 @@ Source key (as in the analyst's research):
 > Assumption: no exclusion from Schemathesis is planned. A failure on a streaming operation is fixed in the document or the code; one that cannot be fixed at its root stops the story and goes to the maintainer with the exact exclusion, which the plan never makes itself.
 
 > Assumption: ADR 0022 "Every route in the OpenAPI document" records these decisions and amends ADR 0006 and ADR 0007; `API_VERSION` becomes 2.1.0.
+
+> Assumption: humantime leaves the production build in one story, 1.4, placed at the end of Epic 1 with no dependency, because the maintainer asked for one new story in this pull request (M4) and the files it edits (the workspace and crate manifests, the lock, `config.rs` and its tests, `envelope.rs` and its tests, `docs/environment.md`) belong to no other remaining story.
+
+> Assumption: `crates/service` parses its durations with `jiff::fmt::friendly::SpanParser::parse_unsigned_duration` of jiff 1.0.1, declared with `default-features = false` and the feature `std`, because jiff is the alternative the advisory recommends, its friendly format reads every documented and tested value (`500ms`, `2s`, `1m`, section 9.3) to the same `Duration`, it refuses negative values, and it needs no time-zone data. The units of days and longer, which humantime reads and jiff's duration parser refuses, are documented and used nowhere in the repository; they are refused with the unchanged reason and pinned by a test, and `docs/environment.md` names the accepted syntax. The bare `0` keeps its reading through a one-line guard, and the other moved edges of section 9.4 take jiff's answer, each pinned by a test.
+
+> Assumption: the envelope's `occurredAt` check replaces `humantime::parse_rfc3339` with a fixed-position rule of its own and uses no crate: digits and separators at their byte positions, year 1970 to 9999, month 1 to 12, the day within its month with Gregorian leap years, hour at most 23, minute at most 59, second at most 60. The protected `architecture.toml` lets the application layer use `humantime` and not `jiff`, and the maintainer approved only the `deny.toml` change. jiff would also move the rule: its timestamps end at `9999-12-30T22:00:00.999999999Z` and its parsers read at most nine fraction digits, so it would refuse `9999-12-31T23:59:59Z`, which a test accepts today, and the longer fractions that humantime accepts.
+
+> Assumption: the now unused `humantime` entry of the application layer's allow-list in `architecture.toml` stays. Removing it is a protected change that nobody approved, and the architecture gate does not report an unused entry (`xtask/src/arch/rules.rs:226`).
+
+## 9. The RustSec advisories of 2026-11-20 (added on 2026-11-20)
+
+Every fact of this section was verified on 2026-11-20 [V]: in the file and line named on branch head `c4f83b3`, in `Cargo.lock`, in the registry source of humantime 2.4.0, or in the crates.io index entries and the crate files of jiff 1.0.1 and jiff-core 1.0.1, fetched into the session scratchpad with the checksum of the index. No build or cargo command was run.
+
+### 9.1 The advisories and the decision
+
+- Two advisories published after 2026-11-17 made `make.check_security` (cargo deny, CI check "Dependency policy") fail on `main` and on this branch: RUSTSEC-2026-0542 (`humantime` 2.4.0 unmaintained, no safe upgrade) and RUSTSEC-2026-0543 (`chrono` 0.4.45 unmaintained, no safe upgrade; recommended alternatives `jiff` and `time`). Neither is a vulnerability. `deny.toml` sets `unmaintained = "all"` [V `deny.toml:14`].
+- M4, the maintainer's decision of 2026-11-20:
+  - (a) exactly two entries in `[advisories] ignore` of the protected `deny.toml`, committed by the orchestrator as `c4f83b3` "chore(#8): ignore the two unmaintained advisories in the dependency policy" [V `git show c4f83b3`]: RUSTSEC-2026-0542, "humantime is unmaintained, not vulnerable, and has no safe upgrade; it remains only through cucumber 0.23.0 (the newest release), a dev-dependency of the end-to-end tests. Remove when cucumber drops it."; RUSTSEC-2026-0543, "chrono is unmaintained, not vulnerable, and has no safe upgrade; it enters only through the test-util feature of aws-smithy-http-client, enabled by the dev-dependency aws-smithy-mocks, so the production binary never compiles it. Remove with SQS.";
+  - (b) one new story in this pull request that replaces humantime in the two service crates with jiff, keeps the documented duration syntax and the envelope time rule, and leaves humantime only as cucumber's dev dependency, so that the reason of the first entry holds.
+
+### 9.2 Where the two crates enter
+
+- `chrono` 0.4.45 has one dependent in the lock, `cbor-diag` 0.1.12, reached through `aws-smithy-protocol-test` from `aws-smithy-http-client`, whose `test-util` feature the dev-dependency `aws-smithy-mocks` of the health-check infrastructure crate enables [V `Cargo.lock`, `crates/internal/health-check/infrastructure/Cargo.toml:17-19`]. The maintainer's check `cargo tree --workspace -e no-dev -i chrono` prints nothing. The plan changes nothing for chrono.
+- `humantime` 2.4.0 has three dependents in the lock: `cucumber` 0.23.0, `event-stream-application` and `service` [V `Cargo.lock`]. `cucumber` 0.23.0 (2026-04-23) is its newest release and requires `humantime ^2.1` [V crates.io index]; only the `[dev-dependencies]` of `tests/e2e` name it [V `tests/e2e/Cargo.toml:12-15`].
+
+### 9.3 What uses humantime today
+
+- **Manifests.** `humantime = "2.4.0"` in `[workspace.dependencies]` [V `Cargo.toml:59`]; `humantime.workspace = true` in `crates/service/Cargo.toml:24` and in `crates/notification/event-stream/application/Cargo.toml:17` [V].
+- **`crates/service/src/config.rs`.**
+  - `ranged_duration` (`:725-734`) keeps a value that `humantime::parse_duration` reads and that lies in the rule's range; an unreadable value and one outside the range both get the reason `must be a duration from <range>`. Its six rules: `KAFKA_REQUEST_TIMEOUT` 1s to 30s, `KAFKA_CONNECT_TIMEOUT` 100ms to 30s, `KAFKA_FETCH_MAX_WAIT` 50ms to 5s, `KAFKA_RETRY_DELAY` 100ms to 1m, `EVENT_TAIL_STALE_AFTER` and `STREAM_KEEP_ALIVE` 1s to 5m [V `:686-721`].
+  - `duration` (`:962-967`) has no range and the reason `must be a duration such as 500ms, 2s or 1m`. Its five variables: `SQS_CONNECT_TIMEOUT`, `SQS_OPERATION_TIMEOUT`, `HEALTH_PROBE_TIMEOUT`, `HTTP_REQUEST_TIMEOUT` and `SHUTDOWN_GRACE_PERIOD` [V `:367-420`].
+- **The config tests.** `each_kafka_duration_accepts_its_bounds` computes its expected value with `humantime::parse_duration(raw)` [V `config/tests/kafka.rs:172`]. The values the tests, `.env`, `.env.test` and `docs/environment.md` name are `0s`, `49ms`, `50ms`, `99ms`, `100ms`, `300ms`, `500ms`, `999ms`, `1s`, `2s`, `3s`, `4s`, `5s`, `10s`, `15s`, `20s`, `30s`, `31s`, `61s`, `301s`, `3001ms`, `5001ms`, `1m`, `2m`, `5m` and `10m`, and the refused texts `""`, `-2s`, `fast`, `1 fortnight`, `later` and `soon` [V `config/tests.rs:92-123`, `:311-340`, `:525-557`, `config/tests/kafka.rs:154-202`, `config/tests/streams.rs:50-53`, `:108-111`, `:141-144`, `config/tests/env_file.rs:113`]. No file of the repository writes a duration with another unit [V `grep` over the compose files, `.env*`, the Makefile fragments, the workflows, the Bats tests and the features].
+- **`crates/notification/event-stream/application/src/envelope.rs`.** `is_utc_time` (`:190-207`) strips a final `Z` or `+00:00`, requires the bytes after byte 19 of the rest to be nothing or a dot followed by one or more ASCII digits, then requires `humantime::parse_rfc3339(text).is_ok()` [V]. Its tests refuse 19 strings and accept 5 [V `envelope/tests.rs:243-281`].
+- **Documentation.** `docs/environment.md:9` reads "Durations use the `humantime` syntax (`500ms`, `2s`, `1m`)." [V]. No other document, help text or source names humantime, apart from `architecture.toml:33` and `deny.toml` [V `grep`].
+
+### 9.4 jiff 1.0.1
+
+- **Release and licence.** The newest release is 1.0.1, published on 2026-11-18 (1.0.0 on 2026-11-15; 0.2.46 the last of 0.2), with `rust-version` 1.85, edition 2024 and the licence `Unlicense OR MIT` [V index, `Cargo.toml`]. `deny.toml` allows `MIT`, so cargo deny accepts it [V `deny.toml:21-32`]. Its one dependency that is neither optional nor tied to another platform is `jiff-core` 1.0.1 (renamed `jcore`), licence `Unlicense OR MIT`, whose own dependencies are all optional [V]. With `default-features = false` and the feature `std`, no time-zone database is compiled [V `[features]`].
+- **What the lock gains.** `Cargo.lock` does not depend on the platform: it records every non-optional dependency of every target. jiff 1.0.1 has two such dependencies behind `cfg` [V `Cargo.toml`]: `jiff-static = "=1.0.1"` under `[target."cfg(any())".dependencies]` (never compiled), and `portable-atomic ^1.10.0` with `portable-atomic-util ^0.2.4` under `cfg(not(target_has_atomic = "ptr"))` (not compiled on x86_64 or aarch64). jiff-static 1.0.1 (`Unlicense OR MIT`) needs `jiff-core ^1.0.1`, `proc-macro2 ^1.0.93`, `quote ^1.0.38` and `syn ^3.0.3`; portable-atomic-util 0.2.8, the newest 0.2 release (`Apache-2.0 OR MIT`), needs `portable-atomic ^1.5.1` [V index, crates.io API]. The lock already holds `portable-atomic` 1.15.0, `proc-macro2` 1.0.107, `quote` 1.0.47 and `syn` 3.0.10, and no `jiff`, `jiff-static` or `portable-atomic-util` [V `Cargo.lock`]. The refreshed lock therefore gains exactly `jiff` 1.0.1, `jiff-core` 1.0.1, `jiff-static` 1.0.1 and `portable-atomic-util` 0.2.8 and raises no locked version; `deny.toml` allows `MIT` and `Apache-2.0` [V `deny.toml:21-32`].
+- **The duration parser.** `jiff::fmt::friendly::SpanParser::new()` is a `const fn`, and `parse_unsigned_duration(input) -> Result<core::time::Duration, Error>` reads the friendly format [V `src/fmt/friendly/parser.rs:110`, `:289-307`]:
+  - one or more numbers, each followed by a unit, from the largest unit to the smallest (`OutOfOrderUnits`), with optional spaces and commas, an optional decimal fraction and an optional sign;
+  - a negative value fails, and so does any unit of days or longer (`NotAllowedCalendarUnit`) [V `src/fmt/util.rs:499-530`, `:1029`].
+- **The units.** The labels are lower case and matched exactly: `h`, `hr`, `hrs`, `hour`, `hours`; `m`, `min`, `mins`, `minute`, `minutes`; `s`, `sec`, `secs`, `second`, `seconds`; `ms`, `msec`, `msecs`, `milli`, `millis`, `millisecond`, `milliseconds`; `us`, `µs`, `usec`, `usecs`, `µsec`, `µsecs`, `micro`, `micros`, `microsecond`, `microseconds`; `ns`, `nsec`, `nsecs`, `nano`, `nanos`, `nanosecond`, `nanoseconds`; and the calendar units `d`, `w`, `mo`, `y` with their long forms [V `src/fmt/friendly/parser_label.rs`]. `1m` is one minute, and `1M` is no unit.
+- **Against humantime 2.4.0.** humantime's units below a day are all labels of jiff [V humantime `src/duration.rs:323-332`]. Every value of section 9.3 therefore reads to the same `Duration`, and every refused text stays refused [I from the two grammars]. Values that move:
+  - accepted today and refused after the change: the units `d`, `day`, `days`, `w`, `wk`, `wks`, `week`, `weeks`, `M`, `month`, `months`, `y`, `yr`, `yrs`, `year`, `years`; units out of order (`30s1m`); a unit written twice (`1h1h`, 2 h today); a bare `0` (zero today through an explicit special case, `humantime-2.4.0/src/duration.rs:364-367`; jiff's `parse_unit_designator` returns `ExpectedUnitSuffix`); a leading space (` 2s`; humantime's `parse_first_char` skips Unicode spaces, jiff's `parse` reads a number first); a space inside a number (`1 0s`, 10 s today; humantime's digit loop skips spaces, `:132`); a space that is not ASCII between number and unit (`1\u{a0}s`; jiff's `is_whitespace` takes ASCII only, `src/fmt/friendly/parser.rs:640-642`);
+  - refused today and accepted after the change: a comma fraction (`1,5s`, 1.5 s), a leading `+` (`+2s`, 2 s), and the clock form `H:MM:SS` (`01:30:00`, 5 400 s, `parse_hms_maybe`);
+  - not moved: a dot fraction (`1.5s` is 1.5 s for both; humantime's `'.'` branch reads it, `:136-139`), spaces between a number and its unit and between units (`1 m`, `1m 30s`), and a negative value (refused by both).
+- **The plan's answer to the moved edges.** The bare `0` keeps its reading through a one-line guard in `parse_duration`, because an unranged variable set to `0` would otherwise stop a node at startup after an upgrade; every other moved edge takes jiff's answer, because no file of the repository writes one (section 9.3). Each is pinned by a test of story 1.4.
+- **Timestamps.** `jiff::Timestamp::MAX` is `9999-12-30T22:00:00.999999999Z` [V `src/timestamp.rs:350`, `:1404`]; the parsers read at most nine fraction digits [V `src/fmt/util.rs:776`]; a leap second is clamped [V `src/fmt/temporal/parser.rs:822`].
+
+### 9.5 What humantime's RFC 3339 check accepts
+
+- `parse_rfc3339` requires at least 20 bytes, `T` at byte 10 and a final `Z` or `+00:00`, then runs `parse_rfc3339_weak` [V `humantime-2.4.0/src/date.rs:84-93`], which requires [V `:108-197`, `:22-26`]:
+  - `-` at bytes 4 and 7, `:` at bytes 13 and 16, and two ASCII digits for each of year (four), month, day, hour, minute and second;
+  - year at least 1970, hour at most 23, minute at most 59, second at most 60, a 60 read as 59 at any time of day;
+  - month 1 to 12, and day 1 to the length of the month, February having 29 days in a Gregorian leap year (divisible by 4 and not by 100, or by 400);
+  - any number of fraction digits, the tenth and later read as 0;
+  - at most the last second of 9999 on 64-bit targets.
+- With the checks `is_utc_time` makes first, the accepted strings are exactly: the 19-byte body `YYYY-MM-DDTHH:MM:SS` under those field rules, then nothing or a dot and one or more digits, then `Z` or `+00:00` [I].
+- Edges that no test pins today [I from the code]: a leap second is accepted (`2026-11-14T10:00:60Z`, `9999-12-31T23:59:60Z`); second 61 and minute 60 are refused; day 31 of a 30-day month, February 29 of 2026 and of 2100, month 00 and day 00 are refused; February 29 of 2024 and of 2000 is accepted; a fraction of more than nine digits is accepted; a non-digit or a sign inside a field is refused.
+
+### 9.6 Gates, allow-lists and template sync
+
+- `[bans.workspace-dependencies]` sets `unused = "deny"`, so humantime must leave `[workspace.dependencies]` once no member uses it; cucumber keeps its own requirement [V `deny.toml:50-54`].
+- The application layer's `external` names `humantime` and not `jiff` [V `architecture.toml:28-42`], and `architecture.toml` is protected [V `protected-config.toml`]. The composition root allows every crate [V `architecture.toml:76-80`]. An unused entry is not reported [V `xtask/src/arch/rules.rs:226`].
+- Every make target that compiles runs cargo with `--locked` [V `make/gates.mk:3-23`], and `make update` would raise other crates within their requirements [V `Makefile:184-185`]. No make target refreshes the lock for a manifest change alone, and nobody can write four checksummed `[[package]]` entries by hand. The rust-implementer agent may run `cargo tree -i <crate>` for dependency questions [V the plugin's `agents/rust-implementer.md:190`]; without `--locked` it resolves the changed manifests and writes only the minimal lock change, keeping every version already locked. Story 1.4 therefore runs `cargo tree -i jiff` once, right after its manifest edits and as its first step, then the maintainer's check `cargo tree --workspace -e no-dev -i humantime`; `## Constraints` of `architecture.md` names this one exception to its make-only rule.
+- `make.check_security` runs `cargo deny --locked check` [V `make/gates.mk:11`, `Makefile:388-389`].
+- Every file that story 1.4 edits is already listed in `.templatesyncignore` (`Cargo.toml`, `Cargo.lock`, `crates/service/Cargo.toml`, `crates/service/src/config.rs`, `crates/service/src/config/`, `crates/notification/`, `docs/environment.md`) [V].
