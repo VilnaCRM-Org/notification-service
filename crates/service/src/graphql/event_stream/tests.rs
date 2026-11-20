@@ -25,7 +25,7 @@ use test_support::log::{LogLine, LogRecorder};
 use test_support::static_topic::StaticTopic;
 use test_support::topic::ScriptedTopicReplay;
 use tokio::sync::watch;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout};
 use tracing::Level;
 
 use super::{COMPLETE, KEEP_ALIVE, next_block, respond};
@@ -36,6 +36,16 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// The hub position and the window floor of a started node.
 const POSITION: u64 = 1_000;
+
+/// The keep-alive interval (`STREAM_KEEP_ALIVE`) of a node, longer than [`WAIT`], so a test that
+/// waits for nothing sees no comment.
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The keep-alive interval of the nodes whose comments a test counts, shorter than [`WAIT`].
+const INTERVAL: Duration = Duration::from_secs(2);
+
+/// Half of [`INTERVAL`]: when a test delivers a result between two comments.
+const HALF_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The replay bounds of the node: a cap no test reaches, one permit.
 const REPLAY: ReplaySettings = ReplaySettings {
@@ -66,6 +76,21 @@ impl Node {
     /// A node whose hub takes `max_subscribers` and whose replays read `replay`; `started` gives
     /// the hub its position [`POSITION`].
     fn new(started: bool, max_subscribers: usize, replay: Arc<dyn TopicReplay>) -> Self {
+        Self::build(started, max_subscribers, replay, KEEP_ALIVE_INTERVAL)
+    }
+
+    /// A started node with room for four subscribers, whose replays read `replay` and whose
+    /// streams write a comment after every `keep_alive` without a block.
+    fn with_keep_alive(keep_alive: Duration, replay: Arc<dyn TopicReplay>) -> Self {
+        Self::build(true, 4, replay, keep_alive)
+    }
+
+    fn build(
+        started: bool,
+        max_subscribers: usize,
+        replay: Arc<dyn TopicReplay>,
+        keep_alive: Duration,
+    ) -> Self {
         let hub = Hub::new(HubSettings {
             max_subscribers,
             buffer: 8,
@@ -97,9 +122,7 @@ impl Node {
                 Arc::<Hub>::clone(&hub),
             )),
             hub,
-            settings: StreamSettings {
-                keep_alive: Duration::from_secs(15),
-            },
+            settings: StreamSettings { keep_alive },
         };
         Self {
             schema: builder().data(state.clone()).finish(),
@@ -432,6 +455,120 @@ async fn the_header_cursor_reaches_the_subscription_and_wins_over_the_argument()
     assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
     assert_eq!(chunk(&mut body).await, Some(event_block(1_003)));
     assert!(quiet(&mut body).await);
+}
+
+// ---- the keep-alive timer (FR-17, NFR-2) ----
+
+/// Reads `count` chunks of `body`: each must be the comment, written `INTERVAL` after the one
+/// before, the first `first` after `since`.
+async fn assert_comments(body: &mut Body, since: Instant, first: Duration, count: u32) {
+    for n in 0..count {
+        assert_eq!(chunk(body).await.as_deref(), Some(":\n\n"), "comment {n}");
+        assert_eq!(
+            since.elapsed(),
+            first.saturating_add(INTERVAL.saturating_mul(n)),
+            "comment {n}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_open_subscription_writes_the_comment_at_once_then_after_every_interval() {
+    let node = Node::with_keep_alive(INTERVAL, Arc::new(StaticTopic::empty()));
+
+    let response = node.answer(EVENTS).await;
+    let head = Instant::now();
+
+    assert_event_stream_head(&response);
+    let mut body = response.into_body();
+    assert_comments(&mut body, head, Duration::ZERO, 5).await;
+    assert_eq!(node.subscribers(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_interval_is_the_keep_alive_of_the_stream_state_in_the_schema_data() {
+    let interval = Duration::from_millis(1_500);
+    let node = Node::with_keep_alive(interval, Arc::new(StaticTopic::empty()));
+    let mut body = node.answer(EVENTS).await.into_body();
+    let head = Instant::now();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    assert_eq!(head.elapsed(), interval);
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    assert_eq!(head.elapsed(), Duration::from_millis(3_000));
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_result_restarts_the_interval_and_no_comment_carries_an_id_line() {
+    let node = Node::with_keep_alive(INTERVAL, Arc::new(StaticTopic::empty()));
+    let mut body = node.answer(EVENTS).await.into_body();
+    let head = Instant::now();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    tokio::time::sleep(HALF_INTERVAL).await;
+
+    node.pass(1_001, "a");
+
+    assert_eq!(chunk(&mut body).await, Some(event_block(1_001)));
+    assert_eq!(head.elapsed(), HALF_INTERVAL);
+    assert_comments(&mut body, head, Duration::from_secs(3), 2).await;
+    node.pass(1_002, "a");
+    node.pass(1_003, "a");
+    let delivered = Instant::now();
+    assert_eq!(chunk(&mut body).await, Some(event_block(1_002)));
+    assert_eq!(chunk(&mut body).await, Some(event_block(1_003)));
+    assert_eq!(delivered.elapsed(), Duration::ZERO);
+    assert_comments(&mut body, delivered, INTERVAL, 2).await;
+    assert_eq!(node.subscribers(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_comment_written_by_the_timer_also_restarts_the_interval() {
+    let node = Node::with_keep_alive(INTERVAL, Arc::new(StaticTopic::empty()));
+    let mut body = node.answer(EVENTS).await.into_body();
+    let head = Instant::now();
+    assert_comments(&mut body, head, Duration::ZERO, 2).await;
+    tokio::time::sleep(HALF_INTERVAL).await;
+
+    node.pass(1_001, "a");
+
+    assert_eq!(chunk(&mut body).await, Some(event_block(1_001)));
+    assert_eq!(head.elapsed(), Duration::from_secs(3));
+    assert_comments(&mut body, head, Duration::from_secs(5), 1).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cursor_below_the_window_gets_a_comment_after_every_interval_while_the_replay_waits() {
+    let replay = ScriptedTopicReplay::new();
+    let node = Node::with_keep_alive(INTERVAL, Arc::new(replay.clone()));
+
+    let response = node
+        .answer(r#"subscription { events(types: ["a"], lastEventId: "10") { id } }"#)
+        .await;
+    let head = Instant::now();
+
+    assert_event_stream_head(&response);
+    assert_eq!(replay.calls(), Vec::<Cursor>::new());
+    let mut body = response.into_body();
+    assert_comments(&mut body, head, Duration::ZERO, 4).await;
+    assert_eq!(replay.calls(), vec![Cursor::new(10)]);
+    assert_eq!(node.subscribers(), 1);
+}
+
+#[rstest]
+#[case::a_query("{ eventTypes { name } }")]
+#[case::a_document_error("{ unknownField }")]
+#[case::an_invalid_argument(r#"subscription { events(types: ["A"]) { id } }"#)]
+#[tokio::test(start_paused = true)]
+async fn a_single_result_needs_no_timer_and_its_body_ends_at_once(#[case] document: &str) {
+    let node = Node::with_keep_alive(INTERVAL, Arc::new(StaticTopic::empty()));
+    let asked = Instant::now();
+
+    let written = chunks(node.answer(document).await).await;
+
+    assert_eq!(asked.elapsed(), Duration::ZERO);
+    single_result(&written);
+    assert_eq!(node.subscribers(), 0);
 }
 
 // ---- single results (FR-9 (b), FR-13, FR-15, FR-20) ----
@@ -796,4 +933,46 @@ async fn no_entry_is_logged_for_a_query_an_error_an_invalid_argument_or_a_whole_
 
     assert_eq!(recorder.lines(), Vec::<LogLine>::new());
     assert_eq!(node.subscribers(), 0);
+}
+
+// ---- the wiring (FR-17) ----
+
+/// The one entry is the wiring fault of the transport. It also shows that no resolver ran: run
+/// without the state, `eventTypes` would log `MissingState`, and run without the link that
+/// `respond` adds after the check, `events` would log `MissingLink`, each a second entry.
+#[rstest]
+#[case::a_subscription(EVENTS)]
+#[case::a_query("{ eventTypes { name } }")]
+#[case::a_document_error("{ unknownField }")]
+#[tokio::test]
+async fn a_schema_without_the_stream_state_is_the_500_problem_logged_once_before_anything_runs(
+    #[case] document: &str,
+) {
+    let schema = builder().finish();
+    let (recorder, guard) = LogRecorder::install();
+
+    let response = timeout(WAIT, respond(&schema, Request::new(document), None))
+        .await
+        .expect("respond answers in time");
+    drop(guard);
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap(),
+        json!({"type": "about:blank", "title": "Internal Server Error", "status": 500})
+    );
+    assert_eq!(
+        recorder.lines(),
+        vec![LogLine {
+            level: Level::ERROR,
+            target: "shared_application::http::problem".to_owned(),
+            message: "request failed".to_owned(),
+            fields: vec![(
+                "error".to_owned(),
+                "the GraphQL schema has no EventStreamState data for the event stream".to_owned()
+            )],
+        }]
+    );
 }

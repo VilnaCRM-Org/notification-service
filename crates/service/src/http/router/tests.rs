@@ -12,7 +12,7 @@ use test_support::static_topic::StaticTopic;
 use tokio::sync::watch;
 
 use crate::background::Running;
-use crate::bootstrap::tests::wiring::{adapters_on, paced_on};
+use crate::bootstrap::tests::wiring::{adapters_on, paced_on, record};
 use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
@@ -922,6 +922,13 @@ const LIMIT: Duration = Duration::from_secs(10);
 /// the fetch wait of `config`, with its background work running, once its status route reports
 /// `ready` (bounded by [`LIMIT`]; the polls are spaced by a timer, so paused time advances).
 async fn started(config: &Config) -> (Router, Running) {
+    let (app, running, _topic) = started_on_topic(config).await;
+    (app, running)
+}
+
+/// [`started`], also returning the static topic the application reads, so a test can append a
+/// record while it serves.
+async fn started_on_topic(config: &Config) -> (Router, Running, StaticTopic) {
     let topic = StaticTopic::empty();
     let (adapters, _fetches) = paced_on(&topic, config.kafka.fetch_wait);
     let application = application(adapters, config).unwrap();
@@ -938,7 +945,7 @@ async fn started(config: &Config) -> (Router, Running) {
     })
     .await
     .expect("the node becomes ready");
-    (app, running)
+    (app, running, topic)
 }
 
 /// The status and the headers of the answer to `request`, whose body is dropped unread: the body
@@ -1448,4 +1455,65 @@ async fn a_query_over_sse_within_the_budget_of_the_assembled_router_is_answered(
         ":\n\nevent: next\ndata: {\"data\":{\"eventStreamStatus\":{\"subscribers\":0}}}\n\nevent: complete\ndata:\n\n"
     );
     assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "sse query");
+}
+
+/// The next chunk of the event-stream `body`, within [`LIMIT`].
+async fn next_chunk(body: &mut Body) -> String {
+    let frame = tokio::time::timeout(LIMIT, body.frame())
+        .await
+        .expect("the body writes in time")
+        .expect("the body goes on")
+        .unwrap();
+    String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_graphql_subscription_outlives_the_request_budget() {
+    let keep_alive = Duration::from_secs(2);
+    let mut config = config("test");
+    config.request_timeout = Duration::from_secs(1);
+    config.streams.keep_alive = keep_alive;
+    let (app, running, topic) = started_on_topic(&config).await;
+    let subscribe = Request::post(GRAPHQL_PATH)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::from(
+            r#"{"query":"subscription { events(types: [\"user.created\"]) { id type } }"}"#,
+        ))
+        .unwrap();
+
+    let response = tokio::time::timeout(LIMIT, app.clone().oneshot(subscribe))
+        .await
+        .expect("the head is written in time")
+        .unwrap();
+    let head = tokio::time::Instant::now();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_TYPE],
+        "text/event-stream"
+    );
+    let mut body = response.into_body();
+    for n in 0..4_u32 {
+        assert_eq!(next_chunk(&mut body).await, ":\n\n", "comment {n}");
+        assert_eq!(head.elapsed(), keep_alive.saturating_mul(n), "comment {n}");
+    }
+    let id = topic.append(Some(record(1, "user.created", 0))).sequence();
+    assert_eq!(
+        next_chunk(&mut body).await,
+        format!(
+            "event: next\nid: {id}\ndata: {{\"data\":{{\"events\":{{\"id\":\"{id}\",\"type\":\"user.created\"}}}}}}\n\n"
+        )
+    );
+    let delivered = tokio::time::Instant::now();
+    assert!(delivered.duration_since(head) >= keep_alive.saturating_mul(3));
+    assert_eq!(next_chunk(&mut body).await, ":\n\n");
+    assert_eq!(delivered.elapsed(), keep_alive);
+    let status = send_to(&app, request(Method::GET, "/api/events/status", None)).await;
+    let status: Value = serde_json::from_str(&status.body).unwrap();
+    assert_eq!(status["subscribers"], 1);
+    drop(body);
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
 }
