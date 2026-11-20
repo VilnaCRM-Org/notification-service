@@ -10,7 +10,7 @@ How the check was done:
 
 No build, test or cargo command was run.
 
-State of the branch: stories 1.1 to 1.3, 2.1 to 2.4 and 4.4 are implemented and committed; 1.4, 2.5 to 2.7, 3.1, 3.2, 4.1 to 4.3, 4.5 and 5.1 are still to do. The maintainer approved three protected changes, committed outside the stories: `a374895` (`.spectral.yaml`), `71aab46` (`make/gates.mk`) and `c4f83b3` (`deny.toml`).
+State of the branch: stories 1.1 to 1.3, 2.1 to 2.4 and 4.4 are implemented and committed; 1.4, 2.5 to 2.7, 3.1, 3.2, 4.1 to 4.3, 4.5 and 5.1 are still to do. The maintainer approved four protected changes, committed outside the stories: `a374895` (`.spectral.yaml`), `71aab46` (`make/gates.mk`), `c4f83b3` (`deny.toml`) and `49641e7` (`tests/CLI/bats/make_quality_gates.bats`, test G8 plants `jiff` in place of `humantime`), the last approved on 2026-11-20 after this check and recorded in the artifacts the same day.
 
 ## 1. Issue criteria and decisions to requirements
 
@@ -68,11 +68,11 @@ Result: pass. The story-1 rule adds nothing: both touched crates are live member
 
 - `prd.md` has `## Executive Summary`, `## Functional Requirements`, `## Non-Functional Requirements` and `## Product Scope`, in this order.
 - `architecture.md` has `## Tech Stack`: the Rust toolchain 1.99.1 (edition 2024) and the crates the change uses, with `jiff` 1.0.1 (`default-features = false`, feature `std`) in place of `humantime` 2.4.0, and no other stack.
-- `## Constraints` is 4 307 bytes from its heading to the next level-2 heading, under the 4 500 limit, with no fenced block and no inner level-2 heading:
+- `## Constraints` is 4 357 bytes from its heading to the next level-2 heading, under the 4 500 limit, with no fenced block and no inner level-2 heading:
   - part (a) comes first: `(#8)` and the `story N.M` subject form, the checked-out branch, never `main`, never pushed by Ralph, hooks never bypassed;
   - part (b) comes second: the independence rule, the `rust-implementer` rule with its sequential fallback, and the ten `make.*` keys with their targets (`make.setup_test_db` and `make.sqlx_prepare` read `not available: capability absent`);
-  - the trailing lines carry the placement, the protected line with the three approved commits, the advisories line (NFR-21), and the tools line, whose one exception is story 1.4's lock refresh `cargo tree -i jiff` (finding R1).
-- `architecture.md` "Protected Changes" lists the three approved changes with their exact change, commit, approval date and reason: `.spectral.yaml` `a374895`, `make/gates.mk` `71aab46` and `deny.toml` `c4f83b3`. `prd.md` NFR-15, `research.md` section 6, the brief's approvals, the protected-changes paragraph of `epics.md` and story 5.1 name the same three.
+  - the trailing lines carry the placement, the protected line with the four approved commits, the advisories line (NFR-21), and the tools line, whose one exception is story 1.4's lock refresh `cargo tree -i jiff` (finding R1).
+- `architecture.md` "Protected Changes" lists the four approved changes with their exact change, commit, approval date and reason: `.spectral.yaml` `a374895`, `make/gates.mk` `71aab46`, `deny.toml` `c4f83b3` and `tests/CLI/bats/make_quality_gates.bats` `49641e7`. `prd.md` NFR-15, `research.md` section 6, the brief's approvals, the protected-changes paragraph of `epics.md`, the first line of story 1.4 and story 5.1 name the same four.
 - No story edits a protected file. Story 1.4 changes `[workspace.dependencies]`, which is not a protected path. It keeps `architecture.toml` unchanged: `jiff` enters only `crates/service`, whose layer allows every crate, and the envelope rule needs no crate.
 
 Result: pass.

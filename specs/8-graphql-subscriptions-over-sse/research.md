@@ -358,10 +358,11 @@ Source key (as in the analyst's research):
   - the `subscriptions` load budgets are not protected (section 2.6);
   - the OpenAPI document only gains operations, Spectral's protected rules are met with a `default` problem response on every operation, and G17, G19 and G21 keep their meaning (section 2.8);
   - Schemathesis can test every operation with its protected flags unchanged (section 3.11), so no exclusion in `make/gates.mk` is planned.
-- Amended on 2026-11-20: three protected changes proved necessary after this research. Each was approved by the maintainer under `approved-config-change`, committed outside the stories, and is recorded in `architecture.md` "Protected Changes":
+- Amended on 2026-11-20: four protected changes proved necessary after this research. Each was approved by the maintainer under `approved-config-change`, committed outside the stories, and is recorded in `architecture.md` "Protected Changes":
   - the override of `operation-success-response` for the WebSocket operation in `.spectral.yaml` (`a374895`, 2026-11-17);
   - the exclusion of that operation from Schemathesis in `make/gates.mk` (`71aab46`, 2026-11-17);
-  - the two `[advisories] ignore` entries of RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml` (`c4f83b3`, 2026-11-20, section 9).
+  - the two `[advisories] ignore` entries of RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml` (`c4f83b3`, 2026-11-20, section 9);
+  - the plant of `jiff` in place of `humantime` in test G8 of `tests/CLI/bats/make_quality_gates.bats`: once story 1.4 removes `humantime` from `[workspace.dependencies]`, the old plant makes `cargo update --workspace --offline` fail, and `humantime` cannot stay there because `deny.toml` denies an unused workspace dependency (`49641e7`, 2026-11-20, section 9) [V `git show 49641e7`].
 - The test oracles that change (section 2.5) are ordinary test files.
 
 ## 7. Risks

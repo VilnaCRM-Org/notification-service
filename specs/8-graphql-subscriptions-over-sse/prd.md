@@ -35,7 +35,7 @@ How it works:
 - The transport is chosen by the `Accept` header on the existing path. A request that does not ask for an event stream keeps today's JSON answer.
 - An invalid operation is answered inside an accepted event stream, with `VALIDATION_FAILED` or the GraphQL document errors, then `complete`, as the protocol requires. A node that cannot take the subscription answers the 503 problem of the REST streaming routes before any stream, and graphql-sse clients retry it.
 - Every route the service serves becomes an operation of the OpenAPI document and of the Swagger page at `/api/docs`, fully documented: the two streaming routes, both forms of the GraphQL endpoint, the liveness probe and the documentation routes join the three REST operations, and a test fails when a route is served without an entry (FR-26 to FR-29, maintainer decision of 2026-11-17).
-- The change adds no configuration variable, no bounded context and no state shared between requests. Its one dependency change replaces `humantime` with `jiff` in `crates/service` and drops it from the event-stream application crate (NFR-21, M4). Its protected changes are the three the maintainer approved, committed outside the stories (NFR-15).
+- The change adds no configuration variable, no bounded context and no state shared between requests. Its one dependency change replaces `humantime` with `jiff` in `crates/service` and drops it from the event-stream application crate (NFR-21, M4). Its protected changes are the four the maintainer approved, committed outside the stories (NFR-15).
 
 ### Protocol choices
 
@@ -635,11 +635,12 @@ The rest stays fixed:
 - The wire blocks are compared byte for byte, and the JSON of results is compared with `serde_json`.
 - The integration and end-to-end tests run through `make.integration_tests` and `make.e2e_tests` under the serialized verify step.
 
-**NFR-15 Protected files and the local gates.** No story edits a protected file (`protected-config.toml`). The protected changes of pull request #9 for issue #8 are exactly the three the maintainer approved under the label `approved-config-change`, each committed on its own outside the stories and recorded in `architecture.md` "Protected Changes":
+**NFR-15 Protected files and the local gates.** No story edits a protected file (`protected-config.toml`). The protected changes of pull request #9 for issue #8 are exactly the four the maintainer approved under the label `approved-config-change`, each committed on its own outside the stories and recorded in `architecture.md` "Protected Changes":
 
 - the override of Spectral's `operation-success-response` for `GET /api/events/ws` in `.spectral.yaml` (`a374895`, 2026-11-17);
 - the exclusion of that operation from Schemathesis in `make/gates.mk` (`71aab46`, 2026-11-17);
-- the two `[advisories] ignore` entries RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml`, each with its reason and removal condition (`c4f83b3`, 2026-11-20, M4, NFR-21).
+- the two `[advisories] ignore` entries RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml`, each with its reason and removal condition (`c4f83b3`, 2026-11-20, M4, NFR-21);
+- the plant of `jiff` in place of `humantime` in test G8 of `tests/CLI/bats/make_quality_gates.bats`, which removing `humantime` from `[workspace.dependencies]` needed (`49641e7`, 2026-11-20, NFR-21).
 
 Every gate of `make ci` that runs locally passes, through the stage keys `make.ci_preflight`, `make.ci_static_analysis`, `make.ci_tests`, `make.ci_contracts`, `make.ci_mutation`, `make.ci_delivery` and `make.ci_cli`.
 
@@ -709,7 +710,7 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 - The keep-alive, the ends of a stream, and browser access through the existing allow-list.
 - The tests of FR-23, the GraphQL subscriber of the K6 scenario, the documentation of FR-25, ADR 0021, the architecture model and the `.templatesyncignore` entries.
 - Every route of the service in the OpenAPI document and on the Swagger page, the route-completeness tests, the regenerated OpenAPI snapshot with `API_VERSION` 2.1.0, ADR 0022, and the OpenAPI gates green on every operation and Schemathesis green on every operation but the approved exclusion of `GET /api/events/ws` (FR-26 to FR-29).
-- `humantime` out of the production build: jiff for the durations of `crates/service`, a rule without a crate for the envelope time, the documented syntax kept, and the two approved `deny.toml` entries of 2026-11-20 (NFR-21, M4).
+- `humantime` out of the production build: jiff for the durations of `crates/service`, a rule without a crate for the envelope time, the documented syntax kept, the two approved `deny.toml` entries of 2026-11-20 and the approved plant of `jiff` in the Bats test G8 (NFR-21, M4).
 
 ### Out of scope
 
