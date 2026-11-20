@@ -16,6 +16,7 @@ use crate::bootstrap::tests::wiring::{adapters_on, paced_on, record};
 use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
+use crate::graphql::QueryStringLimit;
 use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
 use crate::graphql::schema::builder;
 use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
@@ -413,7 +414,11 @@ const ALLOWED_EXTRACTORS: [&str; 5] = [
 /// The handlers that may also take the `HeaderMap`, which is infallible: the `GraphQL` handlers
 /// that can answer an event stream read `Accept` and `Last-Event-ID` (the recorded streaming
 /// exception, NFR-13).
-const HEADER_MAP_HANDLERS: [&str; 1] = ["execute"];
+const HEADER_MAP_HANDLERS: [&str; 3] = ["execute", "subscribe", "subscribe_or_explore"];
+
+/// The handlers that may also take the `RawQuery`, which is infallible: the two GET handlers of the
+/// `GraphQL` path bound the query string as received and read it strictly (FR-4, NFR-13).
+const RAW_QUERY_HANDLERS: [&str; 2] = ["subscribe", "subscribe_or_explore"];
 
 /// Whether the handler `handler` may take a parameter of type `kind`.
 fn is_allowed(handler: &str, kind: &str) -> bool {
@@ -421,6 +426,7 @@ fn is_allowed(handler: &str, kind: &str) -> bool {
         .iter()
         .any(|allowed| kind.starts_with(allowed))
         || (kind == "HeaderMap" && HEADER_MAP_HANDLERS.contains(&handler))
+        || (kind == "RawQuery" && RAW_QUERY_HANDLERS.contains(&handler))
 }
 
 /// The handler sources of the crate: every file under `src/http` and `src/graphql` with a
@@ -517,6 +523,14 @@ fn handlers_use_only_the_problem_aware_extractors() {
     assert!(HANDLER_SOURCES[2].1.contains(
         "pub async fn execute(\n    State(schema): State<ApiSchema>,\n    headers: HeaderMap,\n"
     ));
+    for handler in RAW_QUERY_HANDLERS {
+        assert!(
+            HANDLER_SOURCES[2].1.contains(&format!(
+                "pub async fn {handler}(\n    State(schema): State<ApiSchema>,\n    headers: HeaderMap,\n    RawQuery(query): RawQuery,\n) -> Response {{"
+            )),
+            "{handler}"
+        );
+    }
     let mut expected: Vec<String> = HANDLER_SOURCES
         .iter()
         .map(|(file, _)| (*file).to_owned())
@@ -542,19 +556,56 @@ fn handlers_use_only_the_problem_aware_extractors() {
 #[case::raw_json_of_execute(
     "pub async fn execute(headers: HeaderMap, Json(b): Json<Value>) -> Response {}"
 )]
+#[case::raw_query_of_execute(
+    "pub async fn execute(headers: HeaderMap, RawQuery(q): RawQuery) -> Response {}"
+)]
+#[case::raw_query_of_the_explorer("pub async fn explorer(RawQuery(q): RawQuery) -> Response {}")]
+#[case::raw_query_of_another_handler("pub async fn h(RawQuery(q): RawQuery) -> Response {}")]
+#[case::query_of_subscribe(
+    "pub async fn subscribe(headers: HeaderMap, Query(q): Query<Params>) -> Response {}"
+)]
+#[case::query_of_subscribe_or_explore(
+    "pub async fn subscribe_or_explore(RawQuery(r): RawQuery, Query(q): Query<Params>) -> Response {}"
+)]
+#[case::a_type_that_starts_like_the_raw_query(
+    "pub async fn subscribe(RawQuery(q): RawQueryLike) -> Response {}"
+)]
 fn the_extractor_check_reports_a_planted_violation(#[case] source: &str) {
     assert_eq!(disallowed_parameters(source).len(), 1, "{source}");
 }
 
 #[test]
-fn the_extractor_check_accepts_the_header_map_of_execute_only() {
+fn the_extractor_check_accepts_the_header_map_of_the_three_streaming_handlers_only() {
     let source = "pub async fn execute(State(schema): State<ApiSchema>, headers: HeaderMap, \
         ApiJson(body): ApiJson<Map<String, Value>>) -> Result<Response, Problem> {}";
 
     assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+    for handler in RAW_QUERY_HANDLERS {
+        assert_eq!(
+            disallowed_parameters(&source.replace("fn execute", &format!("fn {handler}"))),
+            Vec::<String>::new(),
+            "{handler}"
+        );
+    }
     assert_eq!(
-        disallowed_parameters(&source.replace("fn execute", "fn subscribe")),
-        ["subscribe: headers: HeaderMap"]
+        disallowed_parameters(&source.replace("fn execute", "fn explorer")),
+        ["explorer: headers: HeaderMap"]
+    );
+}
+
+#[test]
+fn the_extractor_check_accepts_the_raw_query_of_the_two_get_handlers_only() {
+    let source = "pub async fn subscribe(State(schema): State<ApiSchema>, headers: HeaderMap, \
+        RawQuery(query): RawQuery) -> Response {}";
+
+    assert_eq!(disallowed_parameters(source), Vec::<String>::new());
+    assert_eq!(
+        disallowed_parameters(&source.replace("fn subscribe", "fn subscribe_or_explore")),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        disallowed_parameters(&source.replace("fn subscribe", "fn execute")),
+        ["execute: RawQuery(query): RawQuery"]
     );
 }
 
@@ -1359,8 +1410,20 @@ impl shared_domain::QueryBus for PendingQueryBus {
     }
 }
 
-/// The router of `config` assembled around a started node whose query bus never answers.
+/// The router of `config` assembled around a started node whose query bus never answers; its
+/// schema holds the query-string bound `HTTP_MAX_BODY_BYTES`, as the bootstrap's does.
 fn router_with_a_pending_query_bus(config: &Config) -> Router {
+    router_around_a_pending_query_bus(
+        config,
+        Some(QueryStringLimit {
+            max_bytes: config.max_body_bytes,
+        }),
+    )
+}
+
+/// The router of `config` assembled around a started node whose query bus never answers, with
+/// `limit` in its schema data when there is one.
+fn router_around_a_pending_query_bus(config: &Config, limit: Option<QueryStringLimit>) -> Router {
     use event_stream_application::{
         Hub, HubSettings, ReplaySettings, StatusSource, StreamSettings, Subscriptions, TailState,
         Window,
@@ -1403,7 +1466,10 @@ fn router_with_a_pending_query_bus(config: &Config) -> Router {
             config.health_probe_timeout,
         )),
     };
-    let schema = builder().data(event_stream.clone()).finish();
+    let schema = limit.map_or_else(
+        || builder().data(event_stream.clone()).finish(),
+        |limit| builder().data(event_stream.clone()).data(limit).finish(),
+    );
     let state = crate::http::AppState {
         health_check,
         event_stream,
@@ -1516,4 +1582,335 @@ async fn a_graphql_subscription_outlives_the_request_budget() {
     tokio::time::timeout(LIMIT, running.shutdown())
         .await
         .expect("the shutdown ends");
+}
+
+// ---- the GET form of the GraphQL path (FR-2, FR-4, FR-5, FR-6) ----
+
+/// The subscription of the GET tests, percent-encoded as the `query` parameter.
+const GET_SUBSCRIPTION: &str = "query=subscription%20%7B%20events(types%3A%20%5B%22user.created%22%5D)%20%7B%20id%20type%20data%20%7D%20%7D";
+
+/// A request of `method` to the `GraphQL` path with `query_string` and the request headers
+/// `headers`.
+fn graphql_request(method: Method, query_string: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("{GRAPHQL_PATH}?{query_string}"));
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(Body::empty()).unwrap()
+}
+
+/// The subscriber count of the status route of `app`.
+async fn subscribers(app: &Router) -> Value {
+    let status = send_to(app, request(Method::GET, "/api/events/status", None)).await;
+    serde_json::from_str::<Value>(&status.body).unwrap()["subscribers"].clone()
+}
+
+/// The status of the node of `app` once its window holds the event `last`, polled every 10 ms
+/// within [`LIMIT`] (the polls are spaced by a timer, so paused time advances).
+async fn window_reaches(app: &Router, last: u64) {
+    let last = last.to_string();
+    tokio::time::timeout(LIMIT, async {
+        loop {
+            let status = send_to(app, request(Method::GET, "/api/events/status", None)).await;
+            let status: Value = serde_json::from_str(&status.body).unwrap();
+            if status["windowLast"] == last.as_str() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the window reaches the event");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_get_with_sse_is_answered_as_the_post_form_in_every_mode() {
+    for app_env in ["dev", "test", "prod"] {
+        let (app, running, topic) = started_on_topic(&config(app_env)).await;
+        let post = Request::post(GRAPHQL_PATH)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "text/event-stream")
+            .body(Body::from(
+                r#"{"query":"subscription { events(types: [\"user.created\"]) { id type data } }"}"#,
+            ))
+            .unwrap();
+        let get = graphql_request(
+            Method::GET,
+            GET_SUBSCRIPTION,
+            &[("accept", "text/event-stream")],
+        );
+
+        let posted = tokio::time::timeout(LIMIT, app.clone().oneshot(post))
+            .await
+            .expect("the POST head is written in time")
+            .unwrap();
+        let got = tokio::time::timeout(LIMIT, app.clone().oneshot(get))
+            .await
+            .expect("the GET head is written in time")
+            .unwrap();
+
+        assert_eq!(got.status(), StatusCode::OK, "{app_env}");
+        assert_eq!(got.status(), posted.status(), "{app_env}");
+        assert_eq!(
+            comparable_headers(got.headers(), &["x-request-id"]),
+            comparable_headers(posted.headers(), &["x-request-id"]),
+            "{app_env}"
+        );
+        assert_eq!(got.headers()[header::CONTENT_TYPE], "text/event-stream");
+        assert_eq!(vary_values(got.headers()), ["accept"], "{app_env}");
+        assert_eq!(subscribers(&app).await, 2, "{app_env}");
+        let mut got = got.into_body();
+        let mut posted = posted.into_body();
+        assert_eq!(next_chunk(&mut got).await, ":\n\n", "{app_env}");
+        assert_eq!(next_chunk(&mut posted).await, ":\n\n", "{app_env}");
+        let value = record(7, "user.created", 0);
+        let envelope = String::from_utf8(value.clone()).unwrap();
+        let id = topic.append(Some(value)).sequence();
+        let block = next_chunk(&mut got).await;
+        assert_eq!(block, next_chunk(&mut posted).await, "{app_env}");
+        assert_eq!(
+            block,
+            format!(
+                "event: next\nid: {id}\ndata: {{\"data\":{{\"events\":{{\"id\":\"{id}\",\"type\":\"user.created\",\"data\":{envelope}}}}}}}\n\n"
+            ),
+            "{app_env}"
+        );
+        drop(got);
+        drop(posted);
+        assert_eq!(subscribers(&app).await, 0, "{app_env}");
+        tokio::time::timeout(LIMIT, running.shutdown())
+            .await
+            .expect("the shutdown ends");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_last_event_id_header_of_a_get_wins_over_its_argument() {
+    let (app, running, topic) = started_on_topic(&config("test")).await;
+    let ids: Vec<String> = (1..=3)
+        .map(|n| {
+            topic
+                .append(Some(record(n, "user.created", 0)))
+                .sequence()
+                .to_string()
+        })
+        .collect();
+    window_reaches(&app, 3).await;
+    let with_argument = |cursor: &str| {
+        format!(
+            "query=subscription%20%7B%20events(types%3A%20%5B%22user.created%22%5D%2C%20lastEventId%3A%20%22{cursor}%22)%20%7B%20id%20%7D%20%7D"
+        )
+    };
+    let cases = [
+        (with_argument("1"), vec![("last-event-id", "2")], &ids[2]),
+        (with_argument("1"), vec![], &ids[1]),
+        (
+            GET_SUBSCRIPTION.to_owned(),
+            vec![("last-event-id", "1")],
+            &ids[1],
+        ),
+    ];
+
+    for (query_string, cursor, first) in cases {
+        let mut headers = vec![("accept", "text/event-stream")];
+        headers.extend(cursor.iter().copied());
+        let response = head_of(&app, graphql_request(Method::GET, &query_string, &headers)).await;
+        let mut body = response.into_body();
+        assert_eq!(next_chunk(&mut body).await, ":\n\n", "{query_string}");
+        let block = next_chunk(&mut body).await;
+        assert!(
+            block.starts_with(&format!("event: next\nid: {first}\n")),
+            "{query_string} {cursor:?}: {block}"
+        );
+    }
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+}
+
+/// The response to `request`, within five seconds, with its body unread.
+async fn head_of(app: &Router, request: Request<Body>) -> axum::http::Response<Body> {
+    tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_head_that_negotiates_sse_is_the_event_stream_head_without_a_body_and_frees_its_subscriber()
+ {
+    let (app, running) = started(&config("test")).await;
+    assert_eq!(subscribers(&app).await, 0);
+
+    let answer = send_to(
+        &app,
+        graphql_request(
+            Method::HEAD,
+            GET_SUBSCRIPTION,
+            &[("accept", "text/event-stream")],
+        ),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.headers[header::CONTENT_TYPE], "text/event-stream");
+    assert_eq!(answer.headers[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(vary_values(&answer.headers), ["accept"]);
+    assert_eq!(answer.body, "");
+    assert_eq!(subscribers(&app).await, 0);
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+}
+
+#[tokio::test]
+async fn a_get_that_does_not_negotiate_sse_keeps_its_answer_with_vary_accept_in_every_mode() {
+    let browser = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+    for accept in [None, Some(browser), Some("application/json")] {
+        let headers: Vec<(&str, &str)> = accept.iter().map(|value| ("accept", *value)).collect();
+        let dev = send(
+            "dev",
+            graphql_request(Method::GET, GET_SUBSCRIPTION, &headers),
+        )
+        .await;
+        assert_eq!(dev.status, StatusCode::OK, "{accept:?}");
+        assert_eq!(dev.body, EXPLORER_PAGE, "{accept:?}");
+        assert_eq!(
+            dev.headers[header::CONTENT_SECURITY_POLICY],
+            EXPLORER_CONTENT_SECURITY_POLICY
+        );
+        assert_eq!(vary_values(&dev.headers), ["accept"], "{accept:?}");
+        for app_env in ["test", "prod"] {
+            let answer = send(
+                app_env,
+                graphql_request(Method::GET, GET_SUBSCRIPTION, &headers),
+            )
+            .await;
+            assert_eq!(
+                answer.status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{app_env} {accept:?}"
+            );
+            assert_eq!(
+                answer.headers[header::ALLOW],
+                "POST",
+                "{app_env} {accept:?}"
+            );
+            assert_eq!(
+                answer.body,
+                r#"{"type":"about:blank","title":"Method Not Allowed","status":405}"#
+            );
+            assert_eq!(
+                vary_values(&answer.headers),
+                ["accept"],
+                "{app_env} {accept:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_get_with_a_wildcard_accept_negotiates_sse_and_one_without_accept_does_not() {
+    let wildcard = send(
+        "test",
+        graphql_request(Method::GET, GET_SUBSCRIPTION, &[("accept", "*/*")]),
+    )
+    .await;
+    let without = send("test", graphql_request(Method::GET, GET_SUBSCRIPTION, &[])).await;
+
+    // The node of `send` never starts, so the subscription it negotiated is the 503 of the hub.
+    assert_eq!(wildcard.status, StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = serde_json::from_str(&wildcard.body).unwrap();
+    assert_eq!(body["detail"], "the node is starting");
+    assert_eq!(vary_values(&wildcard.headers), ["accept"]);
+    assert_eq!(without.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(without.headers[header::ALLOW], "POST");
+}
+
+#[tokio::test]
+async fn the_other_methods_of_the_graphql_path_allow_get_head_and_post_in_every_mode() {
+    for app_env in ["dev", "test", "prod"] {
+        for method in [Method::PUT, Method::DELETE, Method::PATCH] {
+            let route = format!("{app_env} {method}");
+
+            let answer = send(app_env, request(method.clone(), GRAPHQL_PATH, None)).await;
+
+            assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "{route}");
+            assert_eq!(answer.headers[header::ALLOW], "GET,HEAD,POST", "{route}");
+            assert_eq!(
+                answer.body, r#"{"type":"about:blank","title":"Method Not Allowed","status":405}"#,
+                "{route}"
+            );
+            assert!(!answer.headers.contains_key(header::VARY), "{route}");
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_get_query_over_sse_that_outlasts_the_budget_is_the_503_problem_with_vary_accept() {
+    let mut config = config("test");
+    config.request_timeout = Duration::from_secs(1);
+    let app = router_with_a_pending_query_bus(&config);
+    let get = graphql_request(
+        Method::GET,
+        "query=%7B%20eventTypes%20%7B%20name%20%7D%20%7D",
+        &[("accept", "text/event-stream")],
+    );
+
+    let answer = send_to(&app, get).await;
+
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        answer.headers[header::CONTENT_TYPE],
+        "application/problem+json"
+    );
+    let body: Value = serde_json::from_str(&answer.body).unwrap();
+    assert_eq!(body["detail"], "The request exceeded its time budget.");
+    assert_eq!(vary_values(&answer.headers), ["accept"]);
+    assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "budget");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_get_query_over_sse_within_the_budget_of_the_assembled_router_is_answered() {
+    let app = router_with_a_pending_query_bus(&config("prod"));
+    let get = graphql_request(
+        Method::GET,
+        "query=%7B%20eventStreamStatus%20%7B%20subscribers%20%7D%20%7D",
+        &[("accept", "text/event-stream")],
+    );
+
+    let answer = send_to(&app, get).await;
+
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(
+        answer.body,
+        ":\n\nevent: next\ndata: {\"data\":{\"eventStreamStatus\":{\"subscribers\":0}}}\n\nevent: complete\ndata:\n\n"
+    );
+    assert_eq!(vary_values(&answer.headers), ["accept"]);
+}
+
+#[tokio::test]
+async fn a_get_with_sse_on_a_schema_without_the_query_string_limit_is_the_500_problem_with_vary_accept()
+ {
+    let config = config("test");
+    let app = router_around_a_pending_query_bus(&config, None);
+
+    let answer = send_to(
+        &app,
+        graphql_request(
+            Method::GET,
+            GET_SUBSCRIPTION,
+            &[("accept", "text/event-stream")],
+        ),
+    )
+    .await;
+
+    assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        answer.body,
+        r#"{"type":"about:blank","title":"Internal Server Error","status":500}"#
+    );
+    assert_eq!(vary_values(&answer.headers), ["accept"]);
 }

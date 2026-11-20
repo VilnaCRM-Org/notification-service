@@ -1,4 +1,4 @@
-//! The transport a request to the `GraphQL` path asks for (FR-2).
+//! The transport a request to the `GraphQL` path asks for (FR-2): the POST rule and the GET rule.
 //!
 //! `Accept` is read as media ranges with weights, not compared as one string: every field of the
 //! request, joined in order, split at the commas, each range split at the semicolons. Weights are
@@ -12,21 +12,39 @@ const FULL_WEIGHT: u16 = 1000;
 
 /// True when `Accept` ranks `text/event-stream` above both JSON types (FR-2, POST rule).
 ///
-/// Wildcard ranges count for neither side, so no client that sends `*/*` changes transport. The
-/// answer is `s > j`: `j` is never negative, so `s > 0` follows and needs no test of its own.
+/// Wildcard ranges and `text/html` count for neither side, so no client that sends `*/*` changes
+/// transport. The answer is `s > j`: `j` is never negative, so `s > 0` follows and needs no test of
+/// its own.
 pub(crate) fn negotiates_event_stream(headers: &HeaderMap) -> bool {
     let ranks = ranks(headers);
     ranks.event_stream > ranks.json
 }
 
-/// The highest weight, in thousandths, of each kind of range that the rule compares; a kind that
+/// True when a GET's `Accept` admits the event stream (FR-2, GET rule): a field is present and
+/// `max(s, w) > max(j, h)`, where `w` is the highest weight of `*/*` or `text/*` and `h` that of
+/// `text/html`.
+///
+/// A GET has no JSON representation, so a wildcard admits the event stream, while `text/html` or a
+/// JSON type ranked as high keeps today's answer. Without an `Accept` field every weight is 0 and
+/// the answer is `0 > 0`, so the presence of a field follows from the comparison and needs no test
+/// of its own, as `s > 0` does not for the POST rule.
+pub(crate) fn negotiates_event_stream_on_get(headers: &HeaderMap) -> bool {
+    let ranks = ranks(headers);
+    ranks.event_stream.max(ranks.wildcard) > ranks.json.max(ranks.html)
+}
+
+/// The highest weight, in thousandths, of each kind of range that the rules compare; a kind that
 /// is not listed weighs 0.
 #[derive(Debug, Default, Clone, Copy)]
 struct Ranks {
-    /// `text/event-stream`.
+    /// `text/event-stream` (`s`).
     event_stream: u16,
-    /// `application/json` or `application/graphql-response+json`.
+    /// `application/json` or `application/graphql-response+json` (`j`).
     json: u16,
+    /// `*/*` or `text/*` (`w`), read by the GET rule only.
+    wildcard: u16,
+    /// `text/html` (`h`), read by the GET rule only.
+    html: u16,
 }
 
 /// The kind of a media range.
@@ -36,7 +54,11 @@ enum Kind {
     EventStream,
     /// One of the two JSON types.
     Json,
-    /// Any other range, wildcards included.
+    /// `*/*` or `text/*`.
+    Wildcard,
+    /// `text/html`.
+    Html,
+    /// Any other range.
     Other,
 }
 
@@ -50,6 +72,14 @@ impl Ranks {
             },
             Kind::Json => Self {
                 json: self.json.max(weight),
+                ..self
+            },
+            Kind::Wildcard => Self {
+                wildcard: self.wildcard.max(weight),
+                ..self
+            },
+            Kind::Html => Self {
+                html: self.html.max(weight),
                 ..self
             },
             Kind::Other => self,
@@ -90,6 +120,10 @@ const fn kind(media: &str) -> Kind {
         || media.eq_ignore_ascii_case("application/graphql-response+json")
     {
         Kind::Json
+    } else if media.eq_ignore_ascii_case("*/*") || media.eq_ignore_ascii_case("text/*") {
+        Kind::Wildcard
+    } else if media.eq_ignore_ascii_case("text/html") {
+        Kind::Html
     } else {
         Kind::Other
     }

@@ -6,11 +6,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::header::{
-    CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_SECURITY_POLICY,
+    ALLOW, CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_SECURITY_POLICY,
     CONTENT_TYPE, TRANSFER_ENCODING, VARY,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use event_stream_application::graphql::{StreamLink, StreamPhase};
 use event_stream_application::http::EventStreamState;
 use event_stream_application::{
@@ -23,11 +23,14 @@ use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
 use shared_infrastructure::bus::InMemoryQueryBus;
+use test_support::log::{LogLine, LogRecorder};
 use test_support::static_topic::StaticTopic;
 use tokio::sync::watch;
 use tower::ServiceExt as _;
+use tracing::Level;
 
 use super::*;
+use crate::graphql::QueryStringLimit;
 use crate::graphql::schema::{MAX_COMPLEXITY, builder};
 use crate::http::security_headers;
 
@@ -42,7 +45,7 @@ const SUBSCRIPTION: &str = r#"subscription { events(types: ["a"]) { id } }"#;
 
 fn router_of(schema: ApiSchema) -> Router {
     Router::new()
-        .route("/api/graphql", post(execute).get(explorer))
+        .route("/api/graphql", post(execute).get(subscribe_or_explore))
         .with_state(schema)
         .layer(security_headers::layer())
 }
@@ -58,11 +61,18 @@ async fn send(request: Request<Body>) -> Response<Body> {
 /// The state of a started node: its hub has a position and takes up to four subscribers, so a
 /// subscription whose resolver ran would register one.
 fn started_state() -> EventStreamState {
+    let state = unstarted_state();
+    state.hub.start(Cursor::new(1));
+    state
+}
+
+/// The state of a node whose hub has no position yet: a subscription is refused with the 503
+/// problem `the node is starting`.
+fn unstarted_state() -> EventStreamState {
     let hub = Hub::new(HubSettings {
         max_subscribers: 4,
         buffer: 8,
     });
-    hub.start(Cursor::new(1));
     let window = Arc::new(Window::new(16, usize::MAX));
     let (_tail, tail_state) = watch::channel(TailState::default());
     let subscriptions = Subscriptions::new(
@@ -961,4 +971,472 @@ async fn an_accept_field_alone_chooses_the_transport_of_the_same_request() {
         stream.body,
         ":\n\nevent: next\ndata: {\"data\":{\"__typename\":\"Query\"}}\n\nevent: complete\ndata:\n\n"
     );
+}
+
+// ---- the GET form (FR-2, FR-4, FR-5, FR-6) ----
+
+/// The query-string bound of the schemas of the GET tests.
+const QUERY_LIMIT: usize = 512;
+
+/// The body of today's 405 problem of a GET outside `dev`.
+const METHOD_NOT_ALLOWED_BODY: &str =
+    r#"{"type":"about:blank","title":"Method Not Allowed","status":405}"#;
+
+/// The `Accept` fields with which a GET does not negotiate an event stream; `None` sends none.
+const NON_STREAM_GET_ACCEPTS: [Option<&str>; 5] = [
+    None,
+    Some("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
+    Some("application/json"),
+    Some("text/event-stream;q=0"),
+    Some(
+        "application/graphql-response+json, application/graphql+json, application/json, text/event-stream, multipart/mixed",
+    ),
+];
+
+/// The GET handler a router serves: the one of `dev` or the one of every other `APP_ENV`.
+#[derive(Debug, Clone, Copy)]
+enum Mode {
+    Dev,
+    Other,
+}
+
+const MODES: [Mode; 2] = [Mode::Dev, Mode::Other];
+
+/// A router whose GET of the path is the handler of `mode`, over `schema`.
+fn get_router(schema: ApiSchema, mode: Mode) -> Router {
+    let route = match mode {
+        Mode::Dev => get(subscribe_or_explore),
+        Mode::Other => get(subscribe),
+    };
+    Router::new()
+        .route("/api/graphql", route)
+        .with_state(schema)
+        .layer(security_headers::layer())
+}
+
+/// The schema of a node with `state` and the query-string bound [`QUERY_LIMIT`].
+fn limited(state: &EventStreamState) -> ApiSchema {
+    builder()
+        .data(state.clone())
+        .data(QueryStringLimit {
+            max_bytes: QUERY_LIMIT,
+        })
+        .finish()
+}
+
+/// `text` percent-encoded as a value of a query string: every byte but the unreserved ones.
+fn encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+/// A GET of the path with `query_string` and the request headers `headers`.
+fn get_with(query_string: &str, headers: &[(&str, &str)]) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/api/graphql?{query_string}"))
+        .body(Body::empty())
+        .unwrap();
+    for (name, value) in headers {
+        request.headers_mut().append(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            HeaderValue::from_str(value).unwrap(),
+        );
+    }
+    request
+}
+
+/// The query string that sends `document` alone.
+fn query_of(document: &str) -> String {
+    format!("query={}", encoded(document))
+}
+
+/// The response of the router of `mode` over `schema` to `request`, within [`LIMIT`].
+async fn get_response(schema: ApiSchema, mode: Mode, request: Request<Body>) -> Response<Body> {
+    tokio::time::timeout(LIMIT, get_router(schema, mode).oneshot(request))
+        .await
+        .expect("the request answers in time")
+        .unwrap()
+}
+
+/// The whole answer of `response`, whose body must end.
+async fn whole(response: Response<Body>) -> Answer {
+    let (parts, body) = response.into_parts();
+    let bytes = tokio::time::timeout(LIMIT, body.collect())
+        .await
+        .expect("the body ends in time")
+        .unwrap()
+        .to_bytes();
+    Answer {
+        status: parts.status,
+        content_type: header(&parts.headers, CONTENT_TYPE),
+        vary: header(&parts.headers, VARY),
+        body: String::from_utf8(bytes.to_vec()).unwrap(),
+    }
+}
+
+/// The whole answer of the router of `mode` over the limited schema of `state` to `request`.
+async fn get_answer(state: &EventStreamState, mode: Mode, request: Request<Body>) -> Answer {
+    whole(get_response(limited(state), mode, request).await).await
+}
+
+/// The first chunk of the event-stream `body`, within [`LIMIT`].
+async fn first_chunk(body: &mut Body) -> String {
+    let frame = tokio::time::timeout(LIMIT, body.frame())
+        .await
+        .expect("the first chunk comes in time")
+        .unwrap()
+        .unwrap();
+    String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_sent_as_a_get_with_sse_opens_the_event_stream_in_every_mode() {
+    for mode in MODES {
+        let state = started_state();
+
+        let response = get_response(
+            limited(&state),
+            mode,
+            get_with(&query_of(EVENTS), &[("accept", "text/event-stream")]),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{mode:?}");
+        let headers = response.headers();
+        assert_eq!(headers[CONTENT_TYPE], "text/event-stream", "{mode:?}");
+        assert_eq!(headers[CACHE_CONTROL], "no-cache", "{mode:?}");
+        assert_eq!(headers["x-accel-buffering"], "no", "{mode:?}");
+        assert_eq!(headers[VARY], "accept", "{mode:?}");
+        assert_eq!(state.hub.subscriber_count(), 1, "{mode:?}");
+        let mut body = response.into_body();
+        assert_eq!(first_chunk(&mut body).await, ":\n\n", "{mode:?}");
+        drop(body);
+        assert_eq!(state.hub.subscriber_count(), 0, "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_query_sent_as_a_get_with_sse_is_the_result_of_the_same_post_in_one_next_block() {
+    let state = started_state();
+    let document =
+        "query A($name: String!) { a: __type(name: $name) { name } } query B { b: __typename }";
+    let post = json!({
+        "query": document,
+        "operationName": "A",
+        "variables": { "name": "EventType" },
+        "extensions": { "ignored": true },
+    });
+    let json = answer_of(
+        &state,
+        post_with("application/json", &post.to_string(), &[]),
+    )
+    .await;
+    assert_eq!(json.body, r#"{"data":{"a":{"name":"EventType"}}}"#);
+    let query_string = format!(
+        "{}&operationName=A&variables={}&extensions={}&unknown=1",
+        query_of(document),
+        encoded(r#"{"name":"EventType"}"#),
+        encoded(r#"{"ignored":true}"#),
+    );
+
+    for mode in MODES {
+        let answer = get_answer(
+            &state,
+            mode,
+            get_with(&query_string, &[("accept", "text/event-stream")]),
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{mode:?}");
+        assert_eq!(answer.content_type.as_deref(), Some("text/event-stream"));
+        assert_eq!(answer.vary.as_deref(), Some("accept"));
+        assert_eq!(
+            answer.body,
+            format!(
+                ":\n\nevent: next\ndata: {}\n\nevent: complete\ndata:\n\n",
+                json.body
+            ),
+            "{mode:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_get_with_a_wildcard_accept_negotiates_the_event_stream() {
+    let state = started_state();
+    let query_string = query_of("{ __typename }");
+
+    for (accept, mode) in [("*/*", Mode::Other), ("text/*", Mode::Dev)] {
+        let answer = get_answer(&state, mode, get_with(&query_string, &[("accept", accept)])).await;
+
+        assert_eq!(
+            answer.body,
+            ":\n\nevent: next\ndata: {\"data\":{\"__typename\":\"Query\"}}\n\nevent: complete\ndata:\n\n",
+            "{accept}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_get_that_does_not_negotiate_sse_keeps_its_answer_whatever_its_query_string() {
+    let state = started_state();
+    let (explorer_response, page) = explorer_page().await;
+    let explorer_policy = explorer_response.headers()[CONTENT_SECURITY_POLICY].clone();
+    for query_string in [
+        query_of(EVENTS),
+        "%zz".to_owned(),
+        String::new(),
+        "query=a&query=b".to_owned(),
+    ] {
+        for accept in NON_STREAM_GET_ACCEPTS {
+            let headers: Vec<(&str, &str)> =
+                accept.iter().map(|value| ("accept", *value)).collect();
+
+            let refused = get_response(
+                limited(&state),
+                Mode::Other,
+                get_with(&query_string, &headers),
+            )
+            .await;
+            assert_eq!(
+                refused.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{accept:?}"
+            );
+            assert_eq!(refused.headers()[ALLOW], "POST", "{accept:?}");
+            let refused = whole(refused).await;
+            assert_eq!(
+                refused.content_type.as_deref(),
+                Some("application/problem+json")
+            );
+            assert_eq!(refused.body, METHOD_NOT_ALLOWED_BODY, "{accept:?}");
+
+            let explored = get_response(
+                limited(&state),
+                Mode::Dev,
+                get_with(&query_string, &headers),
+            )
+            .await;
+            assert_eq!(explored.status(), StatusCode::OK, "{accept:?}");
+            assert_eq!(
+                explored.headers()[CONTENT_SECURITY_POLICY],
+                explorer_policy,
+                "{accept:?}"
+            );
+            assert_eq!(whole(explored).await.body, page, "{accept:?}");
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_last_event_id_header_of_a_get_is_the_cursor_of_its_subscription() {
+    let state = started_state();
+    let document = r#"subscription { events(types: ["a"], lastEventId: "5") { id } }"#;
+
+    let answer = get_answer(
+        &state,
+        Mode::Other,
+        get_with(
+            &query_of(document),
+            &[("accept", "text/event-stream"), ("last-event-id", "x")],
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        single_result_of(&answer)["errors"][0]["extensions"]["violations"],
+        json!([{
+            "propertyPath": "Last-Event-ID",
+            "message": "Last-Event-ID must be a decimal unsigned 64-bit integer",
+            "code": "format",
+        }])
+    );
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// The problem document of `answer`, which must be a problem.
+fn problem_body(answer: &Answer) -> Value {
+    assert_eq!(
+        answer.content_type.as_deref(),
+        Some("application/problem+json"),
+        "{answer:?}"
+    );
+    serde_json::from_str(&answer.body).unwrap()
+}
+
+#[tokio::test]
+async fn a_refused_query_string_is_its_problem_and_no_stream() {
+    let state = started_state();
+    let too_long = format!("query={}", "a".repeat(QUERY_LIMIT));
+    let refusals = [
+        (
+            too_long.as_str(),
+            StatusCode::URI_TOO_LONG,
+            "The query string is too long.",
+        ),
+        (
+            "query=%zz",
+            StatusCode::BAD_REQUEST,
+            "Failed to deserialize query string: invalid percent-encoding or UTF-8 in `query`",
+        ),
+        (
+            "operationName=A",
+            StatusCode::BAD_REQUEST,
+            "Failed to deserialize query string: missing field `query`",
+        ),
+        (
+            "query=%7B__typename%7D&variables=1",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The request failed validation.",
+        ),
+    ];
+    for (query_string, status, detail) in refusals {
+        for mode in MODES {
+            let answer = get_answer(
+                &state,
+                mode,
+                get_with(query_string, &[("accept", "text/event-stream")]),
+            )
+            .await;
+
+            assert_eq!(answer.status, status, "{mode:?} {query_string}");
+            assert_eq!(
+                problem_body(&answer)["detail"],
+                detail,
+                "{mode:?} {query_string}"
+            );
+            assert_eq!(answer.vary, None);
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+/// The 422 of the GET form answers before the rules of FR-6 steps 3 to 6: a document error, a
+/// breach of the root rule, invalid arguments, the 503 of a node that cannot take the subscriber
+/// and the stream itself.
+#[tokio::test]
+async fn the_422_of_the_get_form_answers_before_the_document_and_the_node() {
+    let unstarted = unstarted_state();
+    let documents = [
+        "{ unknownField }",
+        r#"subscription { a: events(types: ["a"]) { id } b: events(types: ["b"]) { id } }"#,
+        r#"subscription { events(types: ["Not A Type"]) { id } }"#,
+        EVENTS,
+    ];
+    for state in [started_state(), unstarted] {
+        for document in documents {
+            let query_string = format!("{}&variables=%5B%5D", query_of(document));
+
+            let answer = get_answer(
+                &state,
+                Mode::Other,
+                get_with(&query_string, &[("accept", "text/event-stream")]),
+            )
+            .await;
+
+            assert_eq!(
+                answer.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{document}"
+            );
+            assert_eq!(
+                problem_body(&answer)["violations"],
+                json!([{
+                    "propertyPath": "variables",
+                    "message": "variables must be a JSON-encoded object",
+                    "code": "format",
+                }]),
+                "{document}"
+            );
+        }
+        assert_eq!(state.hub.subscriber_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn a_get_with_sse_on_a_schema_without_the_query_string_limit_is_the_500_problem_logged_once()
+{
+    let state = started_state();
+    for mode in MODES {
+        for query_string in [query_of(EVENTS), "%zz".to_owned()] {
+            let schema = builder().data(state.clone()).finish();
+            let (recorder, guard) = LogRecorder::install();
+
+            let answer = whole(
+                get_response(
+                    schema,
+                    mode,
+                    get_with(&query_string, &[("accept", "text/event-stream")]),
+                )
+                .await,
+            )
+            .await;
+            drop(guard);
+
+            assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR, "{mode:?}");
+            assert_eq!(
+                problem_body(&answer),
+                json!({"type": "about:blank", "title": "Internal Server Error", "status": 500})
+            );
+            assert_eq!(
+                recorder.lines(),
+                vec![LogLine {
+                    level: Level::ERROR,
+                    target: "shared_application::http::problem".to_owned(),
+                    message: "request failed".to_owned(),
+                    fields: vec![(
+                        "error".to_owned(),
+                        "the GraphQL schema has no QueryStringLimit data for the GET form"
+                            .to_owned()
+                    )],
+                }],
+                "{mode:?} {query_string}"
+            );
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn a_get_without_sse_on_a_schema_without_the_query_string_limit_keeps_its_answer() {
+    let state = started_state();
+    let (recorder, guard) = LogRecorder::install();
+
+    let refused = whole(
+        get_response(
+            builder().data(state.clone()).finish(),
+            Mode::Other,
+            get_with(&query_of(EVENTS), &[]),
+        )
+        .await,
+    )
+    .await;
+    let explored = whole(
+        get_response(
+            builder().data(state.clone()).finish(),
+            Mode::Dev,
+            get_with(&query_of(EVENTS), &[]),
+        )
+        .await,
+    )
+    .await;
+    drop(guard);
+
+    assert_eq!(refused.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(refused.body, METHOD_NOT_ALLOWED_BODY);
+    assert_eq!(explored.status, StatusCode::OK);
+    assert_eq!(
+        explored.content_type.as_deref(),
+        Some("text/html; charset=utf-8")
+    );
+    assert_eq!(recorder.lines(), Vec::<LogLine>::new());
 }
