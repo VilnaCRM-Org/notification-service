@@ -16,6 +16,7 @@ use axum::http::{HeaderValue, Uri};
 use event_stream_application::EventCatalog;
 use event_stream_domain::EventType;
 use event_stream_infrastructure::{KafkaSecurity, KafkaSettings, SaslCredentials, SaslMechanism};
+use jiff::fmt::friendly::SpanParser;
 use shared_infrastructure::messaging::SqsSettings;
 use tracing_subscriber::EnvFilter;
 
@@ -720,6 +721,19 @@ const STREAM_KEEP_ALIVE: DurationRule = DurationRule {
     range: "1s to 5m",
 };
 
+/// jiff's friendly duration format: numbers with the units `h`, `m`, `s`, `ms`, `us` or `ns`
+/// (or their long names), largest unit first, such as `500ms`, `2s`, `1m` or `1m30s`.
+static DURATION_PARSER: SpanParser = SpanParser::new();
+
+/// A duration of that syntax or the bare `0`, or `None` for any other text, a negative value or a
+/// unit of days or longer.
+fn parse_duration(value: &str) -> Option<Duration> {
+    if value == "0" {
+        return Some(Duration::ZERO);
+    }
+    DURATION_PARSER.parse_unsigned_duration(value).ok()
+}
+
 /// A duration inside the range of `rule`; a value that is not a duration fails with the same
 /// reason as one outside the range.
 fn ranged_duration(raw: Option<&str>, rule: &DurationRule) -> Parsed<Duration> {
@@ -727,8 +741,7 @@ fn ranged_duration(raw: Option<&str>, rule: &DurationRule) -> Parsed<Duration> {
     let Some(value) = raw else {
         return Ok(rule.default);
     };
-    humantime::parse_duration(value)
-        .ok()
+    parse_duration(value)
         .filter(|duration| (rule.min..=rule.max).contains(duration))
         .ok_or_else(reason)
 }
@@ -961,8 +974,7 @@ fn required(raw: Option<&str>) -> Parsed<String> {
 
 fn duration(raw: Option<&str>, default: Duration) -> Parsed<Duration> {
     raw.map_or(Ok(default), |value| {
-        humantime::parse_duration(value)
-            .map_err(|_error| "must be a duration such as 500ms, 2s or 1m".to_owned())
+        parse_duration(value).ok_or_else(|| "must be a duration such as 500ms, 2s or 1m".to_owned())
     })
 }
 

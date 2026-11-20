@@ -340,6 +340,93 @@ fn an_unparsable_duration_names_its_variable() {
     );
 }
 
+/// `SHUTDOWN_GRACE_PERIOD` with `raw`: unranged and under no rule between variables, so every
+/// value that reads as a duration reaches the configuration.
+fn shutdown_grace_period(raw: &str) -> ServeArgs {
+    ServeArgs {
+        shutdown_grace_period: some(raw),
+        ..valid()
+    }
+}
+
+#[rstest]
+#[case::millis_50("50ms", Duration::from_millis(50))]
+#[case::millis_100("100ms", Duration::from_millis(100))]
+#[case::millis_300("300ms", Duration::from_millis(300))]
+#[case::millis_500("500ms", Duration::from_millis(500))]
+#[case::seconds_1("1s", Duration::from_secs(1))]
+#[case::seconds_2("2s", Duration::from_secs(2))]
+#[case::seconds_3("3s", Duration::from_secs(3))]
+#[case::seconds_4("4s", Duration::from_secs(4))]
+#[case::seconds_5("5s", Duration::from_secs(5))]
+#[case::seconds_10("10s", Duration::from_secs(10))]
+#[case::seconds_15("15s", Duration::from_secs(15))]
+#[case::seconds_20("20s", Duration::from_secs(20))]
+#[case::seconds_30("30s", Duration::from_secs(30))]
+#[case::millis_3001("3001ms", Duration::from_millis(3001))]
+#[case::one_minute_never_one_month("1m", Duration::from_secs(60))]
+#[case::minutes_2("2m", Duration::from_secs(120))]
+#[case::minutes_5("5m", Duration::from_secs(300))]
+#[case::minutes_10("10m", Duration::from_secs(600))]
+#[case::bare_zero("0", Duration::ZERO)]
+#[case::plus_sign("+2s", Duration::from_secs(2))]
+#[case::comma_fraction("1,5s", Duration::from_millis(1500))]
+#[case::clock_form("01:30:00", Duration::from_mins(90))]
+#[case::dot_fraction("1.5s", Duration::from_millis(1500))]
+#[case::minutes_then_seconds_after_a_space("1m 30s", Duration::from_secs(90))]
+#[case::minutes_then_seconds("1m30s", Duration::from_secs(90))]
+#[case::hours("1h", Duration::from_hours(1))]
+#[case::microseconds("1500us", Duration::from_micros(1500))]
+#[case::nanoseconds("750ns", Duration::from_nanos(750))]
+#[case::long_name_of_minutes("2min", Duration::from_secs(120))]
+#[case::long_name_of_seconds("30seconds", Duration::from_secs(30))]
+fn a_duration_reads_as_its_documented_length(#[case] raw: &str, #[case] expected: Duration) {
+    let config = Config::from_args(shutdown_grace_period(raw)).unwrap();
+
+    assert_eq!(config.shutdown_grace_period, expected);
+}
+
+#[rstest]
+#[case::days("1d")]
+#[case::weeks("2w")]
+#[case::months("1M")]
+#[case::years("1y")]
+#[case::smaller_unit_first("30s1m")]
+#[case::repeated_unit("1h1h")]
+#[case::leading_space(" 2s")]
+#[case::space_inside_a_number("1 0s")]
+#[case::no_break_space_before_the_unit("1\u{a0}s")]
+#[case::empty("")]
+#[case::negative("-2s")]
+#[case::word("fast")]
+#[case::unit_of_two_weeks("1 fortnight")]
+#[case::number_without_a_unit("5")]
+fn a_text_outside_the_duration_syntax_is_refused(#[case] raw: &str) {
+    assert_eq!(
+        problems(shutdown_grace_period(raw)),
+        [(
+            "SHUTDOWN_GRACE_PERIOD",
+            "must be a duration such as 500ms, 2s or 1m".to_owned()
+        )]
+    );
+}
+
+#[rstest]
+#[case::bare_zero("0")]
+#[case::zero_seconds("0s")]
+fn a_ranged_duration_refuses_zero_through_its_range(#[case] raw: &str) {
+    let mut args = valid();
+    args.kafka.retry_delay = some(raw);
+
+    assert_eq!(
+        problems(args),
+        [(
+            "KAFKA_RETRY_DELAY",
+            "must be a duration from 100ms to 1m".to_owned()
+        )]
+    );
+}
+
 #[rstest]
 #[case("http://localhost:4566")]
 #[case("https://sqs.eu-west-1.amazonaws.com")]
