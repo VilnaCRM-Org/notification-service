@@ -21,6 +21,8 @@ mod limit;
 #[cfg(test)]
 mod panic;
 #[cfg(test)]
+mod request_target;
+#[cfg(test)]
 mod serve;
 #[cfg(test)]
 mod serve_stream;

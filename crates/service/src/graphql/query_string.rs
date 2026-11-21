@@ -8,6 +8,14 @@
 //! parameter given twice or a missing `query`, then the 422 of `variables` or `extensions` that is
 //! not a JSON object. No problem and no log entry holds a value of the request; the 400 texts name
 //! only the four known parameters (NFR-8).
+//!
+//! On an HTTP/1.1 connection a query string over 65 521 bytes never reaches these rules: the HTTP
+//! server (hyper) refuses a request-target over 65 534 bytes, which `/api/graphql?` and 65 521
+//! bytes fill, with its own bare 414 (no body, no `Content-Type`, none of the CORS or `Vary`
+//! headers) before the service sees the request, a limit that cannot be configured. So the GET
+//! form reads a query string up to the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes, and the
+//! 414 problem of this module answers only a query string over `HTTP_MAX_BODY_BYTES` set below
+//! 65 521 (maintainer decision M6).
 
 use axum::http::StatusCode;
 use serde_json::{Map, Value};
@@ -15,10 +23,14 @@ use shared_application::http::{Problem, Violation};
 
 use crate::graphql::schema::ApiSchema;
 
-/// The bound of a GET query string, `HTTP_MAX_BODY_BYTES`, set in the schema data by the bootstrap.
+/// The bound of a GET query string that the service checks, `HTTP_MAX_BODY_BYTES`, set in the
+/// schema data by the bootstrap. Above 65 521 bytes the HTTP server refuses the request first on
+/// an HTTP/1.1 connection, so the query string read is at most the smaller of the two (decision
+/// M6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct QueryStringLimit {
-    /// The longest query string read, in bytes, as received (FR-4).
+    /// The longest query string read, in bytes, as received (FR-4), when it is not above the
+    /// 65 521 bytes that the HTTP server lets through.
     pub(crate) max_bytes: usize,
 }
 
@@ -46,6 +58,11 @@ pub(crate) fn limit(schema: &ApiSchema) -> Result<QueryStringLimit, Problem> {
 /// The GET form (FR-4): the JSON object `{query, operationName, variables, extensions}` that the
 /// POST form would carry, with the members that are present, or the problem of the first rule that
 /// fails. A request without a query string reads as an empty one.
+///
+/// The first rule is the 414 problem of a query string longer than `max_bytes`, as received. The
+/// query string read is at most the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes: on an
+/// HTTP/1.1 connection, a request-target over 65 534 bytes gets the bare 414 of the HTTP server
+/// before the service sees it, so this function never reads one (decision M6).
 pub(crate) fn read(raw: Option<&str>, max_bytes: usize) -> Result<Map<String, Value>, Problem> {
     let raw = raw.unwrap_or_default();
     if raw.len() > max_bytes {

@@ -637,7 +637,7 @@ paths:
                 title: Method Not Allowed
                 type: about:blank
         '414':
-          description: The query string is longer than `HTTP_MAX_BODY_BYTES` as received.
+          description: 'The query string, as received, is longer than the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes. The service answers this problem to a query string over `HTTP_MAX_BODY_BYTES` when that bound is below 65 521. On an HTTP/1.1 connection, the HTTP server refuses a request-target over 65 534 bytes (65 521 bytes of query string after `/api/graphql?`) itself, before the service sees the request, with a bare 414: no body, no `Content-Type` and none of the CORS or `Vary` headers of the service''s answers; that limit cannot be configured.'
           content:
             application/problem+json:
               schema:

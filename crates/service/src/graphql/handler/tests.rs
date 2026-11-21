@@ -1833,6 +1833,14 @@ fn the_get_entry_documents_the_query_string_both_answers_and_the_problems() {
         keys(&get["responses"]),
         ["200", "400", "405", "414", "422", "503", "default"]
     );
+    let too_long = get["responses"]["414"]["description"].as_str().unwrap();
+    for bound in [
+        "the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes",
+        "On an HTTP/1.1 connection, the HTTP server refuses a request-target over 65 534 bytes",
+        "bare 414",
+    ] {
+        assert!(too_long.contains(bound), "{bound}: {too_long}");
+    }
 }
 
 /// The entry of the document for `method` of the `GraphQL` path without its tags, which

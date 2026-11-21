@@ -51,7 +51,12 @@ pub(crate) const MEDIA_TYPE_DETAIL: &str = "Expected request with `Content-Type:
 pub(crate) const MISSING_QUERY_DETAIL: &str =
     "Failed to deserialize query string: missing field `query`";
 
-/// The detail of the 414 problem of a GET whose query string is too long.
+/// The detail of the 414 problem of a GET whose query string is longer than `HTTP_MAX_BODY_BYTES`.
+///
+/// The GET form reads a query string up to the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes,
+/// so this problem answers only when `HTTP_MAX_BODY_BYTES` is below 65 521; on an HTTP/1.1
+/// connection, a request-target over 65 534 bytes gets the bare 414 of the HTTP server, without a
+/// problem, before the service sees it (decision M6).
 pub(crate) const TOO_LONG_DETAIL: &str = "The query string is too long.";
 
 /// One execution result of the example subscription: the event object of the other streaming

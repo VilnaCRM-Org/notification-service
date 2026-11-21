@@ -41,7 +41,11 @@ pub const GRAPHQL_PATH: &str = "/api/graphql";
 /// origin check of a WebSocket handshake, the panic catcher, the request budget and the body
 /// limit. `vary_accept` sits outside the panic catcher and the request budget, so their 500 and
 /// 503 answers carry `Vary: accept` too, and inside the CORS layer, which appends its own `Vary`
-/// values.
+/// values. A request that the HTTP server refuses itself never reaches this router: on an HTTP/1.1
+/// connection, a request-target over 65 534 bytes gets its bare 414 (decision M6), a malformed
+/// request head its bare 400 and a head of more than 100 header fields its bare 431, each without
+/// a body or any header of this stack; these answers are the documented exception to the CORS and
+/// `Vary` rules.
 pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
     let (rest, _document) = api_router().split_for_parts();
     let (graphql, _document) = graphql_router().split_for_parts();

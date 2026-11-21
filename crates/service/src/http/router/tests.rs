@@ -318,10 +318,17 @@ fn widest_get(query: usize, name: usize) -> (Request<Body>, usize) {
     (request, length)
 }
 
+/// The longest request-target, the path with its query string, that the HTTP server (hyper) lets
+/// through on an HTTP/1.1 connection, in bytes: `u16::MAX - 1` (decision M6). It is not reached
+/// in process, so the test below checks it by length.
+const SERVER_TARGET_LIMIT: usize = 65_534;
+
 /// The size limit alone never refuses a `query` or an `operationName` that the document admits
 /// (FR-29): with the default `HTTP_MAX_BODY_BYTES`, a `query` and an `operationName` at their
 /// bounds, every character in its longest form, are executed on both forms, and one character
-/// more is the 422 problem, not the 413 or the 414.
+/// more is the 422 problem, not the 413, the 414 problem or the bare 414 of the HTTP server. The
+/// GET at the bounds stays within the smaller of `HTTP_MAX_BODY_BYTES` and the 65 521 bytes of
+/// query string that the HTTP server lets through after `/api/graphql?` (FR-4, decision M6).
 #[tokio::test]
 async fn the_longest_document_and_operation_name_fit_the_default_size_limit_in_any_encoding() {
     let config = config("test");
@@ -330,10 +337,18 @@ async fn the_longest_document_and_operation_name_fit_the_default_size_limit_in_a
     assert_eq!(encoded_wide(1).len(), 12);
     let body = widest_body(MAX_QUERY_CHARS, MAX_OPERATION_NAME_CHARS);
     let (get, query_string_length) = widest_get(MAX_QUERY_CHARS, MAX_OPERATION_NAME_CHARS);
+    let request_target_length = GRAPHQL_PATH
+        .len()
+        .saturating_add(1)
+        .saturating_add(query_string_length);
     assert!(body.len() <= config.max_body_bytes, "{}", body.len());
     assert!(
         query_string_length <= config.max_body_bytes,
         "{query_string_length}"
+    );
+    assert!(
+        request_target_length <= SERVER_TARGET_LIMIT,
+        "{request_target_length}"
     );
 
     let posted = send_to(&app, request(Method::POST, GRAPHQL_PATH, Some(&body))).await;

@@ -113,6 +113,15 @@ const GET_BAD_REQUEST_TEXT: &str = "The query string cannot be read: `query` is 
     parameter is given twice, or a name or a value is not percent-encoded UTF-8. The detail names \
     only the four known parameters.";
 
+/// The description of the 414 answer of `GET /api/graphql` (maintainer decision M6).
+const GET_TOO_LONG_TEXT: &str = "The query string, as received, is longer than the smaller of \
+    `HTTP_MAX_BODY_BYTES` and 65 521 bytes. The service answers this problem to a query string \
+    over `HTTP_MAX_BODY_BYTES` when that bound is below 65 521. On an HTTP/1.1 connection, the \
+    HTTP server refuses a request-target over 65 534 bytes (65 521 bytes of query string after \
+    `/api/graphql?`) itself, before the service sees the request, with a bare 414: no body, no \
+    `Content-Type` and none of the CORS or `Vary` headers of the service's answers; that limit \
+    cannot be configured.";
+
 /// The description of the 422 problem of `POST /api/graphql`.
 const POST_UNPROCESSABLE_TEXT: &str = "The body is JSON but not a GraphQL request: not an object, \
     without a string `query`, or with a member of the wrong type. Else `query` or `operationName` \
@@ -207,7 +216,10 @@ pub async fn execute(
 ///
 /// With the event stream, the operation is the one of the query string (`query`, `operationName`,
 /// `variables`, `extensions`), refused before any stream with the 414, 400 or 422 problem of
-/// FR-4, and the `Last-Event-ID` header is the cursor of a subscription, as on POST.
+/// FR-4, and the `Last-Event-ID` header is the cursor of a subscription, as on POST. The query
+/// string read is at most the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes: on an HTTP/1.1
+/// connection, a request-target over 65 534 bytes gets the bare 414 of the HTTP server and never
+/// reaches this handler (decision M6).
 #[utoipa::path(
     get,
     path = GRAPHQL_PATH,
@@ -229,7 +241,7 @@ pub async fn execute(
         (status = 405, description = "A GET that does not negotiate the event stream, outside `dev`.", body = Problem, content_type = "application/problem+json",
             headers(("Allow" = String, description = "`POST`.")),
             example = json!(Problem::new(StatusCode::METHOD_NOT_ALLOWED))),
-        (status = 414, description = "The query string is longer than `HTTP_MAX_BODY_BYTES` as received.", body = Problem, content_type = "application/problem+json",
+        (status = 414, description = GET_TOO_LONG_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(problem_example(StatusCode::URI_TOO_LONG, TOO_LONG_DETAIL))),
         (status = 422, description = GET_UNPROCESSABLE_TEXT,
             body = Problem, content_type = "application/problem+json", example = json!(not_an_object_example())),
@@ -267,7 +279,9 @@ fn serves_explorer(schema: &ApiSchema) -> bool {
 /// The event stream of the operation in the query string `query` of a GET that negotiated it, or
 /// the problem that refuses the query string: the 500 problem of a schema without the
 /// `QueryStringLimit`, then the 414, 400 and 422 problems of `query_string::read`, then the 422
-/// problem of a member longer than its bound (FR-4, FR-6, FR-29).
+/// problem of a member longer than its bound (FR-4, FR-6, FR-29). The 414 problem answers a query
+/// string over `HTTP_MAX_BODY_BYTES` set below 65 521 bytes; above 65 521 bytes the HTTP server
+/// answers its bare 414 first on an HTTP/1.1 connection (decision M6).
 async fn stream_query_string(
     schema: &ApiSchema,
     headers: &HeaderMap,

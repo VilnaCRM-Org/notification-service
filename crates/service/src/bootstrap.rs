@@ -247,8 +247,9 @@ pub fn application(adapters: Adapters, config: &Config) -> Result<Application, B
 
 /// The health service over `probes` and the probe of the event stream, the `GraphQL` schema and
 /// the router with its middleware. The schema data holds the state of the event stream, the bound
-/// of a GET query string, `HTTP_MAX_BODY_BYTES` (FR-4), and whether a GET that does not negotiate
-/// the event stream gets the explorer page, in `dev` only (FR-5).
+/// of a GET query string, `HTTP_MAX_BODY_BYTES` (FR-4), which applies below the 65 521 bytes the
+/// HTTP server lets through on an HTTP/1.1 connection (decision M6), and whether a GET that does
+/// not negotiate the event stream gets the explorer page, in `dev` only (FR-5).
 fn assemble_router(
     event_stream: EventStreamState,
     mut probes: Vec<Arc<dyn HealthProbe>>,

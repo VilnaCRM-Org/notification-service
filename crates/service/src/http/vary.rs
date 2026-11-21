@@ -13,6 +13,8 @@ use crate::http::router::GRAPHQL_PATH;
 
 /// Sets `Vary: accept` on every answer to a GET or HEAD of `/api/graphql`, also on the 503 of
 /// the request budget and the 500 of the panic catcher; other requests pass unchanged (FR-5).
+/// The bare answers of the HTTP server, such as its 414 to a request-target over 65 534 bytes on
+/// an HTTP/1.1 connection, are not answers of this stack and carry no `Vary` (decision M6).
 ///
 /// It uses `insert`: inside the CORS layer the only `Vary` value an answer can hold is the
 /// `vary: accept` of an event-stream head, so the value is never repeated, and the CORS layer then
