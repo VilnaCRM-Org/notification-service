@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use health_check_domain::Dependency;
 use http_body_util::BodyExt as _;
 use serde_json::Value;
@@ -774,11 +774,14 @@ fn assert_same_answer(left: &Answer, right: &Answer, without: &[&str], route: &s
     );
 }
 
+/// Whether `headers` hold a CORS header: an `access-control-*` header, or a `vary` header that
+/// lists `origin`. The `vary: accept` that every answer to a GET of the `GraphQL` path carries is
+/// not one (NFR-17).
 fn has_cors_headers(headers: &HeaderMap) -> bool {
     headers
         .keys()
         .any(|name| name.as_str().starts_with("access-control-"))
-        || headers.contains_key(header::VARY)
+        || vary_values(headers).iter().any(|value| value == "origin")
 }
 
 #[tokio::test(start_paused = true)]
@@ -1112,11 +1115,9 @@ async fn a_websocket_handshake_of_the_event_stream_from_a_refused_origin_is_the_
 
 /// Every `vary` value of `headers`, split at the commas, trimmed and in lower case, in order.
 fn vary_values(headers: &HeaderMap) -> Vec<String> {
-    headers
-        .get_all(header::VARY)
+    header_list(headers, &header::VARY)
         .iter()
-        .flat_map(|value| value.to_str().unwrap().split(','))
-        .map(|value| value.trim().to_ascii_lowercase())
+        .map(|value| value.to_ascii_lowercase())
         .collect()
 }
 
@@ -1913,4 +1914,508 @@ async fn a_get_with_sse_on_a_schema_without_the_query_string_limit_is_the_500_pr
         r#"{"type":"about:blank","title":"Internal Server Error","status":500}"#
     );
     assert_eq!(vary_values(&answer.headers), ["accept"]);
+}
+
+// ---- browser access to both forms of the GraphQL path (FR-21, NFR-17) ----
+
+#[rstest::rstest]
+#[case::no_header(&[], false)]
+#[case::vary_accept_alone(&[("vary", "accept")], false)]
+#[case::the_head_of_an_event_stream(
+    &[("content-type", "text/event-stream"), ("cache-control", "no-cache"), ("vary", "accept")],
+    false
+)]
+#[case::a_vary_value_that_only_contains_the_word(&[("vary", "accept, x-origin")], false)]
+#[case::vary_origin(&[("vary", "origin")], true)]
+#[case::vary_accept_and_origin(&[("vary", "accept, origin")], true)]
+#[case::vary_origin_in_a_field_of_its_own(&[("vary", "accept"), ("vary", "Origin")], true)]
+#[case::the_vary_of_every_preflight_request_header(
+    &[("vary", "origin, access-control-request-method, access-control-request-headers")],
+    true
+)]
+#[case::an_access_control_header(&[("access-control-allow-origin", "*")], true)]
+#[case::the_max_age_of_a_preflight(&[("access-control-max-age", "600")], true)]
+fn a_cors_header_is_an_access_control_header_or_a_vary_value_origin(
+    #[case] pairs: &[(&str, &str)],
+    #[case] expected: bool,
+) {
+    let mut headers = HeaderMap::new();
+    for (name, value) in pairs {
+        headers.append(
+            name.parse::<HeaderName>().unwrap(),
+            value.parse::<HeaderValue>().unwrap(),
+        );
+    }
+
+    assert_eq!(has_cors_headers(&headers), expected, "{pairs:?}");
+}
+
+/// An origin that the allow-list of [`ORIGIN`] does not hold.
+const OTHER_ORIGIN: &str = "https://other.example.com";
+
+/// The allow-list that holds [`ORIGIN`] only.
+fn only_the_origin() -> crate::config::AllowedOrigins {
+    crate::config::AllowedOrigins::List(vec![ORIGIN.parse().unwrap()])
+}
+
+/// A value of `CORS_ALLOWED_ORIGINS` and what its answers carry.
+struct AllowList {
+    origins: crate::config::AllowedOrigins,
+    /// The `Access-Control-Allow-Origin` of an answer to [`ORIGIN`].
+    allowed: &'static str,
+    /// The `Access-Control-Allow-Origin` of an answer to [`OTHER_ORIGIN`], if any.
+    to_others: Option<&'static str>,
+    /// Whether its answers list `origin` in `vary`: an answer that names the origin depends on it,
+    /// so a cache must keep the answers to different origins apart; an answer of `*` does not.
+    varies: bool,
+}
+
+/// The allow-list of [`ORIGIN`]: its answers name the origin and vary on it, and its answers to
+/// [`OTHER_ORIGIN`] carry no `Access-Control-Allow-Origin`.
+fn the_origin_alone() -> AllowList {
+    AllowList {
+        origins: only_the_origin(),
+        allowed: ORIGIN,
+        to_others: None,
+        varies: true,
+    }
+}
+
+/// The allow-lists of the CORS cases: [`the_origin_alone`] and `*`, whose answers to every origin
+/// carry `*`.
+fn allow_lists() -> [AllowList; 2] {
+    [
+        the_origin_alone(),
+        AllowList {
+            origins: crate::config::AllowedOrigins::Any,
+            allowed: "*",
+            to_others: Some("*"),
+            varies: false,
+        },
+    ]
+}
+
+/// The values of every `name` field of `headers`, split at the commas and trimmed, in order.
+fn header_list(headers: &HeaderMap, name: &HeaderName) -> Vec<String> {
+    headers
+        .get_all(name)
+        .iter()
+        .flat_map(|value| value.to_str().unwrap().split(','))
+        .map(|value| value.trim().to_owned())
+        .collect()
+}
+
+/// Asserts that no header of an answer allows credentials and none exposes a response header.
+fn assert_no_credentials_and_no_exposed_header(headers: &HeaderMap, route: &str) {
+    assert!(
+        !headers.contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+        "{route}: {headers:?}"
+    );
+    assert!(
+        !headers.contains_key(header::ACCESS_CONTROL_EXPOSE_HEADERS),
+        "{route}: {headers:?}"
+    );
+}
+
+/// Asserts that a page of [`ORIGIN`], allowed by `list`, can read `answer`: its
+/// `Access-Control-Allow-Origin` is the one of `list`, its `vary` lists `origin` exactly when
+/// `list` varies and lists `accept` exactly `accepts` times, and no header allows credentials or
+/// exposes a response header.
+fn assert_readable_by_the_page(answer: &Answer, list: &AllowList, accepts: usize, route: &str) {
+    assert_eq!(
+        answer.headers[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        list.allowed,
+        "{route}"
+    );
+    let values = vary_values(&answer.headers);
+    assert_eq!(
+        values.iter().any(|value| value == "origin"),
+        list.varies,
+        "{route}: {values:?}"
+    );
+    assert_eq!(
+        values.iter().filter(|value| *value == "accept").count(),
+        accepts,
+        "{route}: {values:?}"
+    );
+    assert_no_credentials_and_no_exposed_header(&answer.headers, route);
+}
+
+/// The preflight of the POST form from [`ORIGIN`] with the request headers `request_headers`.
+fn post_preflight(request_headers: &str) -> Request<Body> {
+    Request::options(GRAPHQL_PATH)
+        .header(header::ORIGIN, ORIGIN)
+        .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+        .header(header::ACCESS_CONTROL_REQUEST_HEADERS, request_headers)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_preflight_of_the_post_form_allows_both_forms_to_an_allowed_origin() {
+    for list in allow_lists() {
+        for app_env in ["dev", "test", "prod"] {
+            let mut allowing = config(app_env);
+            allowing.allowed_origins = list.origins.clone();
+            let app = router(adapters(), &allowing).unwrap();
+            for request_headers in ["content-type", "content-type, last-event-id"] {
+                let route = format!("{} {app_env} {request_headers}", list.allowed);
+
+                let answer = send_to(&app, post_preflight(request_headers)).await;
+
+                assert_eq!(answer.status, StatusCode::OK, "{route}");
+                assert_eq!(answer.body, "", "{route}");
+                // The CORS layer answers a preflight itself, so `vary_accept` never sees it.
+                assert_readable_by_the_page(&answer, &list, 0, &route);
+                assert_eq!(
+                    header_list(&answer.headers, &header::ACCESS_CONTROL_ALLOW_METHODS),
+                    ["GET", "POST"],
+                    "{route}"
+                );
+                assert_eq!(
+                    header_list(&answer.headers, &header::ACCESS_CONTROL_ALLOW_HEADERS)
+                        .iter()
+                        .map(|name| name.to_ascii_lowercase())
+                        .collect::<Vec<_>>(),
+                    ["content-type", "last-event-id"],
+                    "{route}"
+                );
+                assert_eq!(
+                    answer.headers[header::ACCESS_CONTROL_MAX_AGE],
+                    "600",
+                    "{route}"
+                );
+                assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, &route);
+            }
+        }
+    }
+}
+
+/// The bound of the query string and of the body of the CORS cases, which the query string of the
+/// 414 case exceeds.
+const FORM_BYTES: usize = 1024;
+
+/// The body of the subscription of the POST form.
+const POST_SUBSCRIPTION: &str =
+    r#"{"query":"subscription { events(types: [\"user.created\"]) { id type } }"}"#;
+
+/// A request of one form of the `GraphQL` path that negotiates the event stream: method, path and
+/// query string, content type, body and the status of its answer.
+type FormCase = (
+    Method,
+    String,
+    Option<&'static str>,
+    Option<String>,
+    StatusCode,
+);
+
+/// The subscription of each form, which a started node answers with the event-stream head.
+fn event_streams_of_both_forms() -> [FormCase; 2] {
+    [
+        (
+            Method::POST,
+            GRAPHQL_PATH.to_owned(),
+            Some("application/json"),
+            Some(POST_SUBSCRIPTION.to_owned()),
+            StatusCode::OK,
+        ),
+        (
+            Method::GET,
+            format!("{GRAPHQL_PATH}?{GET_SUBSCRIPTION}"),
+            None,
+            None,
+            StatusCode::OK,
+        ),
+    ]
+}
+
+/// The requests of both forms that a node which never starts, bounded by [`FORM_BYTES`], answers
+/// with a problem: the 503 problem of the refused subscriber of each form (FR-16), the transport
+/// problems 415, 422 and 400 of the POST form and 414, 400 and 422 of the GET form (FR-6).
+fn refusals_of_both_forms() -> Vec<FormCase> {
+    let json = Some("application/json");
+    vec![
+        (
+            Method::POST,
+            GRAPHQL_PATH.to_owned(),
+            json,
+            Some(POST_SUBSCRIPTION.to_owned()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            Method::GET,
+            format!("{GRAPHQL_PATH}?{GET_SUBSCRIPTION}"),
+            None,
+            None,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            Method::POST,
+            GRAPHQL_PATH.to_owned(),
+            Some("text/plain"),
+            Some(POST_SUBSCRIPTION.to_owned()),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            Method::POST,
+            GRAPHQL_PATH.to_owned(),
+            json,
+            Some(r#"{"variables":{}}"#.to_owned()),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            Method::POST,
+            GRAPHQL_PATH.to_owned(),
+            json,
+            Some("{".to_owned()),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Method::GET,
+            format!("{GRAPHQL_PATH}?query={}", "x".repeat(FORM_BYTES)),
+            None,
+            None,
+            StatusCode::URI_TOO_LONG,
+        ),
+        (
+            Method::GET,
+            format!("{GRAPHQL_PATH}?query=%ZZ"),
+            None,
+            None,
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Method::GET,
+            format!("{GRAPHQL_PATH}?{GET_SUBSCRIPTION}&variables=1"),
+            None,
+            None,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ]
+}
+
+/// The request of `case` with `Accept: text/event-stream`, from `origin` when there is one.
+fn form_request(case: &FormCase, origin: Option<&str>) -> Request<Body> {
+    let (method, uri, content_type, body, _) = case;
+    let mut builder = Request::builder()
+        .method(method.clone())
+        .uri(uri.as_str())
+        .header(header::ACCEPT, "text/event-stream");
+    if let Some(content_type) = content_type {
+        builder = builder.header(header::CONTENT_TYPE, *content_type);
+    }
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
+    builder
+        .body(body.clone().map_or_else(Body::empty, Body::from))
+        .unwrap()
+}
+
+/// The route of `case` in the messages of the CORS tests.
+fn form_route(case: &FormCase) -> String {
+    let (method, uri, content_type, _, status) = case;
+    format!("{method} {uri} {content_type:?} {status}")
+}
+
+/// A node that never starts, bounded by [`FORM_BYTES`], with the allow-list `origins`.
+fn refusing_router(origins: crate::config::AllowedOrigins) -> Router {
+    let mut refusing = config_with_origins(origins);
+    refusing.max_body_bytes = FORM_BYTES;
+    router(adapters(), &refusing).unwrap()
+}
+
+#[tokio::test]
+async fn an_allowed_origin_reads_the_problems_of_both_forms() {
+    let unset = refusing_router(crate::config::AllowedOrigins::NoOrigin);
+    for list in allow_lists() {
+        let app = refusing_router(list.origins.clone());
+        for case in refusals_of_both_forms() {
+            let route = format!("{} {}", list.allowed, form_route(&case));
+            let accepts = usize::from(case.0 == Method::GET);
+
+            let answer = send_to(&app, form_request(&case, Some(ORIGIN))).await;
+            let other = send_to(&app, form_request(&case, Some(OTHER_ORIGIN))).await;
+            let baseline = send_to(&unset, form_request(&case, None)).await;
+
+            assert_eq!(answer.status, case.4, "{route}: {}", answer.body);
+            assert_eq!(
+                answer.headers[header::CONTENT_TYPE],
+                "application/problem+json",
+                "{route}"
+            );
+            assert_readable_by_the_page(&answer, &list, accepts, &route);
+            // The CORS layer changes nothing but `vary` and `Access-Control-Allow-Origin`.
+            assert_same_answer(
+                &answer,
+                &baseline,
+                &["vary", "access-control-allow-origin"],
+                &route,
+            );
+            assert_eq!(other.status, case.4, "{route}");
+            assert_eq!(
+                other
+                    .headers
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .map(|value| value.to_str().unwrap()),
+                list.to_others,
+                "{route}"
+            );
+            assert_no_credentials_and_no_exposed_header(&other.headers, &route);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_allowed_origin_reads_the_event_stream_of_both_forms() {
+    for list in allow_lists() {
+        let (app, running) = started(&config_with_origins(list.origins.clone())).await;
+        for case in event_streams_of_both_forms() {
+            let route = format!("{} {}", list.allowed, form_route(&case));
+
+            let answer = head(&app, form_request(&case, Some(ORIGIN))).await;
+            let other = head(&app, form_request(&case, Some(OTHER_ORIGIN))).await;
+
+            assert_eq!(answer.status, StatusCode::OK, "{route}");
+            assert_eq!(
+                answer.headers[header::CONTENT_TYPE],
+                "text/event-stream",
+                "{route}"
+            );
+            assert_readable_by_the_page(&answer, &list, 1, &route);
+            assert_eq!(other.status, StatusCode::OK, "{route}");
+            assert_eq!(
+                other.headers[header::CONTENT_TYPE],
+                "text/event-stream",
+                "{route}"
+            );
+            assert_eq!(
+                other
+                    .headers
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .map(|value| value.to_str().unwrap()),
+                list.to_others,
+                "{route}"
+            );
+            assert_no_credentials_and_no_exposed_header(&other.headers, &route);
+        }
+        tokio::time::timeout(LIMIT, running.shutdown())
+            .await
+            .expect("the shutdown ends");
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_get_form_is_served_to_an_allowed_origin_as_an_event_source_sends_it_without_a_preflight()
+ {
+    let (app, running, topic) = started_on_topic(&config_with_origins(only_the_origin())).await;
+    let ids: Vec<String> = (1..=2)
+        .map(|n| {
+            topic
+                .append(Some(record(n, "user.created", 0)))
+                .sequence()
+                .to_string()
+        })
+        .collect();
+    window_reaches(&app, 2).await;
+    // The headers of an `EventSource` request: `Origin`, `Accept: text/event-stream` and, on
+    // reconnect, `Last-Event-ID`, all set by the browser, which sends no preflight before it. No
+    // `OPTIONS` reaches the node before either GET.
+    let connect = [("origin", ORIGIN), ("accept", "text/event-stream")];
+    let reconnect = [
+        ("origin", ORIGIN),
+        ("accept", "text/event-stream"),
+        ("last-event-id", ids[0].as_str()),
+    ];
+
+    let first = head_of(
+        &app,
+        graphql_request(Method::GET, GET_SUBSCRIPTION, &connect),
+    )
+    .await;
+    let again = head_of(
+        &app,
+        graphql_request(Method::GET, GET_SUBSCRIPTION, &reconnect),
+    )
+    .await;
+
+    for (response, name) in [(&first, "connect"), (&again, "reconnect")] {
+        let answer = Answer {
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: String::new(),
+        };
+        assert_eq!(answer.status, StatusCode::OK, "{name}");
+        assert_eq!(
+            answer.headers[header::CONTENT_TYPE],
+            "text/event-stream",
+            "{name}"
+        );
+        assert_readable_by_the_page(&answer, &the_origin_alone(), 1, name);
+    }
+    let mut first = first.into_body();
+    assert_eq!(next_chunk(&mut first).await, ":\n\n");
+    let mut again = again.into_body();
+    assert_eq!(next_chunk(&mut again).await, ":\n\n");
+    let block = next_chunk(&mut again).await;
+    assert!(
+        block.starts_with(&format!("event: next\nid: {}\n", ids[1])),
+        "{block}"
+    );
+    drop(first);
+    drop(again);
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_allowed_origins_no_answer_of_either_form_carries_a_cors_header() {
+    let app = refusing_router(crate::config::AllowedOrigins::NoOrigin);
+    for case in refusals_of_both_forms() {
+        let route = form_route(&case);
+        let accepts: &[&str] = if case.0 == Method::GET {
+            &["accept"]
+        } else {
+            &[]
+        };
+
+        let with = send_to(&app, form_request(&case, Some(ORIGIN))).await;
+        let without = send_to(&app, form_request(&case, None)).await;
+
+        assert_eq!(with.status, case.4, "{route}: {}", with.body);
+        assert!(!has_cors_headers(&with.headers), "{route}");
+        assert_eq!(vary_values(&with.headers), accepts, "{route}");
+        assert_same_answer(&with, &without, &[], &route);
+    }
+
+    let preflight = send_to(&app, post_preflight("content-type, last-event-id")).await;
+
+    assert_eq!(preflight.status, StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(preflight.headers[header::ALLOW], "GET,HEAD,POST");
+    assert_eq!(
+        preflight.body,
+        r#"{"type":"about:blank","title":"Method Not Allowed","status":405}"#
+    );
+    assert!(!has_cors_headers(&preflight.headers));
+    assert!(!preflight.headers.contains_key(header::VARY));
+
+    let (app, running) = started(&config("test")).await;
+    for case in event_streams_of_both_forms() {
+        let route = form_route(&case);
+
+        let answer = head(&app, form_request(&case, Some(ORIGIN))).await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{route}");
+        assert_eq!(
+            answer.headers[header::CONTENT_TYPE],
+            "text/event-stream",
+            "{route}"
+        );
+        assert!(!has_cors_headers(&answer.headers), "{route}");
+        assert_eq!(vary_values(&answer.headers), ["accept"], "{route}");
+    }
+    tokio::time::timeout(LIMIT, running.shutdown())
+        .await
+        .expect("the shutdown ends");
 }
