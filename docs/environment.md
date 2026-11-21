@@ -6,7 +6,7 @@ A service that adds variables for its own adapters adds their rows here. The syn
 
 ## Service settings
 
-"Required" means the command fails with exit status 2 when the variable is missing. Durations use the `humantime` syntax (`500ms`, `2s`, `1m`).
+"Required" means the command fails with exit status 2 when the variable is missing. A duration is one or more numbers, each with a unit: `h`, `m` (minutes), `s`, `ms`, `us` or `ns`, or a long name such as `min` or `seconds`, the largest unit first, for example `500ms`, `2s`, `1m` or `1m30s`; `0` alone stands for zero, and units of days and longer are refused.
 
 | Name | Type | Default | Required | Consumer | PHP name |
 | --- | --- | --- | --- | --- | --- |

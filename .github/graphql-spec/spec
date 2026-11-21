@@ -1,3 +1,13 @@
+"An event of a subscribed type: the same object as a WebSocket frame."
+type Event {
+  "The event object the producer wrote: envelope id, type, occurredAt and data."
+  data: JSON!
+  "Event id: the Kafka offset of the event plus one, in decimal; the cursor of a resume."
+  id: String!
+  "Event type name."
+  type: String!
+}
+
 "The status of the event stream on the answering instance; 64-bit values are decimal strings."
 type EventStreamStatus {
   "Whether the last read of the topic watermarks succeeded."
@@ -32,6 +42,9 @@ type EventType {
   name: String!
 }
 
+"A scalar that can represent any JSON value."
+scalar JSON
+
 "Query root."
 type Query {
   "Retrieves the status of the event stream on the answering instance."
@@ -40,10 +53,17 @@ type Query {
   eventTypes(itemsPerPage: Int! = 30, page: Int! = 1): [EventType!]!
 }
 
+"Subscription root."
+type Subscription {
+  "Streams every event of the listed types (1 to 100 names); with lastEventId or the Last-Event-ID header, every retained event after that id comes first."
+  events(lastEventId: String, types: [String!]!): Event!
+}
+
 "Directs the executor to include this field or fragment only when the `if` argument is true."
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 "Directs the executor to skip this field or fragment when the `if` argument is true."
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
 schema {
   query: Query
+  subscription: Subscription
 }

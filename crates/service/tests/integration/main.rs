@@ -13,6 +13,8 @@ mod cluster;
 #[cfg(test)]
 mod export;
 #[cfg(test)]
+mod graphql_sse;
+#[cfg(test)]
 mod healthcheck;
 #[cfg(test)]
 mod limit;

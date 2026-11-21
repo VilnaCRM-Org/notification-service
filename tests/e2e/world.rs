@@ -1,6 +1,7 @@
 //! The world of a scenario: injected faults, the configured event types and variables, the last
 //! response, and the event stream of a scenario: a topic of its own on the broker of the stack with
-//! a producer, a node that reads it, and the SSE and WebSocket clients of that node.
+//! a producer, a node that reads it, and the SSE, WebSocket and GraphQL event-stream clients of
+//! that node.
 //!
 //! Without a node of its own, a new application instance is built for every request; its tail
 //! reads the topic `notifications` of the broker of the stack, and the request is sent once the
@@ -14,6 +15,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::http::request::Builder as RequestBuilder;
 use axum::http::{HeaderMap, Request, StatusCode, header};
 use clap::{CommandFactory as _, Parser as _};
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -22,7 +24,7 @@ use http_body_util::BodyExt as _;
 use krafka::Kafka;
 use krafka::admin::{CreateTopicsOptions, DeleteTopicsOptions, NewTopic};
 use krafka::producer::{Acks, Producer, Record};
-use serde_json::Value;
+use serde_json::{Value, json};
 use service::background::Running;
 use service::bootstrap::{Adapters, application};
 use service::cli::{Cli, Command};
@@ -30,6 +32,7 @@ use service::config::Config;
 use test_support::probe::StubProbe;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use tower::ServiceExt as _;
@@ -79,6 +82,12 @@ const BARRIER: &str = "barrier";
 /// The value of a record that is not an event: it is not JSON.
 const INVALID_RECORD: &str = "this record is not an event";
 
+/// The media type that negotiates an event stream, and the content type of its head.
+const EVENT_STREAM: &str = "text/event-stream";
+
+/// The path of the GraphQL operations.
+const GRAPHQL_PATH: &str = "/api/graphql";
+
 /// The bootstrap servers of the broker of the stack.
 #[expect(
     clippy::disallowed_methods,
@@ -89,7 +98,8 @@ fn stack_broker() -> String {
         .expect("KAFKA_BOOTSTRAP_SERVERS is not set; run the suite through `make e2e-tests`")
 }
 
-/// What the last request answered.
+/// What the last request answered. The body of an event-stream answer of the GraphQL path stays
+/// unread in the GraphQL stream of the scenario, so its `body` here is empty.
 #[derive(Debug)]
 pub(crate) struct Reply {
     pub(crate) status: u16,
@@ -101,6 +111,12 @@ impl Reply {
     /// The body as JSON, `Null` when it is not JSON.
     pub(crate) fn json(&self) -> Value {
         serde_json::from_str(&self.body).unwrap_or(Value::Null)
+    }
+
+    /// True when the head announces an event stream: the one rule by which the world opens the
+    /// GraphQL stream of an answer and the steps judge its head.
+    pub(crate) fn is_event_stream(&self) -> bool {
+        is_event_stream(&self.headers)
     }
 }
 
@@ -156,7 +172,67 @@ impl SseEvent {
     }
 }
 
-/// An open SSE response of the node, and the bytes read from it that do not end a frame yet.
+/// One block of an event stream of the GraphQL path as a client reads it: the lines up to the
+/// empty line that ends it, comments included.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct StreamBlock {
+    /// The bytes of the block, its closing empty line included.
+    pub(crate) text: String,
+    /// The `event` field.
+    pub(crate) event: Option<String>,
+    /// The `id` field.
+    pub(crate) id: Option<String>,
+    /// The `data` fields, joined by line breaks; `Some("")` for a bare `data:` line.
+    pub(crate) data: Option<String>,
+    /// The comment lines, each without its leading colon.
+    pub(crate) comments: Vec<String>,
+}
+
+impl StreamBlock {
+    /// The fields and comments of `text`, one whole block; a field other than `event`, `id` and
+    /// `data` fails the step.
+    fn parse(text: String) -> Self {
+        let mut block = Self::default();
+        for line in text.lines().filter(|line| !line.is_empty()) {
+            block.read_line(line);
+        }
+        block.text = text;
+        block
+    }
+
+    /// Takes one non-empty line of the block: a comment when it starts with a colon, else a field
+    /// whose value follows the first colon and one optional space.
+    fn read_line(&mut self, line: &str) {
+        if let Some(comment) = line.strip_prefix(':') {
+            self.comments.push(comment.to_owned());
+            return;
+        }
+        let (field, value) = line.split_once(':').unwrap_or((line, ""));
+        let value = value.strip_prefix(' ').unwrap_or(value).to_owned();
+        match field {
+            "event" => self.event = Some(value),
+            "id" => self.id = Some(value),
+            "data" => {
+                self.data = Some(match self.data.take() {
+                    Some(data) => format!("{data}\n{value}"),
+                    None => value,
+                });
+            }
+            other => panic!("unexpected field {other:?} in a GraphQL stream line {line:?}"),
+        }
+    }
+
+    /// True for a block of comments only, such as the keep-alive.
+    pub(crate) const fn is_comment(&self) -> bool {
+        self.event.is_none()
+            && self.id.is_none()
+            && self.data.is_none()
+            && !self.comments.is_empty()
+    }
+}
+
+/// An open event stream of the node, of the SSE route or of the GraphQL path, and the bytes read
+/// from it that do not end a block yet.
 ///
 /// The body is `Send` but not `Sync`; behind the mutex the world stays `Sync`, so the futures of
 /// the steps that borrow it stay `Send`. The body is only reached through `Mutex::get_mut`, so no
@@ -168,6 +244,55 @@ struct SseStream {
 }
 
 impl SseStream {
+    /// An open stream over the unread `body` of an answer.
+    const fn new(body: Body) -> Self {
+        Self {
+            body: Mutex::new(body),
+            unread: Vec::new(),
+        }
+    }
+
+    /// The next whole block of the stream, comments included, within [`STREAM_TIMEOUT`]; `None`
+    /// once the body ended, which must be at the end of a block.
+    async fn next_block(&mut self) -> Option<String> {
+        bounded(async {
+            loop {
+                if let Some(block) = self.take_block() {
+                    return Some(block);
+                }
+                if !self.read_frame().await {
+                    assert!(
+                        self.unread.is_empty(),
+                        "the stream ended inside a block: {:?}",
+                        String::from_utf8_lossy(&self.unread)
+                    );
+                    return None;
+                }
+            }
+        })
+        .await
+    }
+
+    /// Reads the next frame of the body into the unread bytes; false once the body ended.
+    async fn read_frame(&mut self) -> bool {
+        let body = self.body.get_mut().expect("the body is never locked");
+        let Some(frame) = body.frame().await else {
+            return false;
+        };
+        if let Ok(data) = frame.expect("the stream is readable").into_data() {
+            self.unread.extend_from_slice(&data);
+        }
+        true
+    }
+
+    /// The first whole block of the bytes read, its closing empty line included, when there is
+    /// one.
+    fn take_block(&mut self) -> Option<String> {
+        let end = self.unread.windows(2).position(|pair| pair == b"\n\n")?;
+        let block: Vec<u8> = self.unread.drain(..end.saturating_add(2)).collect();
+        Some(String::from_utf8(block).expect("event-stream blocks are UTF-8"))
+    }
+
     /// The next event of the stream, within [`STREAM_TIMEOUT`] for the whole wait: keep-alives are
     /// passed over and do not extend it.
     async fn next_event(&mut self) -> SseEvent {
@@ -176,15 +301,8 @@ impl SseStream {
                 if let Some(event) = self.take_event() {
                     return event;
                 }
-                let body = self.body.get_mut().expect("the body is never locked");
-                let frame = body
-                    .frame()
-                    .await
-                    .expect("the SSE stream stays open")
-                    .expect("the SSE stream is readable");
-                if let Ok(data) = frame.into_data() {
-                    self.unread.extend_from_slice(&data);
-                }
+                let open = self.read_frame().await;
+                assert!(open, "the SSE stream stays open");
             }
         })
         .await
@@ -192,10 +310,8 @@ impl SseStream {
 
     /// The first whole event of the bytes read, when there is one.
     fn take_event(&mut self) -> Option<SseEvent> {
-        while let Some(end) = self.unread.windows(2).position(|pair| pair == b"\n\n") {
-            let block: Vec<u8> = self.unread.drain(..end.saturating_add(2)).collect();
-            let text = std::str::from_utf8(&block).expect("SSE frames are UTF-8");
-            if let Some(event) = SseEvent::parse(text) {
+        while let Some(block) = self.take_block() {
+            if let Some(event) = SseEvent::parse(&block) {
                 return Some(event);
             }
         }
@@ -355,6 +471,15 @@ pub(crate) struct AppWorld {
     /// The id of the last SSE event received, kept across a disconnect.
     last_id: Option<String>,
     websocket: Option<WebSocket>,
+    /// The `Origin` header of the GraphQL requests over an event stream of the scenario, when it
+    /// sets one; a request sent with [`Self::send`] never carries it.
+    origin: Option<String>,
+    /// The event stream of the last GraphQL request that was answered with one.
+    graphql: Option<SseStream>,
+    /// When the last GraphQL request over an event stream was sent.
+    graphql_sent: Option<Instant>,
+    /// The id of the last GraphQL subscription result received, kept across a disconnect.
+    graphql_last_id: Option<String>,
 }
 
 /// The configuration as the binary reads it from the environment and the extra flags.
@@ -411,6 +536,27 @@ fn envelope(number: usize, event_type: &str) -> String {
 /// The id in the string member `field` of a status, `None` when it is null.
 fn id_field(status: &Value, field: &str) -> Option<u64> {
     status.get(field)?.as_str()?.parse().ok()
+}
+
+/// `text` as a query-string value: every byte other than an unreserved character of RFC 3986 is
+/// percent-encoded, so `+` and the space never reach the decoder unencoded.
+fn percent_encoded(text: &str) -> String {
+    text.bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+/// True when the head of an answer announces an event stream.
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .is_some_and(|value| value.as_bytes() == EVENT_STREAM.as_bytes())
 }
 
 /// Sends `request` to `router` and reads the whole answer, within [`ANSWER_TIMEOUT`] for the head
@@ -504,6 +650,7 @@ impl AppWorld {
     pub(crate) async fn end_event_stream(&mut self) {
         self.sse = None;
         self.websocket = None;
+        self.graphql = None;
         if let Some(node) = self.node.take() {
             node.stop().await;
         }
@@ -711,10 +858,7 @@ impl AppWorld {
             );
         }
         self.sse_path = Some(path.to_owned());
-        self.sse = Some(SseStream {
-            body: Mutex::new(body),
-            unread: Vec::new(),
-        });
+        self.sse = Some(SseStream::new(body));
     }
 
     /// The next event of the SSE stream, whose id becomes the last id received.
@@ -804,5 +948,166 @@ impl AppWorld {
             }
         })
         .await
+    }
+
+    /// Sends the next GraphQL requests over an event stream of the scenario
+    /// ([`Self::open_graphql_sse_post`], [`Self::open_graphql_sse_get`]) with `origin` in their
+    /// `Origin` header, as a page of that origin does. A request sent with [`Self::send`], such as
+    /// a GraphQL operation over JSON, carries no `Origin` header.
+    pub(crate) fn open_graphql_sse_from_origin(&mut self, origin: &str) {
+        self.origin = Some(origin.to_owned());
+    }
+
+    /// Sends `document` to the node as a GraphQL request over an event stream in the POST form: a
+    /// JSON body with the member `query` and `Accept: text/event-stream`, with `last_event_id` in
+    /// the `Last-Event-ID` header when given (FR-2, FR-3).
+    pub(crate) async fn open_graphql_sse_post(
+        &mut self,
+        document: &str,
+        last_event_id: Option<&str>,
+    ) {
+        let body = json!({ "query": document }).to_string();
+        let request = Request::post(GRAPHQL_PATH).header(header::CONTENT_TYPE, "application/json");
+        self.open_graphql_sse(request, Body::from(body), last_event_id)
+            .await;
+    }
+
+    /// Sends `document` to the node as a GraphQL request over an event stream in the GET form, as
+    /// an `EventSource` sends it: the document percent-encoded in the query parameter `query` and
+    /// `Accept: text/event-stream`, with `last_event_id` in the `Last-Event-ID` header when given
+    /// (FR-2, FR-4).
+    pub(crate) async fn open_graphql_sse_get(
+        &mut self,
+        document: &str,
+        last_event_id: Option<&str>,
+    ) {
+        let path = format!("{GRAPHQL_PATH}?query={}", percent_encoded(document));
+        self.open_graphql_sse(Request::get(path), Body::empty(), last_event_id)
+            .await;
+    }
+
+    /// Sends `request` with `body` to the node of the scenario with an event-stream `Accept`, the
+    /// cursor and the origin of the scenario. The head of the answer becomes the last reply. An
+    /// event-stream body stays unread as the GraphQL stream of the scenario; any other body, such
+    /// as a problem, is read whole into the reply, and no GraphQL stream is open.
+    async fn open_graphql_sse(
+        &mut self,
+        mut request: RequestBuilder,
+        body: Body,
+        last_event_id: Option<&str>,
+    ) {
+        request = request.header(header::ACCEPT, EVENT_STREAM);
+        if let Some(id) = last_event_id {
+            request = request.header("last-event-id", id);
+        }
+        if let Some(origin) = &self.origin {
+            request = request.header(header::ORIGIN, origin.as_str());
+        }
+        let request = request.body(body).expect("valid request");
+        self.graphql = None;
+        self.graphql_sent = Some(Instant::now());
+        let response = bounded(self.node().router.clone().oneshot(request))
+            .await
+            .expect("infallible");
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = response.into_body();
+        let text = if is_event_stream(&headers) {
+            self.graphql = Some(SseStream::new(body));
+            String::new()
+        } else {
+            let bytes = bounded(body.collect()).await.expect("body").to_bytes();
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        self.reply = Some(Reply {
+            status,
+            headers,
+            body: text,
+        });
+    }
+
+    /// True while the last GraphQL request has an open event stream.
+    pub(crate) const fn graphql_stream_is_open(&self) -> bool {
+        self.graphql.is_some()
+    }
+
+    /// The next block of the GraphQL stream, comments included, within [`STREAM_TIMEOUT`]; `None`
+    /// once the body ended. The id of a block becomes the last id received.
+    pub(crate) async fn next_graphql_block(&mut self) -> Option<StreamBlock> {
+        let block = self
+            .graphql
+            .as_mut()
+            .expect("a GraphQL stream is open")
+            .next_block()
+            .await
+            .map(StreamBlock::parse)?;
+        if block.id.is_some() {
+            self.graphql_last_id.clone_from(&block.id);
+        }
+        Some(block)
+    }
+
+    /// The next block of the GraphQL stream that is not a comment, within [`STREAM_TIMEOUT`] for
+    /// the whole wait: keep-alives are passed over and do not extend it.
+    pub(crate) async fn next_graphql_result(&mut self) -> StreamBlock {
+        bounded(async {
+            loop {
+                let block = self
+                    .next_graphql_block()
+                    .await
+                    .expect("the GraphQL stream stays open");
+                if !block.is_comment() {
+                    return block;
+                }
+            }
+        })
+        .await
+    }
+
+    /// The next block of the GraphQL stream, as [`Self::next_graphql_block`], which must come
+    /// within `limit` of when the last GraphQL request over an event stream was sent: the read
+    /// stops at that deadline and fails the step, so a late block never waits for
+    /// [`STREAM_TIMEOUT`].
+    pub(crate) async fn next_graphql_block_within(
+        &mut self,
+        limit: Duration,
+    ) -> Option<StreamBlock> {
+        let deadline = self
+            .graphql_sent
+            .expect("a GraphQL request was sent")
+            .checked_add(limit)
+            .expect("a deadline the clock can hold");
+        tokio::time::timeout_at(deadline, self.next_graphql_block())
+            .await
+            .unwrap_or_else(|_elapsed| {
+                panic!("no block of the GraphQL stream came within {limit:?} of the request")
+            })
+    }
+
+    /// How long ago the last GraphQL request over an event stream was sent.
+    pub(crate) fn since_graphql_sent(&self) -> Duration {
+        self.graphql_sent
+            .expect("a GraphQL request was sent")
+            .elapsed()
+    }
+
+    /// Closes the GraphQL stream; the last id received is kept.
+    pub(crate) fn disconnect_graphql(&mut self) {
+        assert!(self.graphql.take().is_some(), "no GraphQL stream is open");
+    }
+
+    /// The id of the last GraphQL subscription result received.
+    pub(crate) fn graphql_last_id(&self) -> String {
+        self.graphql_last_id
+            .clone()
+            .expect("the GraphQL subscription received a result")
+    }
+
+    /// The number of subscribers the status of the node of the scenario reports now.
+    pub(crate) async fn subscribers(&self) -> u64 {
+        let status = status_of(&self.node().router).await;
+        status["subscribers"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("no subscriber count in {status}"))
     }
 }

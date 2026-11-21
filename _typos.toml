@@ -7,7 +7,6 @@ extend-exclude = [
     ".git",
     ".github/openapi-spec/",
     ".github/graphql-spec/",
-    ".sqlx/",
     "Cargo.lock",
     "CHANGELOG.md",
     "LICENSE",

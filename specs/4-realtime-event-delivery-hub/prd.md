@@ -273,7 +273,7 @@ Constants and not variables, because no deployment has to tune them: the waterma
 - no crate depends on `sqlx`, and `Cargo.toml`, `Cargo.lock` and every manifest name no `sqlx` and no `some-module-*` crate;
 - `service` has no `migrate` command; `service --help`, `service serve --help` and `service check-config --help` name no `DATABASE_*` variable;
 - the composition root builds no pool, the health report has no database probe and `Dependency::Database` does not exist; `GET /api/health` reports the cache, the message broker (SQS, template) and the event stream (FR-20);
-- `migrations/` and `.sqlx/` do not exist, and no file refers to them;
+- `migrations/` and `.sqlx/` do not exist, and no file refers to them, except `.templatesyncignore`, which keeps both out of the template sync (FR-32) so that a sync never brings them back, and the documents that record their removal;
 - `service serve` and `service check-config` succeed with no database variable set.
 
 **FR-32 No database in the stack, the gates and CI.** After the removal:

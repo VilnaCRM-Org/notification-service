@@ -776,3 +776,59 @@ async fn a_router_serves_with_scripted_topic_readers_and_reads_none_of_them() {
     assert_eq!(tail.calls(), Vec::<TailCall>::new());
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
 }
+
+/// A GET subscription of [`TYPE`] with an unknown parameter that pads its query string to exactly
+/// `length` bytes.
+fn padded_get_subscription(length: usize) -> Request<Body> {
+    let query = format!(
+        "query=subscription%20%7B%20events(types%3A%20%5B%22{TYPE}%22%5D)%20%7B%20id%20%7D%20%7D&pad="
+    );
+    let query_string = format!(
+        "{query}{}",
+        "p".repeat(length.checked_sub(query.len()).unwrap())
+    );
+    assert_eq!(query_string.len(), length);
+    Request::get(format!("/api/graphql?{query_string}"))
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// The bound of a GET query string is `HTTP_MAX_BODY_BYTES`: a query string of that length is read
+/// (the subscription of a node that never starts is the 503 of the hub), and one byte more is the
+/// 414 problem; no other variable bounds it.
+#[rstest::rstest]
+#[case::a_small_limit(200)]
+#[case::a_larger_limit(4096)]
+#[tokio::test]
+async fn the_schema_bounds_a_get_query_string_with_the_body_limit(#[case] max_body_bytes: usize) {
+    let mut config = config("prod");
+    config.max_body_bytes = max_body_bytes;
+    let app = router(adapters(), &config).unwrap();
+
+    let read = send(&app, padded_get_subscription(max_body_bytes)).await;
+    let refused = send(
+        &app,
+        padded_get_subscription(max_body_bytes.checked_add(1).unwrap()),
+    )
+    .await;
+
+    assert_eq!(
+        read.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        read.body
+    );
+    assert_eq!(read.json()["detail"], "the node is starting");
+    assert_eq!(refused.status, StatusCode::URI_TOO_LONG, "{}", refused.body);
+    assert_eq!(
+        refused.json(),
+        serde_json::json!({
+            "type": "about:blank",
+            "title": "URI Too Long",
+            "status": 414,
+            "detail": "The query string is too long.",
+        })
+    );
+    assert_eq!(refused.headers[header::VARY], "accept");
+}

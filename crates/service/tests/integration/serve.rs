@@ -18,10 +18,14 @@ const DEAD_DEPENDENCIES: [(&str, &str); 3] = [
     ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
 ];
 
-/// Messages written outside a request.
-const OUTSIDE_REQUESTS: [&str; 4] = [
+/// Messages written outside a request. `event record rejected` is written by the tail task: at
+/// start-up it reads the last records of the topic of the stack (`EVENT_WINDOW_START_EVENTS`),
+/// which the suite shares with every earlier use of the stack, so records that are not events may
+/// be among them; only the tail writes that message, never a request.
+const OUTSIDE_REQUESTS: [&str; 5] = [
     "listening",
     "event tail ready",
+    "event record rejected",
     "shutdown signal received",
     "stopped",
 ];
@@ -385,8 +389,9 @@ async fn entries_inside_nested_spans_carry_the_request_id() {
 
     assert_eq!(health.status, 204, "{}", health.body);
     assert_eq!(finished.code, Some(0));
-    // The one request is the only work between the start-up marker and the signal; entries of
-    // start-up (the AWS configuration is read in spans of its own) come before the marker.
+    // The one request is the only work between the start-up marker and the signal besides the
+    // tail, whose entries are outside requests; entries of start-up (the AWS configuration is read
+    // in spans of its own) come before the marker.
     let listening = finished
         .lines
         .iter()

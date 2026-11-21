@@ -20,8 +20,8 @@ framework:
   graphql: true
 persistence:
   engine: null
-  migrations_dir: 'migrations'
-  offline_metadata: true
+  migrations_dir: null
+  offline_metadata: false
 architecture:
   crates_root: 'crates'
   composition_root: 'crates/service'
