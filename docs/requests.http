@@ -18,7 +18,7 @@ GET {{baseUrl}}/api/event-types?page=1&itemsPerPage=30
 GET {{baseUrl}}/api/events/status
 
 ### Event stream (SSE) of the listed event types: 200 text/event-stream that stays open, one frame per event, a comment line ":" after STREAM_KEEP_ALIVE without a frame; 400 for a missing types or an invalid cursor, 422 for invalid types, 503 while the node is starting, at its subscriber capacity or shutting down
-# The protocol of both streaming routes is specified in docs/streaming-protocol.md; neither route is in the OpenAPI document.
+# The protocol of both streaming routes is specified in docs/streaming-protocol.md; both are operations of the OpenAPI document, which the Swagger page at /api/docs renders.
 # Each frame is "id: <id>", "event: <type>" and "data: <event>", where <event> is {"id":"<uuid>","type":"<type>","occurredAt":"<time>","data":<data>}; deduplicate by its "id".
 # Resume after the last id received with the Last-Event-ID header or the lastEventId parameter (the header wins); 0 replays every retained event.
 GET {{baseUrl}}/api/events/stream?types=user.created,order.paid
@@ -52,6 +52,8 @@ Content-Type: application/json
 # The graphql-sse distinct connections mode: Accept must rank text/event-stream above application/json and application/graphql-response+json; any other POST keeps the JSON transport.
 # Each result is "event: next", "id: <event id>" and "data: {"data":{"events":{...}}}"; resume with the id of the last block in the Last-Event-ID header or the lastEventId argument (the header wins).
 # Invalid arguments and document errors arrive inside the stream as one "next" block with {"data":null,"errors":[...]}, then "event: complete" with a bare "data:" line.
+# Deduplicate by the envelope id data.events.data.id, not by the event id data.events.id; the service removes no duplicates.
+# Both forms, the answers before a stream, the error results and the reconnect procedure of each client are specified in docs/streaming-protocol.md, section "GraphQL subscriptions over Server-Sent Events".
 POST {{baseUrl}}/api/graphql
 Content-Type: application/json
 Accept: text/event-stream
@@ -84,6 +86,7 @@ Accept: text/event-stream
 Last-Event-ID: 0
 
 ### GraphQL query over SSE (POST): 200 text/event-stream with the comment ":", one "next" block holding the execution result, then "complete" and the end of the body
+# The result is the one the JSON transport answers; the query runs before the head, ignores Last-Event-ID, takes no subscriber slot and is never refused with a 503 by the hub.
 POST {{baseUrl}}/api/graphql
 Content-Type: application/json
 Accept: text/event-stream
