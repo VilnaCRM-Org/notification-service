@@ -116,10 +116,10 @@ Fixed messages:
 | `events lost to retention` | ERROR | `from`, `to`, `distance` | retention removed records the tail had not read yet; the tail jumped to the earliest retained offset, and the `distance` events between were lost for every client of this node; counted in `retentionLosses` |
 | `event record rejected` | WARN | `offset`, `reason` | a record that is not a valid event was skipped; `reason` is `missing value`, `value too large`, `not a JSON object with the envelope members`, `invalid id`, `invalid type` or `invalid occurredAt`; the value, key and headers are never logged; counted in `rejectedRecords` |
 | `replay capped` | INFO | `from`, `to` | a resume started at the replay floor instead of its cursor, because the cursor was more than `EVENT_REPLAY_MAX_EVENTS` below the tail; counted in `replayCapped` |
-| `replay failed` | WARN | `transport` (`sse`, `ws`), `error` | a replay below the memory window could not read Kafka, and its stream ended (WebSocket close code 1011); the client reconnects |
+| `replay failed` | WARN | `transport` (`sse`, `ws`, `graphql-sse`), `error` | a replay below the memory window could not read Kafka, and its stream ended (WebSocket close code 1011; a GraphQL subscription ends without `complete`); the client reconnects |
 | `subscribers fell behind` | WARN | `count` | once per batch of the tail in which subscribers fell more than `SUBSCRIBER_BUFFER` events behind; they catch up on their own connections |
 | `subscriber evicted` | WARN | `transport` (`ws`), `types` (the number of event types of the connection), `last_id` | a WebSocket write missed its deadline of `STREAM_KEEP_ALIVE`; best effort, because the send bound of the operating system usually ends such a connection first, without an entry |
-| `subscription rejected` | WARN | `detail` | a subscription request got a 503: `the node is starting`, `the node is at its subscriber capacity` or `the node is shutting down` |
+| `subscription rejected` | WARN | `detail` | a subscription request of any transport, a GraphQL subscription included, got a 503: `the node is starting`, `the node is at its subscriber capacity` or `the node is shutting down` |
 | `shutdown signal received` | INFO | `signal` | start of the shutdown sequence |
 | `background task failed` | ERROR | `task` (`tail`) | the tail loop died; the shutdown sequence runs and `serve` then logs `serve failed` and exits with status 1 |
 | `grace period elapsed, forcing shutdown` | WARN | `grace_period` | `serve` then exits with status 1 |
@@ -168,7 +168,7 @@ Set the orchestrator's termination timeout to at least 15 seconds, so that SIGKI
 
 ## Event stream
 
-The service delivers the events of one Kafka topic to its clients over Server-Sent Events and WebSocket; the protocol is specified in [`streaming-protocol.md`](streaming-protocol.md) and the design in [`architecture.md`](architecture.md#the-event-stream). Every node reads the whole topic itself, without a consumer group, keeps its position in memory and sends each event to its own subscribers. There is no leader and no state shared between nodes besides the topic: a node can be added, restarted or removed without configuring the others, and a client resumes on any node.
+The service delivers the events of one Kafka topic to its clients over Server-Sent Events, WebSocket and GraphQL subscriptions over Server-Sent Events on `/api/graphql`; the protocol is specified in [`streaming-protocol.md`](streaming-protocol.md) and the design in [`architecture.md`](architecture.md#the-event-stream). Every node reads the whole topic itself, without a consumer group, keeps its position in memory and sends each event to its own subscribers. There is no leader and no state shared between nodes besides the topic: a node can be added, restarted or removed without configuring the others, and a client resumes on any node.
 
 ### The topic and its one partition
 
@@ -242,7 +242,7 @@ curl -s http://localhost:8081/api/events/status | jq
 
 The service sets the socket option `TCP_USER_TIMEOUT` to `STREAM_KEEP_ALIVE` on every connection it accepts. The kernel then ends a connection whose peer leaves sent data unacknowledged, or announces a zero window, for longer than that, and the stream's slot and buffers are freed. A client that reads slowly or idles is not affected: the bound counts only while the kernel waits for the peer. WebSocket writes have a deadline of the same length. This is the only case in which the service ends a connection because of its client, and it writes no log entry for the kernel's part.
 
-The send bound works on Linux, for HTTP/1.1 connections. It does not end an SSE stream on an HTTP/2 connection that is stalled by its own flow control while the connection stays alive: such a stream keeps its slot and its buffers until its client leaves. Behind a proxy the bound acts on the proxy's connection to the service, not on the client's connection to the proxy (see [The edge proxy](#the-edge-proxy)).
+The send bound works on Linux, for HTTP/1.1 connections. It does not end an SSE stream, or a GraphQL subscription stream, on an HTTP/2 connection that is stalled by its own flow control while the connection stays alive: such a stream keeps its slot and its buffers until its client leaves. Behind a proxy the bound acts on the proxy's connection to the service, not on the client's connection to the proxy (see [The edge proxy](#the-edge-proxy)).
 
 ### Sizing a node
 
@@ -255,6 +255,8 @@ The memory of a node is bounded by its variables. Size them by this rule: `MAX_S
 | the memory window | `EVENT_WINDOW_MAX_BYTES` (default 64 MiB); the window counts each event's object and type name plus 128 bytes, which approximates the memory it holds |
 | one replay page | up to 500 events, about 1 MiB plus one record batch (the client's fetch limits are soft) |
 
+A GraphQL subscription holds what an SSE stream holds, plus the one execution result it is writing, which holds at most one copy of the event object: count it as an SSE stream.
+
 `EVENT_WINDOW_MAX_EVENTS` needs no memory budget of its own. The window charges each event its object, its type name and 128 bytes against `EVENT_WINDOW_MAX_BYTES`, so that bound caps the window's memory whatever the count bound is; raising `EVENT_WINDOW_MAX_EVENTS` (default 100 000, at most 10 000 000) adds no memory beyond it. The count bound only shortens the window further: it decides first when `EVENT_WINDOW_MAX_EVENTS` × (128 bytes + the average size of an event's object and type name) is below `EVENT_WINDOW_MAX_BYTES`.
 
 Worked example, with the estimates above: the production reference `docker-compose.prod.yml` gives the service a memory limit of 256 MiB and sets `MAX_SUBSCRIBERS` to 5 000, so the rule leaves 128 MiB. With WebSocket clients only: 5 000 × 6 KiB (about 29 MiB) + 64 MiB + 4 × 1 MiB is about 97 MiB, within the rule. With SSE clients only: 5 000 × 20 KiB (about 98 MiB) + 64 MiB + 4 MiB is about 166 MiB, above it; such a deployment lowers `EVENT_WINDOW_MAX_BYTES` to 16 MiB (`16777216`, about 118 MiB in all) or `MAX_SUBSCRIBERS` to 3 000 (about 127 MiB), or raises the memory limit.
@@ -266,11 +268,19 @@ How many subscribers one node can serve at what latency has not been measured. T
 The service speaks plain HTTP and limits streams per node, not per client. The proxy or load balancer in front of it must:
 
 - **limit connections per client address**: the service sets no limit per client, so without this one client can take every slot of a node (`MAX_SUBSCRIBERS`), and every client after it gets the 503 `the node is at its subscriber capacity`;
-- keep streams open: an idle or read time-out above `STREAM_KEEP_ALIVE`, because a keep-alive comment or a ping arrives every `STREAM_KEEP_ALIVE` and nothing else may arrive for a long time; no limit on the total duration of a response on `/api/events/stream` and `/api/events/ws`, or one long enough that the reconnects it causes do not matter;
-- not buffer `text/event-stream` responses: the service sends `x-accel-buffering: no`, which nginx honours; other proxies need their own setting;
-- pass the WebSocket upgrade (`Upgrade`, `Connection`) and the headers `Origin`, `Last-Event-ID` and `Sec-WebSocket-*` unchanged;
+- keep streams open: an idle or read time-out above `STREAM_KEEP_ALIVE`, because a keep-alive comment or a ping arrives every `STREAM_KEEP_ALIVE` and nothing else may arrive for a long time; no limit on the total duration of a response on `/api/events/stream`, `/api/events/ws` and `/api/graphql`, or one long enough that the reconnects it causes do not matter;
+- not buffer `text/event-stream` responses, on `/api/events/stream` and on `/api/graphql` alike: the service sends `x-accel-buffering: no`, which nginx honours; other proxies need their own setting;
+- pass the WebSocket upgrade (`Upgrade`, `Connection`) and the headers `Accept`, `Origin`, `Last-Event-ID` and `Sec-WebSocket-*` unchanged;
 - route new connections by readiness (`GET /api/health`) and to any node: a client may reconnect to a node other than the one it had;
 - terminate TLS and add `Strict-Transport-Security`, as for every route.
+
+**What `/api/graphql` needs.** A GraphQL subscription is an event stream on the GraphQL path, the answer to a POST or a GET whose `Accept` asks for `text/event-stream`, and a query sent the same way is a short event stream. The path therefore needs what the SSE route needs, three things in particular:
+
+- no buffering of `text/event-stream` responses on `/api/graphql`, or the results and the keep-alive comments reach the client late and in bursts;
+- an idle or read time-out above `STREAM_KEEP_ALIVE`, because a subscription writes nothing but a keep-alive comment every `STREAM_KEEP_ALIVE` while no event of its types arrives;
+- HTTP/2 between the clients and the proxy, recommended: a browser opens at most 6 HTTP/1.1 connections per origin and every open subscription holds one of them, and the service does not serve the single connection mode of graphql-sse, which would carry the subscriptions of a page on one stream (its PUT reservation gets the 405 problem). The proxy's own connections to the service can stay HTTP/1.1, which keeps the send bound working (next paragraph).
+
+A proxy that caches answers must honour the `Vary: accept` of the answers to a GET of `/api/graphql`: the same URL answers a GET with an event stream, the explorer page in `dev` or the 405 problem, depending on `Accept`.
 
 The send bound of the service acts on the connection the proxy opened to it. It ends the stream of a stalled client only when the proxy passes the back-pressure through (no response buffering) on its own HTTP/1.1 connection to the service per stream; otherwise the proxy's time-outs must end a client that takes no data.
 
