@@ -40,6 +40,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/docs/openapi.json:
     get:
       tags:
@@ -65,6 +69,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/docs/{file}:
     get:
       tags:
@@ -96,7 +104,10 @@ paths:
               schema:
                 type: string
               example: <!doctype html>
-            image/png: {}
+            image/png:
+              schema:
+                type: string
+                contentMediaType: image/png
         '400':
           description: The file name is not percent-encoded UTF-8; the detail names the `file` parameter.
           content:
@@ -124,6 +135,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/event-types:
     get:
       tags:
@@ -141,6 +156,7 @@ paths:
           format: int32
           default: 1
           minimum: 1
+        example: 1
       - name: itemsPerPage
         in: query
         description: Number of items per page.
@@ -151,6 +167,7 @@ paths:
           default: 30
           maximum: 100
           minimum: 1
+        example: 10
       responses:
         '200':
           description: EventType collection
@@ -160,24 +177,45 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/EventType'
+              example:
+              - name: load.test
+              - name: user.created
         '400':
           description: Invalid query parameter.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to deserialize query string: page: invalid digit found in string'
+                status: 400
+                title: Bad Request
+                type: about:blank
         '422':
           description: Validation failed.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: range
+                  message: itemsPerPage must be between 1 and 100
+                  propertyPath: itemsPerPage
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/events/status:
     get:
       tags:
@@ -192,12 +230,29 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EventStreamStatus'
+              example:
+                brokerReachable: true
+                endOffset: '1043'
+                lag: '0'
+                position: '1043'
+                reason: null
+                rejectedRecords: '0'
+                replayCapped: '0'
+                retentionLosses: '0'
+                state: ready
+                subscribers: 2
+                windowFirst: '0'
+                windowLast: '1043'
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/events/stream:
     get:
       tags:
@@ -302,6 +357,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/events/ws:
     get:
       tags:
@@ -469,6 +528,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/graphql:
     get:
       tags:
@@ -616,6 +679,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
     post:
       tags:
       - GraphQL
@@ -734,6 +801,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/health:
     get:
       tags:
@@ -750,12 +821,24 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: Event stream is not ready
+                failures:
+                - dependency: event_stream
+                  message: Event stream is not ready
+                status: 500
+                title: Internal Server Error
+                type: /problems/dependency-unavailable
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /ping:
     get:
       tags:
@@ -777,6 +860,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
 components:
   schemas:
     DependencyFailure:

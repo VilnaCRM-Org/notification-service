@@ -184,7 +184,8 @@ const UNAVAILABLE_TEXT: &str = "A subscription the node cannot take, because it 
             body = Problem, content_type = "application/problem+json", example = json!(not_a_graphql_request())),
         (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(unavailable_example())),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn execute(
@@ -234,7 +235,8 @@ pub async fn execute(
             body = Problem, content_type = "application/problem+json", example = json!(not_an_object_example())),
         (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(unavailable_example())),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn subscribe(

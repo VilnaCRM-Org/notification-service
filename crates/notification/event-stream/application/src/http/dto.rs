@@ -65,10 +65,10 @@ impl From<EventTypeView> for EventTypeResponse {
 #[into_params(parameter_in = Query)]
 pub struct ListEventTypesParams {
     /// Page number, starting at 1.
-    #[param(minimum = 1, default = 1)]
+    #[param(minimum = 1, default = 1, example = 1)]
     pub page: i32,
     /// Number of items per page.
-    #[param(minimum = 1, maximum = 100, default = 30)]
+    #[param(minimum = 1, maximum = 100, default = 30, example = 10)]
     pub items_per_page: i32,
 }
 

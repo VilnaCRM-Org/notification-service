@@ -1,5 +1,6 @@
 //! Liveness: `GET /ping` answers `pong` and touches no dependency (AD-12).
 
+use axum::http::StatusCode;
 use shared_application::http::Problem;
 
 /// Answers `pong` as `text/plain; charset=utf-8`.
@@ -16,7 +17,8 @@ use shared_application::http::Problem;
     responses(
         (status = 200, description = "The process is alive.", body = String, content_type = "text/plain",
             example = json!("pong")),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn ping() -> &'static str {

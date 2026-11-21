@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
+use health_check_domain::Dependency;
 use shared_application::http::{DependencyFailure, Problem};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -44,13 +45,15 @@ where
             status = 500,
             description = "Health check failed.",
             body = Problem,
-            content_type = "application/problem+json"
+            content_type = "application/problem+json",
+            example = json!(Problem::dependency_unavailable(vec![failure_of(Dependency::EventStream)]))
         ),
         (
             status = "default",
             description = "Problem response.",
             body = Problem,
-            content_type = "application/problem+json"
+            content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))
         ),
     ),
 )]
@@ -62,12 +65,17 @@ pub async fn health(State(state): State<HealthCheckState>) -> Result<StatusCode,
     let failures = report
         .failures()
         .iter()
-        .map(|failure| DependencyFailure {
-            dependency: failure.dependency.identifier().to_owned(),
-            message: failure.dependency.failure_message().to_owned(),
-        })
+        .map(|failure| failure_of(failure.dependency))
         .collect();
     Err(Problem::dependency_unavailable(failures))
+}
+
+/// The failure that the 500 problem lists for `dependency`: its identifier and its message.
+fn failure_of(dependency: Dependency) -> DependencyFailure {
+    DependencyFailure {
+        dependency: dependency.identifier().to_owned(),
+        message: dependency.failure_message().to_owned(),
+    }
 }
 
 #[cfg(test)]

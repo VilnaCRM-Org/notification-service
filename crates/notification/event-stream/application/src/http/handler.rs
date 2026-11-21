@@ -19,6 +19,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
 use futures_util::stream;
 use shared_application::http::{Problem, ValidatedQuery};
+use shared_domain::InvalidPageRequest;
 
 use super::EventStreamState;
 use super::dto::{
@@ -30,6 +31,7 @@ use super::hub::HubError;
 use super::session::Session;
 use super::socket;
 use super::subscription::{Subscription, SubscriptionRequest, log_replay_failed};
+use crate::error::EventStreamError;
 use crate::query::EventTypeView;
 
 /// The response header that keeps a proxy from holding frames and keep-alives back (FR-5).
@@ -92,6 +94,11 @@ An invalid command is answered with one error frame `{"error":"<reason>"}` and c
 
 `{"action":"unsubscribe","types":["load.test"]}`"#;
 
+/// The detail of the 400 problem of the catalog, here the answer to `page=abc`: the text of the
+/// query-string rejection.
+const UNREADABLE_PAGE_DETAIL: &str =
+    "Failed to deserialize query string: page: invalid digit found in string";
+
 /// Reads one page of the catalog for the parameters.
 pub(crate) async fn list_types(
     state: &EventStreamState,
@@ -114,10 +121,14 @@ pub(crate) async fn list_types(
     description = "Returns one page of the subscribable event types, in byte order of their names.",
     params(ListEventTypesParams),
     responses(
-        (status = 200, description = "EventType collection", body = Vec<EventTypeResponse>),
-        (status = 400, description = "Invalid query parameter.", body = Problem, content_type = "application/problem+json"),
-        (status = 422, description = "Validation failed.", body = Problem, content_type = "application/problem+json"),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = 200, description = "EventType collection", body = Vec<EventTypeResponse>,
+            example = json!([{"name": EXAMPLE_TYPE}, {"name": "user.created"}])),
+        (status = 400, description = "Invalid query parameter.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::BAD_REQUEST).with_detail(UNREADABLE_PAGE_DETAIL))),
+        (status = 422, description = "Validation failed.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::from(EventStreamError::InvalidPage(InvalidPageRequest::ItemsPerPage)))),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn list_event_types(
@@ -139,8 +150,14 @@ pub async fn list_event_types(
     summary = "Retrieves the event stream status.",
     description = "Returns how far the answering instance has read the event topic, its memory window and its subscribers. It reads only the state the instance holds and answers in every life stage.",
     responses(
-        (status = 200, description = "EventStreamStatus resource", body = EventStreamStatusResponse),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = 200, description = "EventStreamStatus resource", body = EventStreamStatusResponse,
+            example = json!({
+                "state": "ready", "reason": null, "brokerReachable": true, "position": EXAMPLE_CURSOR,
+                "endOffset": EXAMPLE_CURSOR, "lag": "0", "windowFirst": "0", "windowLast": EXAMPLE_CURSOR,
+                "subscribers": 2, "rejectedRecords": "0", "retentionLosses": "0", "replayCapped": "0"
+            })),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn event_stream_status(
@@ -180,7 +197,8 @@ pub async fn event_stream_status(
             example = json!(types_problem(TypesError::Blank))),
         (status = 503, description = NODE_UNAVAILABLE, body = Problem, content_type = "application/problem+json",
             example = json!(starting_problem())),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn stream(
@@ -240,7 +258,8 @@ pub async fn stream(
             example = json!(upgrade_problem(&ConnectionNotUpgradable::default().into()))),
         (status = 503, description = NODE_UNAVAILABLE, body = Problem, content_type = "application/problem+json",
             example = json!(starting_problem())),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
+        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json",
+            example = json!(Problem::new(StatusCode::INTERNAL_SERVER_ERROR))),
     )
 )]
 pub async fn ws(

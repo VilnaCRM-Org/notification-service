@@ -1488,11 +1488,12 @@ fn document() -> Value {
     serde_json::to_value(router::<EventStreamState>().into_openapi()).unwrap()
 }
 
-fn problem_response(description: &str) -> Value {
-    json!({
-        "description": description,
-        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
-    })
+/// The `default` answer of every operation: the 500 problem of the panic catcher as its example.
+fn default_response() -> Value {
+    problem_with_example(
+        "Problem response.",
+        &json!({"type": "about:blank", "title": "Internal Server Error", "status": 500}),
+    )
 }
 
 #[test]
@@ -1648,7 +1649,7 @@ fn the_stream_operation_documents_its_parameters_and_every_answer() {
             &blank_problem(503, "Service Unavailable", "the node is starting")
         )
     );
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    assert_eq!(responses["default"], default_response());
 }
 
 #[test]
@@ -1739,7 +1740,7 @@ fn the_websocket_operation_documents_its_handshake_its_frames_and_every_answer()
             &blank_problem(503, "Service Unavailable", "the node is starting")
         )
     );
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    assert_eq!(responses["default"], default_response());
 }
 
 #[test]
@@ -2121,12 +2122,17 @@ fn a_frame_the_route_never_writes_does_not_match_the_frame_schema(#[case] fields
 }
 
 #[test]
-fn every_example_of_the_streaming_operations_matches_its_schema() {
+fn every_example_of_the_event_stream_operations_matches_its_schema() {
     let document = document();
 
-    for path in ["/events/stream", "/events/ws"] {
+    for path in [
+        "/event-types",
+        "/events/status",
+        "/events/stream",
+        "/events/ws",
+    ] {
         let operation = &document["paths"][path]["get"];
-        for parameter in operation["parameters"].as_array().unwrap() {
+        for parameter in operation["parameters"].as_array().into_iter().flatten() {
             assert!(
                 json_schema::admits(&document, &parameter["schema"], &parameter["example"]),
                 "{path} {}",
@@ -2167,6 +2173,16 @@ async fn every_problem_example_is_the_answer_of_its_producer() {
     let document = document();
     let node = ready(1_000);
     let answers = [
+        (
+            "/event-types",
+            "400",
+            send(three(), "/event-types?page=abc").await,
+        ),
+        (
+            "/event-types",
+            "422",
+            send(three(), "/event-types?itemsPerPage=101").await,
+        ),
         (
             "/events/stream",
             "400",
@@ -2233,6 +2249,20 @@ async fn every_problem_example_is_the_answer_of_its_producer() {
         serde_json::to_value(cursor).unwrap()
     );
     assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn the_catalog_example_is_the_answer_of_a_catalog_of_its_names() {
+    let document = document();
+
+    let reply = send(state(&["user.created", EXAMPLE_TYPE]), "/event-types").await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        document["paths"]["/event-types"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["example"],
+        reply.json()
+    );
 }
 
 /// The event of the examples, as the tail hands it to the hub.
@@ -2362,7 +2392,33 @@ fn the_status_operation_matches_the_contract() {
         responses["200"]["content"]["application/json"]["schema"],
         json!({"$ref": "#/components/schemas/EventStreamStatus"})
     );
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    let example = &responses["200"]["content"]["application/json"]["example"];
+    let mut fields: Vec<&str> = example
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "brokerReachable",
+            "endOffset",
+            "lag",
+            "position",
+            "reason",
+            "rejectedRecords",
+            "replayCapped",
+            "retentionLosses",
+            "state",
+            "subscribers",
+            "windowFirst",
+            "windowLast"
+        ]
+    );
+    assert_eq!(example["state"], "ready");
+    assert_eq!(responses["default"], default_response());
     assert_eq!(
         responses.as_object().unwrap().keys().collect::<Vec<_>>(),
         ["200", "default"]
@@ -2392,17 +2448,45 @@ fn the_catalog_operation_matches_the_contract() {
     assert_eq!(parameters[1]["schema"]["minimum"], 1);
     assert_eq!(parameters[1]["schema"]["maximum"], 100);
     assert_eq!(parameters[1]["schema"]["default"], 30);
+    assert_eq!(parameters[0]["example"], 1);
+    assert_eq!(parameters[1]["example"], 10);
     let responses = &operation["responses"];
     assert_eq!(
-        responses["200"]["content"]["application/json"]["schema"],
-        json!({"type": "array", "items": {"$ref": "#/components/schemas/EventType"}})
+        responses["200"]["content"]["application/json"],
+        json!({
+            "schema": {"type": "array", "items": {"$ref": "#/components/schemas/EventType"}},
+            "example": [{"name": "load.test"}, {"name": "user.created"}],
+        })
     );
     assert_eq!(
         responses["400"],
-        problem_response("Invalid query parameter.")
+        problem_with_example(
+            "Invalid query parameter.",
+            &blank_problem(
+                400,
+                "Bad Request",
+                "Failed to deserialize query string: page: invalid digit found in string"
+            )
+        )
     );
-    assert_eq!(responses["422"], problem_response("Validation failed."));
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    assert_eq!(
+        responses["422"],
+        problem_with_example(
+            "Validation failed.",
+            &json!({
+                "type": "/problems/validation-failed",
+                "title": "Unprocessable Entity",
+                "status": 422,
+                "detail": "The request failed validation.",
+                "violations": [{
+                    "propertyPath": "itemsPerPage",
+                    "message": "itemsPerPage must be between 1 and 100",
+                    "code": "range",
+                }],
+            })
+        )
+    );
+    assert_eq!(responses["default"], default_response());
     assert_eq!(
         responses.as_object().unwrap().keys().collect::<Vec<_>>(),
         ["200", "400", "422", "default"]

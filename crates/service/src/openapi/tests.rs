@@ -9,6 +9,7 @@ use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
 use shared_application::http::Problem;
+use shared_application::http::fallback::panic_response;
 use test_support::static_topic::StaticTopic;
 use tower::ServiceExt as _;
 
@@ -68,21 +69,12 @@ const OPERATIONS: [(&str, &str, &str, &str); 11] = [
     ("get", "/ping", "ping_get", "HealthCheck"),
 ];
 
-/// The operations that this change added to the three of the template (FR-26): each of their
-/// answers with a body has an example.
-const ADDED: [&str; 8] = [
-    "api_docs_get",
-    "api_docs_openapi_json_get",
-    "api_docs_file_get",
-    "api_events_stream_get",
-    "api_events_ws_get",
-    "api_graphql_get",
-    "api_graphql_post",
-    "ping_get",
-];
+/// The media types of the bodies that are bytes no inline example can show (FR-26): each is
+/// documented with the binary schema of `OpenAPI` 3.1 and without an example.
+const BINARY_MEDIA_TYPES: [&str; 1] = ["image/png"];
 
-/// The media type of an asset whose bytes no text example can show.
-const BINARY_MEDIA_TYPE: &str = "image/png";
+/// The statuses whose answers never carry a body (RFC 9110): Switching Protocols and No Content.
+const WITHOUT_BODY: [&str; 2] = ["101", "204"];
 
 /// The detail of the 404 problem of the router's `not_found` fallback.
 const NO_ROUTE: &str = "No route matches the request path.";
@@ -237,8 +229,8 @@ fn has_example(content: &Value) -> bool {
             .is_some_and(|examples| !examples.is_empty())
 }
 
-/// The faults of one parameter: a description, a schema (or a JSON content) and an example, or
-/// the schema's default for the parameters the template documents.
+/// The faults of one parameter: a description, a schema and an example; a default is not an
+/// example (FR-26).
 fn parameter_faults(id: &str, parameter: &Value) -> Vec<String> {
     let name = parameter["name"].as_str().unwrap_or_default();
     let mut faults = Vec::new();
@@ -248,31 +240,56 @@ fn parameter_faults(id: &str, parameter: &Value) -> Vec<String> {
     if parameter.get("schema").is_none() {
         faults.push(format!("{id}: parameter {name} has no schema"));
     }
-    let has_default = parameter["schema"].get("default").is_some();
-    if !has_example(parameter) && !has_default {
+    if !has_example(parameter) {
         faults.push(format!("{id}: parameter {name} has no example"));
     }
     faults
 }
 
-/// The faults of one answer: every media type has a schema, and, for an added operation, an
-/// example, apart from the bytes of an image; a problem answer is `application/problem+json`
+/// The binary schema of `OpenAPI` 3.1 for a body of `media_type`: a string of that content type.
+fn binary_schema(media_type: &str) -> Value {
+    json!({"type": "string", "contentMediaType": media_type})
+}
+
+/// The faults of the media type `media_type` of one answer, named `at`: a binary body has the
+/// binary schema and no example, any other body a schema and an example.
+fn media_type_faults(at: &str, media_type: &str, entry: &Value) -> Vec<String> {
+    let mut faults = Vec::new();
+    if BINARY_MEDIA_TYPES.contains(&media_type) {
+        if entry.get("schema") != Some(&binary_schema(media_type)) {
+            faults.push(format!("{at}: not the binary schema"));
+        }
+        if has_example(entry) {
+            faults.push(format!("{at}: an example of bytes"));
+        }
+        return faults;
+    }
+    if entry.get("schema").is_none() {
+        faults.push(format!("{at}: no schema"));
+    }
+    if !has_example(entry) {
+        faults.push(format!("{at}: no example"));
+    }
+    faults
+}
+
+/// The faults of one answer, `default` included (FR-26): a media type unless the status never has
+/// a body, the faults of each media type, and, for a problem answer, `application/problem+json`
 /// with the `Problem` schema.
 fn response_faults(id: &str, status: &str, response: &Value) -> Vec<String> {
     let mut faults = Vec::new();
     let Some(content) = response.get("content").and_then(Value::as_object) else {
+        if !WITHOUT_BODY.contains(&status) {
+            faults.push(format!("{id} {status}: no media type"));
+        }
         return faults;
     };
     for (media_type, entry) in content {
-        if media_type == BINARY_MEDIA_TYPE {
-            continue;
-        }
-        if entry.get("schema").is_none() {
-            faults.push(format!("{id} {status} {media_type}: no schema"));
-        }
-        if ADDED.contains(&id) && status != "default" && !has_example(entry) {
-            faults.push(format!("{id} {status} {media_type}: no example"));
-        }
+        faults.extend(media_type_faults(
+            &format!("{id} {status} {media_type}"),
+            media_type,
+            entry,
+        ));
     }
     if status.starts_with('4') || status.starts_with('5') || status == "default" {
         let problem = &content
@@ -346,6 +363,23 @@ fn documents_exactly_the_eleven_operations() {
     assert_eq!(faults, Vec::<String>::new());
 }
 
+#[tokio::test]
+async fn every_default_example_is_the_500_problem_of_the_panic_catcher() {
+    let caught = panic_response(Box::new("a handler panicked"));
+    let body = caught.into_body().collect().await.unwrap().to_bytes();
+    let problem: Value = serde_json::from_slice(&body).unwrap();
+    let json = json_document();
+
+    assert_eq!(problem["status"], 500);
+    for (method, path, operation) in operations(&json) {
+        assert_eq!(
+            operation["responses"]["default"]["content"]["application/problem+json"]["example"],
+            problem,
+            "{method} {path}"
+        );
+    }
+}
+
 #[rstest]
 #[case::no_summary("summary", json!(""), "x: no summary")]
 #[case::no_description("description", json!(null), "x: no description")]
@@ -385,6 +419,26 @@ fn documents_exactly_the_eleven_operations() {
     json!({"content": {"application/json": {"schema": {"type": "object"}}}}),
     "ping_get: request body application/json lacks a schema or an example"
 )]
+#[case::default_without_example(
+    "responses",
+    json!({"200": {"description": "ok", "content": {"text/plain": {"schema": {"type": "string"}, "example": "pong"}}}, "default": {"description": "d", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}}),
+    "ping_get default application/problem+json: no example"
+)]
+#[case::no_media_type(
+    "responses",
+    json!({"200": {"description": "ok"}, "default": {"description": "d", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}, "example": {}}}}}),
+    "ping_get 200: no media type"
+)]
+#[case::binary_without_its_schema(
+    "responses",
+    json!({"200": {"description": "ok", "content": {"image/png": {}}}, "default": {"description": "d", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}, "example": {}}}}}),
+    "ping_get 200 image/png: not the binary schema"
+)]
+#[case::binary_with_an_example(
+    "responses",
+    json!({"200": {"description": "ok", "content": {"image/png": {"schema": {"type": "string", "contentMediaType": "image/png"}, "example": "PNG"}}}, "default": {"description": "d", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}, "example": {}}}}}),
+    "ping_get 200 image/png: an example of bytes"
+)]
 fn the_documentation_check_reports_each_missing_part(
     #[case] field: &str,
     #[case] value: Value,
@@ -405,14 +459,28 @@ fn the_documentation_check_reports_each_missing_part(
 }
 
 #[test]
-fn a_parameter_default_or_a_schema_example_counts_as_its_example() {
+fn a_schema_example_counts_as_the_example_of_a_parameter_and_a_default_does_not() {
     let with_default =
         json!({"name": "page", "description": "d", "schema": {"type": "integer", "default": 1}});
     let with_examples =
         json!({"name": "v", "description": "d", "schema": {"type": "string", "examples": ["{}"]}});
 
-    assert_eq!(parameter_faults("x", &with_default), Vec::<String>::new());
+    assert_eq!(
+        parameter_faults("x", &with_default),
+        ["x: parameter page has no example"]
+    );
     assert_eq!(parameter_faults("x", &with_examples), Vec::<String>::new());
+}
+
+#[test]
+fn a_binary_body_with_its_schema_and_the_answers_without_a_body_are_documented() {
+    let binary = json!({"description": "ok", "content": {"image/png": {"schema": {"type": "string", "contentMediaType": "image/png"}}}});
+    let upgrade = json!({"description": "Switching Protocols"});
+    let empty = json!({"description": "No Content"});
+
+    assert_eq!(response_faults("x", "200", &binary), Vec::<String>::new());
+    assert_eq!(response_faults("x", "101", &upgrade), Vec::<String>::new());
+    assert_eq!(response_faults("x", "204", &empty), Vec::<String>::new());
 }
 
 /// The non-test Rust sources under `root`: every `.rs` file except the `tests.rs` files and the

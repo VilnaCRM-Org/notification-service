@@ -237,6 +237,10 @@ async fn the_file_entry_documents_the_name_the_media_types_and_both_problems() {
         media_types,
         ["image/png", "text/css", "text/html", "text/javascript"]
     );
+    assert_eq!(
+        entry["responses"]["200"]["content"]["image/png"],
+        json!({"schema": {"type": "string", "contentMediaType": "image/png"}})
+    );
     for (status, path) in [("400", "/api/docs/%FF"), ("404", "/api/docs/nope.js")] {
         let example = &entry["responses"][status]["content"]["application/problem+json"]["example"];
         let served: Value = serde_json::from_slice(&body_of(get_path(path).await).await).unwrap();
