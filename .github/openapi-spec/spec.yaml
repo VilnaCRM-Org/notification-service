@@ -620,7 +620,7 @@ paths:
       tags:
       - GraphQL
       summary: Executes a GraphQL operation, answered as JSON or as an event stream.
-      description: 'Executes one GraphQL operation. Without an `Accept` that ranks `text/event-stream` above both JSON types the answer is the execution result as `application/json`, as it always was. With one, the operation runs as graphql-sse''s distinct connections mode: the subscription `events` delivers one `next` block per event, and a query one `next` block, then `complete`. The transport problems come before any stream; document errors, a breach of the one-root-field rule and invalid arguments are results. docs/streaming-protocol.md describes the event stream.'
+      description: 'Executes one GraphQL operation. Without an `Accept` that ranks `text/event-stream` above both JSON types the answer is the execution result as `application/json`, except that a `query` over 4 096 or an `operationName` over 128 characters is not executed and gets the 422 length problem, on both transports. With such an `Accept`, the operation runs as graphql-sse''s distinct connections mode: the subscription `events` delivers one `next` block per event, and a query one `next` block, then `complete`. The transport problems come before any stream; document errors, a breach of the one-root-field rule and invalid arguments are results. docs/streaming-protocol.md describes the event stream.'
       operationId: api_graphql_post
       parameters:
       - name: Last-Event-ID

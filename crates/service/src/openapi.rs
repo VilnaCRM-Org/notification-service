@@ -10,7 +10,6 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::config::AppEnv;
 use crate::graphql::handler;
 use crate::graphql::schema::ApiSchema;
 use crate::http::{AppState, docs, ping};
@@ -74,19 +73,14 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .nest("/api", event_stream_application::http::router())
 }
 
-/// `/api/graphql`: on GET `subscribe`, or `subscribe_or_explore` in `dev`, and `execute` on POST.
+/// `/api/graphql`: `subscribe` on GET and `execute` on POST, in every `APP_ENV`.
 ///
-/// Both GET handlers carry the same annotation, so the document does not depend on the
-/// environment. GET is registered first, so the `Allow` of every other method reads
-/// `GET,HEAD,POST`.
+/// `subscribe` reads from the schema data whether the explorer page is served, so neither the
+/// routes nor the document depend on the environment. GET is registered first, so the `Allow` of
+/// every other method reads `GET,HEAD,POST`.
 #[must_use]
-pub fn graphql_router(app_env: AppEnv) -> OpenApiRouter<ApiSchema> {
-    let routes = if app_env == AppEnv::Dev {
-        routes!(handler::subscribe_or_explore, handler::execute)
-    } else {
-        routes!(handler::subscribe, handler::execute)
-    };
-    OpenApiRouter::new().routes(routes)
+pub fn graphql_router() -> OpenApiRouter<ApiSchema> {
+    OpenApiRouter::new().routes(routes!(handler::subscribe, handler::execute))
 }
 
 /// `/ping` and the three documentation routes, whose handlers take no state.
@@ -99,12 +93,12 @@ pub fn operational_router() -> OpenApiRouter {
         .routes(routes!(docs::docs_asset))
 }
 
-/// The document: the documents of the three routers merged, with the `prod` variant of
-/// [`graphql_router`]. `GET /api/docs/openapi.json` serves it and `openapi-export` writes it.
+/// The document: the documents of the three routers merged. `GET /api/docs/openapi.json` serves
+/// it and `openapi-export` writes it.
 #[must_use]
 pub fn document() -> utoipa::openapi::OpenApi {
     let mut document = api_router().into_openapi();
-    document.merge(graphql_router(AppEnv::Prod).into_openapi());
+    document.merge(graphql_router().into_openapi());
     document.merge(operational_router().into_openapi());
     document
 }

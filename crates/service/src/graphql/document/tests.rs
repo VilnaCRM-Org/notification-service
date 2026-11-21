@@ -16,6 +16,7 @@ use crate::bootstrap::tests::wiring::adapters_on;
 use crate::cli::ServeArgs;
 use crate::config::{AppEnv, Config};
 use crate::graphql::QueryStringLimit;
+use crate::graphql::handler::ExplorerPage;
 use crate::graphql::schema::builder;
 use crate::graphql::single_root;
 use crate::openapi::{document, graphql_router};
@@ -30,15 +31,16 @@ const BODY_LIMIT: usize = 256;
 /// The one error of a valid subscription on the JSON transport.
 const TRANSPORT_ERROR: &str = "Subscriptions are not supported on this transport.";
 
-/// The `GraphQL` routes of `app_env`, registered as the service registers them, over a schema
-/// with the query-string bound and the body limit [`BODY_LIMIT`].
+/// The `GraphQL` routes, registered as the service registers them, over a schema with the
+/// query-string bound and the body limit [`BODY_LIMIT`] and the explorer flag of `app_env`.
 fn graphql(app_env: AppEnv) -> Router {
     let schema = builder()
         .data(QueryStringLimit {
             max_bytes: BODY_LIMIT,
         })
+        .data(ExplorerPage::of(app_env))
         .finish();
-    let (routes, _document) = graphql_router(app_env).split_for_parts();
+    let (routes, _document) = graphql_router().split_for_parts();
     routes
         .with_state(schema)
         .layer(DefaultBodyLimit::max(BODY_LIMIT))

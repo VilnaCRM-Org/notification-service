@@ -30,8 +30,9 @@ use tower::ServiceExt as _;
 use tracing::Level;
 
 use super::*;
+use crate::config::AppEnv;
 use crate::graphql::QueryStringLimit;
-use crate::graphql::schema::{MAX_COMPLEXITY, builder};
+use crate::graphql::schema::{MAX_COMPLEXITY, Query, Subscription, builder};
 use crate::http::security_headers;
 
 /// The bound of every awaited call of the tests on a node's state.
@@ -43,15 +44,20 @@ const TRANSPORT_ERROR: &str = "Subscriptions are not supported on this transport
 /// The subscription of the JSON-transport tests.
 const SUBSCRIPTION: &str = r#"subscription { events(types: ["a"]) { id } }"#;
 
+/// A builder of the schema, before its data is complete.
+type ApiSchemaBuilder =
+    async_graphql::SchemaBuilder<Query, async_graphql::EmptyMutation, Subscription>;
+
 fn router_of(schema: ApiSchema) -> Router {
     Router::new()
-        .route("/api/graphql", post(execute).get(subscribe_or_explore))
+        .route("/api/graphql", post(execute).get(subscribe))
         .with_state(schema)
         .layer(security_headers::layer())
 }
 
+/// The router of a schema that serves the explorer page, as the bootstrap's does in `dev`.
 fn router() -> Router {
-    router_of(builder().finish())
+    router_of(builder().data(ExplorerPage::of(AppEnv::Dev)).finish())
 }
 
 async fn send(request: Request<Body>) -> Response<Body> {
@@ -995,35 +1001,39 @@ const NON_STREAM_GET_ACCEPTS: [Option<&str>; 5] = [
     ),
 ];
 
-/// The GET handler a router serves: the one of `dev` or the one of every other `APP_ENV`.
+/// The `APP_ENV` of a router: `dev`, which serves the explorer page, or every other one.
 #[derive(Debug, Clone, Copy)]
 enum Mode {
     Dev,
     Other,
 }
 
+impl Mode {
+    /// The `APP_ENV` of the mode; `prod` stands for every `APP_ENV` but `dev`.
+    const fn app_env(self) -> AppEnv {
+        match self {
+            Self::Dev => AppEnv::Dev,
+            Self::Other => AppEnv::Prod,
+        }
+    }
+}
+
 const MODES: [Mode; 2] = [Mode::Dev, Mode::Other];
 
-/// A router whose GET of the path is the handler of `mode`, over `schema`.
-fn get_router(schema: ApiSchema, mode: Mode) -> Router {
-    let route = match mode {
-        Mode::Dev => get(subscribe_or_explore),
-        Mode::Other => get(subscribe),
-    };
+/// A router whose GET of the path is `subscribe`, over the schema of `schema` with the explorer
+/// flag of `mode`, as the bootstrap sets it.
+fn get_router(schema: ApiSchemaBuilder, mode: Mode) -> Router {
     Router::new()
-        .route("/api/graphql", route)
-        .with_state(schema)
+        .route("/api/graphql", get(subscribe))
+        .with_state(schema.data(ExplorerPage::of(mode.app_env())).finish())
         .layer(security_headers::layer())
 }
 
-/// The schema of a node with `state` and the query-string bound [`QUERY_LIMIT`].
-fn limited(state: &EventStreamState) -> ApiSchema {
-    builder()
-        .data(state.clone())
-        .data(QueryStringLimit {
-            max_bytes: QUERY_LIMIT,
-        })
-        .finish()
+/// The schema builder of a node with `state` and the query-string bound [`QUERY_LIMIT`].
+fn limited(state: &EventStreamState) -> ApiSchemaBuilder {
+    builder().data(state.clone()).data(QueryStringLimit {
+        max_bytes: QUERY_LIMIT,
+    })
 }
 
 /// `text` percent-encoded as a value of a query string: every byte but the unreserved ones.
@@ -1061,7 +1071,11 @@ fn query_of(document: &str) -> String {
 }
 
 /// The response of the router of `mode` over `schema` to `request`, within [`LIMIT`].
-async fn get_response(schema: ApiSchema, mode: Mode, request: Request<Body>) -> Response<Body> {
+async fn get_response(
+    schema: ApiSchemaBuilder,
+    mode: Mode,
+    request: Request<Body>,
+) -> Response<Body> {
     tokio::time::timeout(LIMIT, get_router(schema, mode).oneshot(request))
         .await
         .expect("the request answers in time")
@@ -1370,7 +1384,7 @@ async fn a_get_with_sse_on_a_schema_without_the_query_string_limit_is_the_500_pr
     let state = started_state();
     for mode in MODES {
         for query_string in [query_of(EVENTS), "%zz".to_owned()] {
-            let schema = builder().data(state.clone()).finish();
+            let schema = builder().data(state.clone());
             let (recorder, guard) = LogRecorder::install();
 
             let answer = whole(
@@ -1415,7 +1429,7 @@ async fn a_get_without_sse_on_a_schema_without_the_query_string_limit_keeps_its_
 
     let refused = whole(
         get_response(
-            builder().data(state.clone()).finish(),
+            builder().data(state.clone()),
             Mode::Other,
             get_with(&query_of(EVENTS), &[]),
         )
@@ -1424,7 +1438,7 @@ async fn a_get_without_sse_on_a_schema_without_the_query_string_limit_keeps_its_
     .await;
     let explored = whole(
         get_response(
-            builder().data(state.clone()).finish(),
+            builder().data(state.clone()),
             Mode::Dev,
             get_with(&query_of(EVENTS), &[]),
         )
@@ -1518,14 +1532,57 @@ fn query_string_of(body: &Value) -> String {
         .join("&")
 }
 
-/// The schema of a node with `state` and the query-string bound [`WIDE_QUERY_LIMIT`].
-fn widely_limited(state: &EventStreamState) -> ApiSchema {
-    builder()
-        .data(state.clone())
-        .data(QueryStringLimit {
-            max_bytes: WIDE_QUERY_LIMIT,
-        })
-        .finish()
+/// The schema builder of a node with `state` and the query-string bound [`WIDE_QUERY_LIMIT`].
+fn widely_limited(state: &EventStreamState) -> ApiSchemaBuilder {
+    builder().data(state.clone()).data(QueryStringLimit {
+        max_bytes: WIDE_QUERY_LIMIT,
+    })
+}
+
+/// The bodies that are not GraphQL requests although a member is longer than its bound: a member
+/// of the wrong type, or a `query` that is not a string, beside an overlong `query` or
+/// `operationName`.
+fn overlong_bodies_that_are_not_graphql_requests() -> Vec<Value> {
+    vec![
+        json!({ "query": "a".repeat(MAX_QUERY_CHARS + 1), "variables": 5 }),
+        json!({
+            "query": "{ __typename }",
+            "operationName": "A".repeat(MAX_OPERATION_NAME_CHARS + 1),
+            "variables": 5,
+        }),
+        json!({ "query": 5, "operationName": "A".repeat(MAX_OPERATION_NAME_CHARS + 1) }),
+    ]
+}
+
+/// The 422 problem of `body` posted without and then with an event-stream `Accept` to a router
+/// whose schema holds `state`, each with the `Accept` it was posted with.
+async fn unprocessable_on_both_transports(
+    state: &EventStreamState,
+    body: &Value,
+) -> Vec<(Option<&'static str>, Value)> {
+    let mut problems = Vec::new();
+    for accept in [None, Some("text/event-stream")] {
+        let headers: Vec<(&str, &str)> = accept.iter().map(|value| ("accept", *value)).collect();
+        let router = router_of(builder().data(state.clone()).finish());
+
+        let response = router
+            .oneshot(post_with("application/json", &body.to_string(), &headers))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{accept:?}"
+        );
+        assert_eq!(
+            content_type(&response),
+            "application/problem+json",
+            "{accept:?}"
+        );
+        problems.push((accept, json_of(response).await));
+    }
+    problems
 }
 
 #[tokio::test]
@@ -1533,25 +1590,25 @@ async fn a_post_whose_document_or_operation_name_is_too_long_is_the_422_problem_
 {
     let state = started_state();
     for (body, violations) in overlong_bodies() {
-        for accept in [None, Some("text/event-stream")] {
-            let headers: Vec<(&str, &str)> =
-                accept.iter().map(|value| ("accept", *value)).collect();
-            let router = router_of(builder().data(state.clone()).finish());
+        for (accept, problem) in unprocessable_on_both_transports(&state, &body).await {
+            assert_eq!(problem["type"], "/problems/validation-failed", "{accept:?}");
+            assert_eq!(problem["violations"], violations, "{accept:?}");
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
 
-            let response = router
-                .oneshot(post_with("application/json", &body.to_string(), &headers))
-                .await
-                .unwrap();
-
+#[tokio::test]
+async fn the_problem_of_a_body_that_is_not_a_graphql_request_comes_before_the_length_violations() {
+    let state = started_state();
+    for body in overlong_bodies_that_are_not_graphql_requests() {
+        for (accept, problem) in unprocessable_on_both_transports(&state, &body).await {
+            assert_eq!(problem["type"], "about:blank", "{accept:?}");
             assert_eq!(
-                response.status(),
-                StatusCode::UNPROCESSABLE_ENTITY,
+                problem["detail"], "The request body is not a GraphQL request.",
                 "{accept:?}"
             );
-            assert_eq!(content_type(&response), "application/problem+json");
-            let problem = json_of(response).await;
-            assert_eq!(problem["type"], "/problems/validation-failed");
-            assert_eq!(problem["violations"], violations, "{accept:?}");
+            assert!(problem.get("violations").is_none(), "{accept:?}");
         }
     }
     assert_eq!(state.hub.subscriber_count(), 0);
@@ -1692,6 +1749,42 @@ fn the_post_entry_documents_the_body_both_transports_and_the_problems() {
     assert_eq!(post["parameters"][0]["name"], "Last-Event-ID");
 }
 
+/// `number` with a space between each group of three digits, as the documents write a bound.
+fn grouped(number: usize) -> String {
+    let reversed: Vec<char> = number.to_string().chars().rev().collect();
+    let mut groups: Vec<String> = reversed
+        .chunks(3)
+        .map(|group| group.iter().rev().collect())
+        .collect();
+    groups.reverse();
+    groups.join(" ")
+}
+
+#[test]
+fn the_grouped_bounds_are_written_as_the_documents_write_them() {
+    assert_eq!(grouped(MAX_QUERY_CHARS), "4 096");
+    assert_eq!(grouped(MAX_OPERATION_NAME_CHARS), "128");
+    assert_eq!(grouped(65_536), "65 536");
+}
+
+/// The description of the POST operation names the one change of the JSON transport (maintainer
+/// decision M5): a member over its bound is not executed but refused with the 422 problem, as
+/// with the event stream.
+#[test]
+fn the_post_description_names_the_bounds_that_refuse_a_json_request_too() {
+    let post = entry("post");
+    let description = post["description"].as_str().unwrap();
+
+    for (member, bound) in [
+        ("query", MAX_QUERY_CHARS),
+        ("operationName", MAX_OPERATION_NAME_CHARS),
+    ] {
+        let over = format!("`{member}` over {}", grouped(bound));
+        assert!(description.contains(&over), "{over}");
+    }
+    assert!(description.contains("the 422 length problem, on both transports"));
+}
+
 #[test]
 fn the_get_entry_documents_the_query_string_both_answers_and_the_problems() {
     let get = entry("get");
@@ -1742,14 +1835,68 @@ fn the_get_entry_documents_the_query_string_both_answers_and_the_problems() {
     );
 }
 
+/// The entry of the document for `method` of the `GraphQL` path without its tags, which
+/// `routes!` adds to the operation of the annotation, and the tags.
+fn untagged_entry(method: &str) -> (Value, Option<Value>) {
+    let mut entry = entry(method);
+    let tags = entry.as_object_mut().unwrap().remove("tags");
+    (entry, tags)
+}
+
 #[test]
-fn both_get_handlers_carry_the_same_operation() {
+fn the_entries_of_the_path_are_the_operations_of_the_one_get_handler_and_execute() {
     use utoipa::Path as _;
+
+    let (get, get_tags) = untagged_entry("get");
+    let (post, post_tags) = untagged_entry("post");
 
     assert_eq!(
         serde_json::to_value(__path_subscribe::operation()).unwrap(),
-        serde_json::to_value(__path_subscribe_or_explore::operation()).unwrap()
+        get
     );
+    assert_eq!(
+        serde_json::to_value(__path_execute::operation()).unwrap(),
+        post
+    );
+    assert_eq!(get_tags, Some(json!(["GraphQL"])));
+    assert_eq!(post_tags, Some(json!(["GraphQL"])));
     assert_eq!(__path_subscribe::path(), GRAPHQL_PATH);
     assert_eq!(__path_execute::path(), GRAPHQL_PATH);
+}
+
+// ---- the explorer flag of the schema data (FR-5) ----
+
+#[test]
+fn the_explorer_page_is_served_in_dev_only() {
+    assert_eq!(ExplorerPage::of(AppEnv::Dev), ExplorerPage { served: true });
+    for app_env in [AppEnv::Test, AppEnv::Prod] {
+        assert_eq!(
+            ExplorerPage::of(app_env),
+            ExplorerPage { served: false },
+            "{app_env:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_get_without_sse_on_a_schema_without_the_explorer_flag_is_the_405_problem() {
+    let state = started_state();
+    for accept in NON_STREAM_GET_ACCEPTS {
+        let headers: Vec<(&str, &str)> = accept.iter().map(|value| ("accept", *value)).collect();
+        let router = Router::new()
+            .route("/api/graphql", get(subscribe))
+            .with_state(limited(&state).finish());
+
+        let response =
+            tokio::time::timeout(LIMIT, router.oneshot(get_with(&query_of(EVENTS), &headers)))
+                .await
+                .expect("the request answers in time")
+                .unwrap();
+
+        assert_eq!(response.headers()[ALLOW], "POST", "{accept:?}");
+        let answer = whole(response).await;
+        assert_eq!(answer.status, StatusCode::METHOD_NOT_ALLOWED, "{accept:?}");
+        assert_eq!(answer.body, METHOD_NOT_ALLOWED_BODY, "{accept:?}");
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
 }

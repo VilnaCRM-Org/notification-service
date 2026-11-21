@@ -1,16 +1,18 @@
 //! The GraphQL transports: `POST /api/graphql` as JSON or as an event stream, `GET /api/graphql` as
 //! an event stream for `EventSource` clients, and the development explorer (AD-18).
 //!
-//! Besides the problem-aware extractors, the three handlers that can answer an event stream take
-//! the `HeaderMap`, which is infallible: it holds `Accept`, which chooses the transport, and
-//! `Last-Event-ID`, the cursor of a subscription. The two GET handlers also take the `RawQuery`,
-//! also infallible: only the query string as received can be bounded and read strictly, and a
-//! problem-aware query extractor would refuse a malformed query string before the handler could
-//! keep today's answer of a GET that does not negotiate the event stream (the recorded exceptions
-//! of the streaming handlers, NFR-13).
+//! Besides the problem-aware extractors, the two handlers, both of which can answer an event
+//! stream, take the `HeaderMap`, which is infallible: it holds `Accept`, which chooses the
+//! transport, and `Last-Event-ID`, the cursor of a subscription. The GET handler also takes the
+//! `RawQuery`, also infallible: only the query string as received can be bounded and read
+//! strictly, and a problem-aware query extractor would refuse a malformed query string before the
+//! handler could keep today's answer of a GET that does not negotiate the event stream (the
+//! recorded exceptions of the streaming handlers, NFR-13).
 //!
-//! Each handler carries its operation of the `OpenAPI` document; the two GET handlers carry the
-//! same one, so the document does not depend on the environment (FR-26, ADR 0022).
+//! Each handler carries its operation of the `OpenAPI` document. The one GET handler serves every
+//! `APP_ENV`: it reads from the schema data, `ExplorerPage`, whether a GET that does not
+//! negotiate the event stream gets the explorer page, so neither the routes nor the document
+//! depend on the environment (FR-26, ADR 0022).
 
 use axum::Json;
 use axum::extract::{RawQuery, State};
@@ -20,6 +22,7 @@ use axum::response::{Html, IntoResponse as _, Response};
 use serde_json::{Map, Value};
 use shared_application::http::{ApiJson, Problem, Violation};
 
+use crate::config::AppEnv;
 use crate::graphql::document::{
     CursorHeader, EXAMPLE_OPERATION, EXAMPLE_QUERY, EXAMPLE_SUBSCRIPTION, GetParams, GraphQLEvent,
     GraphQLRequest, GraphQLResponse, MEDIA_TYPE_DETAIL, MISSING_QUERY_DETAIL, NOT_JSON_DETAIL,
@@ -39,12 +42,31 @@ const EXPLORER_PAGE: &str = include_str!("explorer.html");
 /// The request header that carries the cursor of a subscription (FR-11).
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
 
+/// Whether a GET that does not negotiate the event stream gets the development explorer page, set
+/// in the schema data by the bootstrap from `APP_ENV`, as the `QueryStringLimit` is (FR-5). A
+/// schema without it answers such a GET as every `APP_ENV` but `dev` does, with the 405 problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplorerPage {
+    /// The page is served.
+    pub(crate) served: bool,
+}
+
+impl ExplorerPage {
+    /// The flag of `app_env`: the page is served in `dev` only.
+    pub(crate) const fn of(app_env: AppEnv) -> Self {
+        Self {
+            served: matches!(app_env, AppEnv::Dev),
+        }
+    }
+}
+
 /// The longest GraphQL document, `query`, that a request of either form may carry, in characters:
 /// twice the introspection query of the explorer (about 2 000 characters). Written in its longest
 /// form, twelve bytes per character (a `\u` escape pair in JSON, percent-encoded UTF-8 in a query
 /// string), a document of this length with an operation name of [`MAX_OPERATION_NAME_CHARS`]
-/// still fits within the default `HTTP_MAX_BODY_BYTES`, so the document never admits a request
-/// that only the size limit refuses (FR-29).
+/// still fits within the default `HTTP_MAX_BODY_BYTES`, so the size limit alone never refuses a
+/// `query` or an `operationName` that the document admits; `variables`, `extensions` and unknown
+/// members are still bounded only by `HTTP_MAX_BODY_BYTES` (FR-29).
 pub(crate) const MAX_QUERY_CHARS: usize = 4_096;
 
 /// The longest operation name, `operationName`, that a request of either form may carry, in
@@ -54,11 +76,13 @@ pub(crate) const MAX_OPERATION_NAME_CHARS: usize = 128;
 /// The description of `POST /api/graphql`.
 pub(crate) const POST_TEXT: &str = "Executes one GraphQL operation. Without an `Accept` that \
     ranks `text/event-stream` above both JSON types the answer is the execution result as \
-    `application/json`, as it always was. With one, the operation runs as graphql-sse's distinct \
-    connections mode: the subscription `events` delivers one `next` block per event, and a query \
-    one `next` block, then `complete`. The transport problems come before any stream; document \
-    errors, a breach of the one-root-field rule and invalid arguments are results. \
-    docs/streaming-protocol.md describes the event stream.";
+    `application/json`, except that a `query` over 4 096 or an `operationName` over 128 \
+    characters is not executed and gets the 422 length problem, on both transports. With such an \
+    `Accept`, the operation runs as graphql-sse's distinct connections mode: the subscription \
+    `events` delivers one `next` block per event, and a query one `next` block, then `complete`. \
+    The transport problems come before any stream; document errors, a breach of the \
+    one-root-field rule and invalid arguments are results. docs/streaming-protocol.md describes \
+    the event stream.";
 
 /// The description of `GET /api/graphql`.
 pub(crate) const GET_TEXT: &str = "Runs the GraphQL operation of the query string as \
@@ -111,10 +135,12 @@ const UNAVAILABLE_TEXT: &str = "A subscription the node cannot take, because it 
 /// stream (FR-2, FR-3, FR-5).
 ///
 /// The body must be a JSON object with a string member `query`. Without an event-stream `Accept`
-/// the answer is the execution result as `200 application/json`, operation errors included, as it
-/// always was. With one, the operation runs as graphql-sse's distinct connections mode: the
-/// event-stream head once the operation registered its subscriber or produced its first result,
-/// or the 503 problem of a node that cannot take the subscriber.
+/// the answer is the execution result as `200 application/json`, operation errors included,
+/// except for a `query` over 4 096 (`MAX_QUERY_CHARS`) or an `operationName` over 128
+/// (`MAX_OPERATION_NAME_CHARS`) characters, which is not executed on this transport either
+/// (maintainer decision M5). With an event-stream `Accept`, the operation runs as graphql-sse's
+/// distinct connections mode: the event-stream head once the operation registered its subscriber
+/// or produced its first result, or the 503 problem of a node that cannot take the subscriber.
 ///
 /// # Errors
 ///
@@ -173,8 +199,10 @@ pub async fn execute(
     Ok(Json(schema.execute(request).await).into_response())
 }
 
-/// Answers a GET outside `dev`: the event stream when `Accept` admits it (FR-2, GET rule), else the
-/// 405 problem with `Allow: POST`, the answer of today (FR-4, FR-5).
+/// Answers a GET in every `APP_ENV`, with the event stream when `Accept` admits it (FR-2, GET rule).
+///
+/// Without the event stream the answer is the one of today (FR-4, FR-5): the explorer page when
+/// the schema data serves it, as in `dev`, and otherwise the 405 problem with `Allow: POST`.
 ///
 /// With the event stream, the operation is the one of the query string (`query`, `operationName`,
 /// `variables`, `extensions`), refused before any stream with the 414, 400 or 422 problem of
@@ -217,6 +245,9 @@ pub async fn subscribe(
     if negotiates_event_stream_on_get(&headers) {
         return stream_query_string(&schema, &headers, query.as_deref()).await;
     }
+    if serves_explorer(&schema) {
+        return explorer();
+    }
     (
         [(ALLOW, HeaderValue::from_static("POST"))],
         Problem::new(StatusCode::METHOD_NOT_ALLOWED),
@@ -224,47 +255,11 @@ pub async fn subscribe(
         .into_response()
 }
 
-/// Answers a GET in `dev`: the event stream when `Accept` admits it, as [`subscribe`] does, else
-/// the explorer page.
-#[utoipa::path(
-    get,
-    path = GRAPHQL_PATH,
-    operation_id = "api_graphql_get",
-    tag = "GraphQL",
-    summary = "Runs the GraphQL operation of the query string as an event stream.",
-    description = GET_TEXT,
-    params(GetParams, CursorHeader),
-    responses(
-        (status = 200, description = GET_OK_TEXT, content(
-            (GraphQLEvent = "text/event-stream", examples(
-                ("next" = (summary = "A subscription result", value = json!(next_event_example()))),
-                ("complete" = (summary = "The end of a single result", value = json!(complete_event_example()))),
-            )),
-            (String = "text/html", example = json!(EXPLORER_EXAMPLE)),
-        )),
-        (status = 400, description = GET_BAD_REQUEST_TEXT, body = Problem, content_type = "application/problem+json",
-            example = json!(problem_example(StatusCode::BAD_REQUEST, MISSING_QUERY_DETAIL))),
-        (status = 405, description = "A GET that does not negotiate the event stream, outside `dev`.", body = Problem, content_type = "application/problem+json",
-            headers(("Allow" = String, description = "`POST`.")),
-            example = json!(Problem::new(StatusCode::METHOD_NOT_ALLOWED))),
-        (status = 414, description = "The query string is longer than `HTTP_MAX_BODY_BYTES` as received.", body = Problem, content_type = "application/problem+json",
-            example = json!(problem_example(StatusCode::URI_TOO_LONG, TOO_LONG_DETAIL))),
-        (status = 422, description = GET_UNPROCESSABLE_TEXT,
-            body = Problem, content_type = "application/problem+json", example = json!(not_an_object_example())),
-        (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
-            example = json!(unavailable_example())),
-        (status = "default", description = "Problem response.", body = Problem, content_type = "application/problem+json"),
-    )
-)]
-pub async fn subscribe_or_explore(
-    State(schema): State<ApiSchema>,
-    headers: HeaderMap,
-    RawQuery(query): RawQuery,
-) -> Response {
-    if negotiates_event_stream_on_get(&headers) {
-        return stream_query_string(&schema, &headers, query.as_deref()).await;
-    }
-    explorer()
+/// Whether the [`ExplorerPage`] of the schema data serves the page; a schema without it does not.
+fn serves_explorer(schema: &ApiSchema) -> bool {
+    schema
+        .data::<ExplorerPage>()
+        .is_some_and(|page| page.served)
 }
 
 /// The event stream of the operation in the query string `query` of a GET that negotiated it, or
@@ -338,8 +333,8 @@ fn too_long(name: &str, text: &str, bound: usize) -> Option<Violation> {
     })
 }
 
-/// The development explorer page with its own content security policy, the answer of a GET in
-/// `dev` that does not negotiate the event stream.
+/// The development explorer page with its own content security policy, the answer of a GET that
+/// does not negotiate the event stream when the schema data serves it (`dev`).
 fn explorer() -> Response {
     (
         [(CONTENT_SECURITY_POLICY, EXPLORER_CONTENT_SECURITY_POLICY)],

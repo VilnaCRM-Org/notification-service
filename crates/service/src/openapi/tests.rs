@@ -758,18 +758,19 @@ async fn an_asset_path_deeper_than_one_segment_is_the_404_of_the_router() {
 }
 
 #[test]
-fn the_document_does_not_depend_on_the_environment() {
-    for app_env in [AppEnv::Dev, AppEnv::Test, AppEnv::Prod] {
-        assert_eq!(
-            serde_json::to_value(graphql_router(app_env).into_openapi()).unwrap(),
-            serde_json::to_value(graphql_router(AppEnv::Prod).into_openapi()).unwrap(),
-            "{app_env:?}"
-        );
-    }
+fn the_graphql_router_documents_one_get_and_one_post_operation_as_the_document_does() {
+    let graphql = serde_json::to_value(graphql_router().into_openapi()).unwrap();
+    let path = &graphql["paths"]["/api/graphql"];
+
     assert_eq!(
-        serde_json::to_value(graphql_router(AppEnv::Dev).into_openapi()).unwrap()["paths"]["/api/graphql"]
-            ["get"]["operationId"],
-        "api_graphql_get"
+        path.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["get", "post"]
+    );
+    assert_eq!(path["get"]["operationId"], "api_graphql_get");
+    assert_eq!(path["post"]["operationId"], "api_graphql_post");
+    assert_eq!(
+        *path,
+        serde_json::to_value(document()).unwrap()["paths"]["/api/graphql"]
     );
 }
 

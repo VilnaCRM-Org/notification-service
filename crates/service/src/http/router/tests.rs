@@ -318,10 +318,10 @@ fn widest_get(query: usize, name: usize) -> (Request<Body>, usize) {
     (request, length)
 }
 
-/// The document never admits a request that only the size limit refuses (FR-29): with the default
-/// `HTTP_MAX_BODY_BYTES`, a `query` and an `operationName` at their bounds, every character in its
-/// longest form, are executed on both forms, and one character more is the 422 problem, not the
-/// 413 or the 414.
+/// The size limit alone never refuses a `query` or an `operationName` that the document admits
+/// (FR-29): with the default `HTTP_MAX_BODY_BYTES`, a `query` and an `operationName` at their
+/// bounds, every character in its longest form, are executed on both forms, and one character
+/// more is the 422 problem, not the 413 or the 414.
 #[tokio::test]
 async fn the_longest_document_and_operation_name_fit_the_default_size_limit_in_any_encoding() {
     let config = config("test");
@@ -498,14 +498,14 @@ const ALLOWED_EXTRACTORS: [&str; 5] = [
     "ValidatedJson<",
 ];
 
-/// The handlers that may also take the `HeaderMap`, which is infallible: the `GraphQL` handlers
-/// that can answer an event stream read `Accept` and `Last-Event-ID` (the recorded streaming
-/// exception, NFR-13).
-const HEADER_MAP_HANDLERS: [&str; 3] = ["execute", "subscribe", "subscribe_or_explore"];
+/// The handlers that may also take the `HeaderMap`, which is infallible: the two `GraphQL`
+/// handlers that can answer an event stream read `Accept` and `Last-Event-ID` (the recorded
+/// streaming exception, NFR-13).
+const HEADER_MAP_HANDLERS: [&str; 2] = ["execute", "subscribe"];
 
-/// The handlers that may also take the `RawQuery`, which is infallible: the two GET handlers of the
-/// `GraphQL` path bound the query string as received and read it strictly (FR-4, NFR-13).
-const RAW_QUERY_HANDLERS: [&str; 2] = ["subscribe", "subscribe_or_explore"];
+/// The handlers that may also take the `RawQuery`, which is infallible: the one GET handler of the
+/// `GraphQL` path bounds the query string as received and reads it strictly (FR-4, NFR-13).
+const RAW_QUERY_HANDLERS: [&str; 1] = ["subscribe"];
 
 /// Whether the handler `handler` may take a parameter of type `kind`.
 fn is_allowed(handler: &str, kind: &str) -> bool {
@@ -651,8 +651,14 @@ fn handlers_use_only_the_problem_aware_extractors() {
 #[case::query_of_subscribe(
     "pub async fn subscribe(headers: HeaderMap, Query(q): Query<Params>) -> Response {}"
 )]
-#[case::query_of_subscribe_or_explore(
-    "pub async fn subscribe_or_explore(RawQuery(r): RawQuery, Query(q): Query<Params>) -> Response {}"
+#[case::query_of_subscribe_beside_its_raw_query(
+    "pub async fn subscribe(RawQuery(r): RawQuery, Query(q): Query<Params>) -> Response {}"
+)]
+#[case::header_map_of_the_former_dev_handler(
+    "pub async fn subscribe_or_explore(headers: HeaderMap) -> Response {}"
+)]
+#[case::raw_query_of_the_former_dev_handler(
+    "pub async fn subscribe_or_explore(RawQuery(r): RawQuery) -> Response {}"
 )]
 #[case::a_type_that_starts_like_the_raw_query(
     "pub async fn subscribe(RawQuery(q): RawQueryLike) -> Response {}"
@@ -662,7 +668,7 @@ fn the_extractor_check_reports_a_planted_violation(#[case] source: &str) {
 }
 
 #[test]
-fn the_extractor_check_accepts_the_header_map_of_the_three_streaming_handlers_only() {
+fn the_extractor_check_accepts_the_header_map_of_the_two_streaming_handlers_only() {
     let source = "pub async fn execute(State(schema): State<ApiSchema>, headers: HeaderMap, \
         ApiJson(body): ApiJson<Map<String, Value>>) -> Result<Response, Problem> {}";
 
@@ -681,14 +687,17 @@ fn the_extractor_check_accepts_the_header_map_of_the_three_streaming_handlers_on
 }
 
 #[test]
-fn the_extractor_check_accepts_the_raw_query_of_the_two_get_handlers_only() {
+fn the_extractor_check_accepts_the_raw_query_of_the_get_handler_only() {
     let source = "pub async fn subscribe(State(schema): State<ApiSchema>, headers: HeaderMap, \
         RawQuery(query): RawQuery) -> Response {}";
 
     assert_eq!(disallowed_parameters(source), Vec::<String>::new());
     assert_eq!(
         disallowed_parameters(&source.replace("fn subscribe", "fn subscribe_or_explore")),
-        Vec::<String>::new()
+        [
+            "subscribe_or_explore: headers: HeaderMap",
+            "subscribe_or_explore: RawQuery(query): RawQuery"
+        ]
     );
     assert_eq!(
         disallowed_parameters(&source.replace("fn subscribe", "fn execute")),
