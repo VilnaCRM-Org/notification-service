@@ -104,7 +104,7 @@ Fixed messages:
 | --- | --- | --- | --- |
 | `invalid configuration` | ERROR | `variable`, `reason` | one entry per problem; `serve` then exits with status 2 |
 | `listening` | INFO | `addr`, `env`, `version` | start-up marker |
-| `request completed` | INFO | `http.response.status_code`, `duration_ms` | the access log, exactly one per request, `/ping`, 404 and 405 included |
+| `request completed` | INFO | `http.response.status_code`, `duration_ms` | the access log, exactly one per request that reaches the router, `/ping`, 404 and 405 included; a request that the HTTP server refuses itself writes none: on an HTTP/1.1 connection, a request-target over 65 534 bytes gets its bare 414 (maintainer decision M6), a malformed request head its bare 400 and a head of more than 100 header fields its bare 431 (see [Answers before a stream opens](streaming-protocol.md#answers-before-a-stream-opens)) |
 | `request failed` | ERROR | `error` | the error chain behind a 5xx problem |
 | `panic` | ERROR | `panic` | message and location; the request gets a 500 problem and the process keeps running |
 | `health probe failed` | WARN | `dependency`, `cause` | see the health-probe runbook |
@@ -132,7 +132,7 @@ The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` direct
 
 ### Request ids
 
-The header is `x-request-id`. An inbound value is accepted when it matches `^[A-Za-z0-9._-]{1,128}$`; any other value is dropped and a UUID is generated. The id is echoed on every response, including 404, 405, panic and timeout responses, and it is the field `request_id` of the first element of `spans` of every log line of the request, also of the lines written inside a span the request opened (at `debug` level the SQS client writes such lines). To follow one request:
+The header is `x-request-id`. An inbound value is accepted when it matches `^[A-Za-z0-9._-]{1,128}$`; any other value is dropped and a UUID is generated. The id is echoed on every response of the router, including 404, 405, panic and timeout responses. A request that the HTTP server refuses before the router, such as a request-target over 65 534 bytes on an HTTP/1.1 connection, gets no `x-request-id` and is not logged, so a client's complaint about a bare 414 has no log entry to look for (see [Answers before a stream opens](streaming-protocol.md#answers-before-a-stream-opens)). The id is the field `request_id` of the first element of `spans` of every log line of the request, also of the lines written inside a span the request opened (at `debug` level the SQS client writes such lines). To follow one request:
 
 ```sh
 docker compose logs --no-log-prefix app | jq -c 'select(any(.spans[]?; .request_id == "<id>"))'
