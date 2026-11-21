@@ -11,6 +11,7 @@ Inputs of this stage:
   - M3: only issue #8 is planned;
   - M4 (2026-11-20, the answer "Ignore both, replace ours"): RUSTSEC-2026-0542 (humantime) and RUSTSEC-2026-0543 (chrono) are ignored in the protected `deny.toml` by exactly the two approved entries, and one new story of this pull request replaces humantime in the two service crates (section 9);
   - M5 (2026-11-21, the answer "Approve the bound"): `query` holds at most 4 096 and `operationName` at most 128 characters (Unicode code points), documented as `maxLength` on the POST body and the GET parameters of `/api/graphql` and refused with the 422 validation problem on both transports and both forms, a recorded change of today's behaviour of the JSON transport (fix `56a8725`, section 3.11);
+  - M6 (2026-11-21, the answer "Document the server limit", after QA iteration 1): the HTTP server, hyper, refuses every HTTP/1.1 request whose request-target is longer than 65 534 bytes with its own bare 414 before the service sees it, so the GET form reads a query string of at most the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes, and that bare 414 is a documented exception to the CORS and `Vary` rules; no behaviour change (`prd.md` FR-4);
 - the analyst's protocol research and codebase notes of 2026-11-16;
 - the repository itself, read again for this file.
 
@@ -365,6 +366,7 @@ Source key (as in the analyst's research):
   - the exclusion of that operation from Schemathesis in `make/gates.mk` (`71aab46`, 2026-11-17);
   - the two `[advisories] ignore` entries of RUSTSEC-2026-0542 and RUSTSEC-2026-0543 in `deny.toml` (`c4f83b3`, 2026-11-20, section 9);
   - the plant of `jiff` in place of `humantime` in test G8 of `tests/CLI/bats/make_quality_gates.bats`: once story 1.4 removes `humantime` from `[workspace.dependencies]`, the old plant makes `cargo update --workspace --offline` fail, and `humantime` cannot stay there because `deny.toml` denies an unused workspace dependency (`49641e7`, 2026-11-20, section 9) [V `git show 49641e7`].
+- Amended on 2026-11-21: a fifth protected change, approved the same way after the CI check Production-image scan failed on `2be11f7`: the entry `CVE-2026-124709` in `.trivyignore` (`0abd9c1`), because libssl3t64 of the distroless base image has no fixed package and the service binary does not link libssl [V `git show 0abd9c1`].
 - The test oracles that change (section 2.5) are ordinary test files.
 
 ## 7. Risks
