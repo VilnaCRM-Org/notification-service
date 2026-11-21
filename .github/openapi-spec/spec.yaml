@@ -479,17 +479,19 @@ paths:
       parameters:
       - name: query
         in: query
-        description: The GraphQL document. A missing `query`, a parameter given twice or a value that is not percent-encoded UTF-8 is the 400 problem.
+        description: The GraphQL document. A missing `query`, a parameter given twice or a value that is not percent-encoded UTF-8 is the 400 problem; a document longer than its `maxLength` is the 422 problem.
         required: true
         schema:
           type: string
+          maxLength: 4096
         example: 'subscription LoadTest { events(types: ["load.test"]) { id type data } }'
       - name: operationName
         in: query
-        description: The name of the operation of the document to run; needed only when the document holds more than one.
+        description: The name of the operation of the document to run; needed only when the document holds more than one. A name longer than its `maxLength` is the 422 problem.
         required: false
         schema:
           type: string
+          maxLength: 128
         example: LoadTest
       - name: variables
         in: query
@@ -583,7 +585,7 @@ paths:
                 title: URI Too Long
                 type: about:blank
         '422':
-          description: '`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter.'
+          description: '`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter. Else `query` or `operationName` is longer than its `maxLength`: one `length` violation for each.'
           content:
             application/problem+json:
               schema:
@@ -705,7 +707,7 @@ paths:
                 title: Unsupported Media Type
                 type: about:blank
         '422':
-          description: 'The body is JSON but not a GraphQL request: not an object, without a string `query`, or with a member of the wrong type.'
+          description: 'The body is JSON but not a GraphQL request: not an object, without a string `query`, or with a member of the wrong type. Else `query` or `operationName` is longer than its `maxLength`: the validation problem with one `length` violation for each.'
           content:
             application/problem+json:
               schema:
@@ -918,7 +920,7 @@ components:
           pattern: ^[1-9][0-9]*$
     GraphQLRequest:
       type: object
-      description: One GraphQL operation, the JSON body of GraphQL over HTTP (section 4.4). Members other than the four listed are accepted and ignored; a JSON array, a batch, is refused.
+      description: One GraphQL operation, the JSON body of GraphQL over HTTP (section 4.4). Members other than the four listed are accepted and ignored; a JSON array, a batch, is refused. `query` and `operationName` are bounded by their `maxLength`, the whole body by `HTTP_MAX_BODY_BYTES`, whose default holds both at their bound in any encoding.
       required:
       - query
       properties:
@@ -931,10 +933,12 @@ components:
           type:
           - string
           - 'null'
-          description: The name of the operation of the document to run; needed only when the document holds more than one.
+          description: The name of the operation of the document to run; needed only when the document holds more than one. A name longer than its `maxLength` is the 422 problem.
+          maxLength: 128
         query:
           type: string
-          description: The GraphQL document.
+          description: The GraphQL document. A document longer than its `maxLength` is the 422 problem.
+          maxLength: 4096
         variables:
           type:
           - object

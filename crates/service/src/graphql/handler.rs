@@ -18,7 +18,7 @@ use axum::http::header::{ALLOW, CONTENT_SECURITY_POLICY};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse as _, Response};
 use serde_json::{Map, Value};
-use shared_application::http::{ApiJson, Problem};
+use shared_application::http::{ApiJson, Problem, Violation};
 
 use crate::graphql::document::{
     CursorHeader, EXAMPLE_OPERATION, EXAMPLE_QUERY, EXAMPLE_SUBSCRIPTION, GetParams, GraphQLEvent,
@@ -38,6 +38,18 @@ const EXPLORER_PAGE: &str = include_str!("explorer.html");
 
 /// The request header that carries the cursor of a subscription (FR-11).
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+
+/// The longest GraphQL document, `query`, that a request of either form may carry, in characters:
+/// twice the introspection query of the explorer (about 2 000 characters). Written in its longest
+/// form, twelve bytes per character (a `\u` escape pair in JSON, percent-encoded UTF-8 in a query
+/// string), a document of this length with an operation name of [`MAX_OPERATION_NAME_CHARS`]
+/// still fits within the default `HTTP_MAX_BODY_BYTES`, so the document never admits a request
+/// that only the size limit refuses (FR-29).
+pub(crate) const MAX_QUERY_CHARS: usize = 4_096;
+
+/// The longest operation name, `operationName`, that a request of either form may carry, in
+/// characters: the bound of an event type name.
+pub(crate) const MAX_OPERATION_NAME_CHARS: usize = 128;
 
 /// The description of `POST /api/graphql`.
 pub(crate) const POST_TEXT: &str = "Executes one GraphQL operation. Without an `Accept` that \
@@ -77,6 +89,16 @@ const GET_BAD_REQUEST_TEXT: &str = "The query string cannot be read: `query` is 
     parameter is given twice, or a name or a value is not percent-encoded UTF-8. The detail names \
     only the four known parameters.";
 
+/// The description of the 422 problem of `POST /api/graphql`.
+const POST_UNPROCESSABLE_TEXT: &str = "The body is JSON but not a GraphQL request: not an object, \
+    without a string `query`, or with a member of the wrong type. Else `query` or `operationName` \
+    is longer than its `maxLength`: the validation problem with one `length` violation for each.";
+
+/// The description of the 422 problem of `GET /api/graphql`.
+const GET_UNPROCESSABLE_TEXT: &str = "`variables` or `extensions` is not a JSON-encoded object: \
+    one `format` violation on that parameter. Else `query` or `operationName` is longer than its \
+    `maxLength`: one `length` violation for each.";
+
 /// The example of the explorer page, the `text/html` answer of a GET in `dev`.
 const EXPLORER_EXAMPLE: &str = "<!doctype html>";
 
@@ -96,9 +118,10 @@ const UNAVAILABLE_TEXT: &str = "A subscription the node cannot take, because it 
 ///
 /// # Errors
 ///
-/// The 422 problem when the body is not a GraphQL request, on both transports. A body that is not
-/// JSON, has the wrong media type or is too large is rejected by the extractor with its own
-/// problem, before the transport is chosen.
+/// The 422 problem when the body is not a GraphQL request, or when its `query` or `operationName`
+/// is longer than its bound, on both transports. A body that is not JSON, has the wrong media type
+/// or is too large is rejected by the extractor with its own problem, before the transport is
+/// chosen.
 #[utoipa::path(
     post,
     path = GRAPHQL_PATH,
@@ -131,7 +154,7 @@ const UNAVAILABLE_TEXT: &str = "A subscription the node cannot take, because it 
             example = json!(problem_example(StatusCode::PAYLOAD_TOO_LARGE, TOO_LARGE_DETAIL))),
         (status = 415, description = "The body is not `application/json`.", body = Problem, content_type = "application/problem+json",
             example = json!(problem_example(StatusCode::UNSUPPORTED_MEDIA_TYPE, MEDIA_TYPE_DETAIL))),
-        (status = 422, description = "The body is JSON but not a GraphQL request: not an object, without a string `query`, or with a member of the wrong type.",
+        (status = 422, description = POST_UNPROCESSABLE_TEXT,
             body = Problem, content_type = "application/problem+json", example = json!(not_a_graphql_request())),
         (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(unavailable_example())),
@@ -143,7 +166,7 @@ pub async fn execute(
     headers: HeaderMap,
     ApiJson(body): ApiJson<Map<String, Value>>,
 ) -> Result<Response, Problem> {
-    let request = to_request(body).ok_or_else(not_a_graphql_request)?;
+    let request = to_request(body)?;
     if negotiates_event_stream(&headers) {
         return Ok(event_stream::respond(&schema, request, last_event_id(&headers)).await);
     }
@@ -179,7 +202,7 @@ pub async fn execute(
             example = json!(Problem::new(StatusCode::METHOD_NOT_ALLOWED))),
         (status = 414, description = "The query string is longer than `HTTP_MAX_BODY_BYTES` as received.", body = Problem, content_type = "application/problem+json",
             example = json!(problem_example(StatusCode::URI_TOO_LONG, TOO_LONG_DETAIL))),
-        (status = 422, description = "`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter.",
+        (status = 422, description = GET_UNPROCESSABLE_TEXT,
             body = Problem, content_type = "application/problem+json", example = json!(not_an_object_example())),
         (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(unavailable_example())),
@@ -226,7 +249,7 @@ pub async fn subscribe(
             example = json!(Problem::new(StatusCode::METHOD_NOT_ALLOWED))),
         (status = 414, description = "The query string is longer than `HTTP_MAX_BODY_BYTES` as received.", body = Problem, content_type = "application/problem+json",
             example = json!(problem_example(StatusCode::URI_TOO_LONG, TOO_LONG_DETAIL))),
-        (status = 422, description = "`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter.",
+        (status = 422, description = GET_UNPROCESSABLE_TEXT,
             body = Problem, content_type = "application/problem+json", example = json!(not_an_object_example())),
         (status = 503, description = UNAVAILABLE_TEXT, body = Problem, content_type = "application/problem+json",
             example = json!(unavailable_example())),
@@ -246,7 +269,8 @@ pub async fn subscribe_or_explore(
 
 /// The event stream of the operation in the query string `query` of a GET that negotiated it, or
 /// the problem that refuses the query string: the 500 problem of a schema without the
-/// `QueryStringLimit`, then the 414, 400 and 422 problems of `query_string::read` (FR-4, FR-6).
+/// `QueryStringLimit`, then the 414, 400 and 422 problems of `query_string::read`, then the 422
+/// problem of a member longer than its bound (FR-4, FR-6, FR-29).
 async fn stream_query_string(
     schema: &ApiSchema,
     headers: &HeaderMap,
@@ -262,7 +286,7 @@ async fn stream_query_string(
 fn get_request(schema: &ApiSchema, query: Option<&str>) -> Result<async_graphql::Request, Problem> {
     let limit = query_string::limit(schema)?;
     let body = query_string::read(query, limit.max_bytes)?;
-    to_request(body).ok_or_else(not_a_graphql_request)
+    to_request(body)
 }
 
 /// The cursor a request carries in its `Last-Event-ID` header (FR-11).
@@ -276,12 +300,42 @@ fn not_a_graphql_request() -> Problem {
         .with_detail("The request body is not a GraphQL request.")
 }
 
-/// The request for a body that has a string member `query` and otherwise converts.
-pub(crate) fn to_request(body: Map<String, Value>) -> Option<async_graphql::Request> {
+/// The request of a body that has a string member `query` and otherwise converts, or its 422
+/// problem: `The request body is not a GraphQL request.`, else the validation problem with one
+/// `length` violation for each of `query` and `operationName` that is longer than its bound
+/// (FR-29). Both forms build their request here, so both answer the same bounds.
+pub(crate) fn to_request(body: Map<String, Value>) -> Result<async_graphql::Request, Problem> {
     if !body.get("query").is_some_and(Value::is_string) {
-        return None;
+        return Err(not_a_graphql_request());
     }
-    serde_json::from_value(Value::Object(body)).ok()
+    let request: async_graphql::Request =
+        serde_json::from_value(Value::Object(body)).map_err(|_error| not_a_graphql_request())?;
+    let violations: Vec<Violation> = [
+        ("query", Some(request.query.as_str()), MAX_QUERY_CHARS),
+        (
+            "operationName",
+            request.operation_name.as_deref(),
+            MAX_OPERATION_NAME_CHARS,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, text, bound)| too_long(name, text?, bound))
+    .collect();
+    if violations.is_empty() {
+        Ok(request)
+    } else {
+        Err(Problem::validation_failed(violations))
+    }
+}
+
+/// The `length` violation of the member `name` when `text` has more than `bound` characters; the
+/// violation names the bound and never holds the text (NFR-8).
+fn too_long(name: &str, text: &str, bound: usize) -> Option<Violation> {
+    (text.chars().count() > bound).then(|| Violation {
+        property_path: name.to_owned(),
+        message: format!("{name} must contain at most {bound} characters"),
+        code: "length".to_owned(),
+    })
 }
 
 /// The development explorer page with its own content security policy, the answer of a GET in

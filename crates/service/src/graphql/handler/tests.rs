@@ -375,13 +375,15 @@ async fn a_subscription_that_selects_every_event_field_once_passes_validation() 
 }
 
 /// A subscription of complexity `1 + 501 + ids`: the field `events`, its `data` once and `ids`
-/// aliased selections of `id`.
+/// aliased selections of `id`, written compactly so that it stays within [`MAX_QUERY_CHARS`].
 fn data_and_ids(ids: usize) -> String {
     let mut selection = String::from("data");
     for n in 0..ids {
-        write!(selection, " i{n}: id").unwrap();
+        write!(selection, " i{n}:id").unwrap();
     }
-    format!(r#"subscription {{ events(types: ["a"]) {{ {selection} }} }}"#)
+    let document = format!(r#"subscription {{ events(types: ["a"]) {{ {selection} }} }}"#);
+    assert!(document.chars().count() <= MAX_QUERY_CHARS);
+    document
 }
 
 #[rstest]
@@ -1439,6 +1441,203 @@ async fn a_get_without_sse_on_a_schema_without_the_query_string_limit_keeps_its_
         Some("text/html; charset=utf-8")
     );
     assert_eq!(recorder.lines(), Vec::<LogLine>::new());
+}
+
+// ---- the bounds of the document and the operation name (FR-29) ----
+
+/// A character that is one code point and four bytes of UTF-8, so a string of it is counted in
+/// characters and not in bytes.
+const WIDE: &str = "\u{1F600}";
+
+/// The query-string bound of the schemas of the bound tests: the default of
+/// `HTTP_MAX_BODY_BYTES`, so only the bounds of the members can refuse their requests.
+const WIDE_QUERY_LIMIT: usize = 65_536;
+
+/// The violations of the 422 problem of a request whose members `(name, bound)` are longer than
+/// their bounds, one `length` violation each, in the order of the problem.
+fn length_violations(members: &[(&str, usize)]) -> Value {
+    members
+        .iter()
+        .map(|(name, bound)| {
+            json!({
+                "propertyPath": name,
+                "message": format!("{name} must contain at most {bound} characters"),
+                "code": "length",
+            })
+        })
+        .collect()
+}
+
+/// The bodies whose `query` or `operationName`, or both, are longer than their bounds, with the
+/// violations of their 422 problem.
+fn overlong_bodies() -> Vec<(Value, Value)> {
+    let query_at_bound = WIDE.repeat(MAX_QUERY_CHARS);
+    let name_at_bound = WIDE.repeat(MAX_OPERATION_NAME_CHARS);
+    vec![
+        (
+            json!({ "query": "a".repeat(MAX_QUERY_CHARS + 1) }),
+            length_violations(&[("query", MAX_QUERY_CHARS)]),
+        ),
+        (
+            json!({ "query": format!("{query_at_bound}{WIDE}"), "operationName": name_at_bound }),
+            length_violations(&[("query", MAX_QUERY_CHARS)]),
+        ),
+        (
+            json!({
+                "query": query_at_bound,
+                "operationName": format!("{name_at_bound}{WIDE}"),
+            }),
+            length_violations(&[("operationName", MAX_OPERATION_NAME_CHARS)]),
+        ),
+        (
+            json!({
+                "query": "a".repeat(MAX_QUERY_CHARS + 1),
+                "operationName": "A".repeat(MAX_OPERATION_NAME_CHARS + 1),
+                "variables": {},
+            }),
+            length_violations(&[
+                ("operationName", MAX_OPERATION_NAME_CHARS),
+                ("query", MAX_QUERY_CHARS),
+            ]),
+        ),
+    ]
+}
+
+/// The query string of the GET form that carries the members of `body`.
+fn query_string_of(body: &Value) -> String {
+    body.as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, value)| {
+            let text = value
+                .as_str()
+                .map_or_else(|| value.to_string(), ToOwned::to_owned);
+            format!("{name}={}", encoded(&text))
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The schema of a node with `state` and the query-string bound [`WIDE_QUERY_LIMIT`].
+fn widely_limited(state: &EventStreamState) -> ApiSchema {
+    builder()
+        .data(state.clone())
+        .data(QueryStringLimit {
+            max_bytes: WIDE_QUERY_LIMIT,
+        })
+        .finish()
+}
+
+#[tokio::test]
+async fn a_post_whose_document_or_operation_name_is_too_long_is_the_422_problem_on_both_transports()
+{
+    let state = started_state();
+    for (body, violations) in overlong_bodies() {
+        for accept in [None, Some("text/event-stream")] {
+            let headers: Vec<(&str, &str)> =
+                accept.iter().map(|value| ("accept", *value)).collect();
+            let router = router_of(builder().data(state.clone()).finish());
+
+            let response = router
+                .oneshot(post_with("application/json", &body.to_string(), &headers))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{accept:?}"
+            );
+            assert_eq!(content_type(&response), "application/problem+json");
+            let problem = json_of(response).await;
+            assert_eq!(problem["type"], "/problems/validation-failed");
+            assert_eq!(problem["violations"], violations, "{accept:?}");
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn a_get_whose_document_or_operation_name_is_too_long_is_the_422_problem_in_every_mode() {
+    let state = started_state();
+    for (body, violations) in overlong_bodies() {
+        for mode in MODES {
+            let answer = whole(
+                get_response(
+                    widely_limited(&state),
+                    mode,
+                    get_with(&query_string_of(&body), &[("accept", "text/event-stream")]),
+                )
+                .await,
+            )
+            .await;
+
+            assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{mode:?}");
+            assert_eq!(problem_body(&answer)["violations"], violations, "{mode:?}");
+        }
+    }
+    assert_eq!(state.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn the_format_violation_of_the_get_form_comes_before_the_length_violations() {
+    let state = started_state();
+    let query_string = format!("query={}&variables=1", "a".repeat(MAX_QUERY_CHARS + 1));
+
+    let answer = whole(
+        get_response(
+            widely_limited(&state),
+            Mode::Other,
+            get_with(&query_string, &[("accept", "text/event-stream")]),
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(
+        problem_body(&answer)["violations"],
+        json!([{
+            "propertyPath": "variables",
+            "message": "variables must be a JSON-encoded object",
+            "code": "format",
+        }])
+    );
+}
+
+#[tokio::test]
+async fn a_document_and_an_operation_name_at_their_bounds_are_executed_on_both_forms() {
+    let state = started_state();
+    let operation = "A".repeat(MAX_OPERATION_NAME_CHARS);
+    let document = format!(
+        "query {operation} {{ __typename }} #{}",
+        WIDE.repeat(MAX_QUERY_CHARS - MAX_OPERATION_NAME_CHARS - 23)
+    );
+    assert_eq!(document.chars().count(), MAX_QUERY_CHARS);
+    let body = json!({ "query": document, "operationName": operation });
+
+    let posted = post_to(&state, &body).await;
+    assert_eq!(posted.status(), StatusCode::OK);
+    assert_eq!(
+        json_of(posted).await,
+        json!({ "data": { "__typename": "Query" } })
+    );
+    for mode in MODES {
+        let answer = whole(
+            get_response(
+                widely_limited(&state),
+                mode,
+                get_with(&query_string_of(&body), &[("accept", "text/event-stream")]),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(answer.status, StatusCode::OK, "{mode:?}");
+        assert_eq!(
+            single_result_of(&answer),
+            json!({ "data": { "__typename": "Query" } })
+        );
+    }
 }
 
 /// The entry of the document for `method` of the `GraphQL` path.

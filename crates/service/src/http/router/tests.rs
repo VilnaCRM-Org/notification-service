@@ -17,7 +17,9 @@ use crate::bootstrap::{Adapters, application, router};
 use crate::cli::ServeArgs;
 use crate::config::Config;
 use crate::graphql::QueryStringLimit;
-use crate::graphql::handler::EXPLORER_CONTENT_SECURITY_POLICY;
+use crate::graphql::handler::{
+    EXPLORER_CONTENT_SECURITY_POLICY, MAX_OPERATION_NAME_CHARS, MAX_QUERY_CHARS,
+};
 use crate::graphql::schema::builder;
 use crate::http::docs::DOCS_CONTENT_SECURITY_POLICY;
 use crate::http::router::{GRAPHQL_PATH, assemble};
@@ -275,6 +277,91 @@ async fn a_body_over_the_limit_is_the_413_problem() {
         "application/problem+json"
     );
     assert_common_headers(&answer, DEFAULT_CONTENT_SECURITY_POLICY, "413");
+}
+
+/// `count` copies of the character U+1F600 in their longest JSON form, a `\u` escape pair: twelve
+/// bytes per character.
+fn escaped_wide(count: usize) -> String {
+    r"\ud83d\ude00".repeat(count)
+}
+
+/// `count` copies of the character U+1F600 in their longest query-string form, four
+/// percent-encoded bytes: twelve bytes per character.
+fn encoded_wide(count: usize) -> String {
+    "%F0%9F%98%80".repeat(count)
+}
+
+/// The GraphQL body whose `query` and `operationName` hold `query` and `name` copies of U+1F600 in
+/// their longest form.
+fn widest_body(query: usize, name: usize) -> String {
+    format!(
+        r#"{{"query":"{}","operationName":"{}","variables":{{}},"extensions":{{}}}}"#,
+        escaped_wide(query),
+        escaped_wide(name)
+    )
+}
+
+/// A GET of the GraphQL path that negotiates the event stream, whose `query` and `operationName`
+/// hold `query` and `name` copies of U+1F600 in their longest form, and the length of its query
+/// string.
+fn widest_get(query: usize, name: usize) -> (Request<Body>, usize) {
+    let query_string = format!(
+        "query={}&operationName={}&variables=%7B%7D&extensions=%7B%7D",
+        encoded_wide(query),
+        encoded_wide(name)
+    );
+    let length = query_string.len();
+    let request = Request::get(format!("{GRAPHQL_PATH}?{query_string}"))
+        .header(header::ACCEPT, "text/event-stream")
+        .body(Body::empty())
+        .unwrap();
+    (request, length)
+}
+
+/// The document never admits a request that only the size limit refuses (FR-29): with the default
+/// `HTTP_MAX_BODY_BYTES`, a `query` and an `operationName` at their bounds, every character in its
+/// longest form, are executed on both forms, and one character more is the 422 problem, not the
+/// 413 or the 414.
+#[tokio::test]
+async fn the_longest_document_and_operation_name_fit_the_default_size_limit_in_any_encoding() {
+    let config = config("test");
+    let app = router(adapters(), &config).unwrap();
+    assert_eq!(escaped_wide(1).len(), 12);
+    assert_eq!(encoded_wide(1).len(), 12);
+    let body = widest_body(MAX_QUERY_CHARS, MAX_OPERATION_NAME_CHARS);
+    let (get, query_string_length) = widest_get(MAX_QUERY_CHARS, MAX_OPERATION_NAME_CHARS);
+    assert!(body.len() <= config.max_body_bytes, "{}", body.len());
+    assert!(
+        query_string_length <= config.max_body_bytes,
+        "{query_string_length}"
+    );
+
+    let posted = send_to(&app, request(Method::POST, GRAPHQL_PATH, Some(&body))).await;
+    let streamed = send_to(&app, get).await;
+
+    assert_eq!(posted.status, StatusCode::OK, "{}", posted.body);
+    assert_eq!(posted.headers[header::CONTENT_TYPE], "application/json");
+    assert_eq!(streamed.status, StatusCode::OK, "{}", streamed.body);
+    assert_eq!(streamed.headers[header::CONTENT_TYPE], "text/event-stream");
+    for (query, name, path) in [
+        (MAX_QUERY_CHARS + 1, MAX_OPERATION_NAME_CHARS, "query"),
+        (
+            MAX_QUERY_CHARS,
+            MAX_OPERATION_NAME_CHARS + 1,
+            "operationName",
+        ),
+    ] {
+        let body = widest_body(query, name);
+        let posted = send_to(&app, request(Method::POST, GRAPHQL_PATH, Some(&body))).await;
+        let streamed = send_to(&app, widest_get(query, name).0).await;
+
+        for answer in [posted, streamed] {
+            assert_eq!(answer.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+            let problem: Value = serde_json::from_str(&answer.body).unwrap();
+            assert_eq!(problem["violations"][0]["propertyPath"], path);
+            assert_eq!(problem["violations"][0]["code"], "length");
+        }
+    }
 }
 
 #[tokio::test(start_paused = true)]

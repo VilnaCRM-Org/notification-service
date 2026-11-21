@@ -258,9 +258,14 @@ fn the_request_schema_requires_a_string_query_and_accepts_other_members() {
 
     assert_eq!(schema["required"], json!(["query"]));
     assert_eq!(schema["properties"]["query"]["type"], "string");
+    assert_eq!(schema["properties"]["query"]["maxLength"], MAX_QUERY_CHARS);
     assert_eq!(
         schema["properties"]["operationName"]["type"],
         json!(["string", "null"])
+    );
+    assert_eq!(
+        schema["properties"]["operationName"]["maxLength"],
+        MAX_OPERATION_NAME_CHARS
     );
     for member in ["variables", "extensions"] {
         assert_eq!(
@@ -319,9 +324,15 @@ fn the_get_parameters_are_the_query_string_of_graphql_over_http() {
     );
     assert_eq!(parameters[0]["example"], EXAMPLE_SUBSCRIPTION);
     assert_eq!(parameters[0]["description"], QUERY_TEXT);
-    assert_eq!(parameters[0]["schema"], json!({"type": "string"}));
+    assert_eq!(
+        parameters[0]["schema"],
+        json!({"type": "string", "maxLength": MAX_QUERY_CHARS})
+    );
     assert_eq!(parameters[1]["description"], OPERATION_TEXT);
-    assert_eq!(parameters[1]["schema"], json!({"type": "string"}));
+    assert_eq!(
+        parameters[1]["schema"],
+        json!({"type": "string", "maxLength": MAX_OPERATION_NAME_CHARS})
+    );
     assert_eq!(parameters[1]["example"], EXAMPLE_OPERATION);
     for (index, text) in [(2, VARIABLES_TEXT), (3, EXTENSIONS_TEXT)] {
         assert_eq!(

@@ -18,6 +18,8 @@ use utoipa::openapi::schema::{
 use utoipa::openapi::{RefOr, Required};
 use utoipa::{IntoParams, PartialSchema, ToSchema};
 
+use crate::graphql::handler::{MAX_OPERATION_NAME_CHARS, MAX_QUERY_CHARS};
+
 /// The event type of the examples: the type the load-test publisher writes (NFR-20).
 pub(crate) const EXAMPLE_TYPE: &str = "load.test";
 
@@ -69,7 +71,8 @@ const EVENT_ID_DIGITS: usize = 20;
 /// The description of [`GraphQLRequest`].
 const REQUEST_TEXT: &str = "One GraphQL operation, the JSON body of GraphQL over HTTP \
     (section 4.4). Members other than the four listed are accepted and ignored; a JSON array, a \
-    batch, is refused.";
+    batch, is refused. `query` and `operationName` are bounded by their `maxLength`, the whole \
+    body by `HTTP_MAX_BODY_BYTES`, whose default holds both at their bound in any encoding.";
 
 /// The description of [`GraphQLResponse`].
 const RESPONSE_TEXT: &str = "The execution result of one GraphQL operation. `data` is always \
@@ -86,11 +89,16 @@ const EVENT_TEXT: &str = "One event of the `text/event-stream` answer of the Gra
 
 /// The description of `query`.
 const QUERY_TEXT: &str = "The GraphQL document. A missing `query`, a parameter given twice or a \
-    value that is not percent-encoded UTF-8 is the 400 problem.";
+    value that is not percent-encoded UTF-8 is the 400 problem; a document longer than its \
+    `maxLength` is the 422 problem.";
 
 /// The description of `operationName`.
 const OPERATION_TEXT: &str = "The name of the operation of the document to run; needed only when \
-    the document holds more than one.";
+    the document holds more than one. A name longer than its `maxLength` is the 422 problem.";
+
+/// The description of the member `query` of [`GraphQLRequest`].
+const BODY_QUERY_TEXT: &str =
+    "The GraphQL document. A document longer than its `maxLength` is the 422 problem.";
 
 /// The description of `variables`.
 const VARIABLES_TEXT: &str = "The values of the variables of the operation: a JSON-encoded \
@@ -117,9 +125,12 @@ impl PartialSchema for GraphQLRequest {
         ObjectBuilder::new()
             .schema_type(Type::Object)
             .description(Some(REQUEST_TEXT))
-            .property("query", text("The GraphQL document."))
+            .property("query", bounded(BODY_QUERY_TEXT, MAX_QUERY_CHARS))
             .required("query")
-            .property("operationName", nullable(Type::String, OPERATION_TEXT))
+            .property(
+                "operationName",
+                nullable(Type::String, OPERATION_TEXT).max_length(Some(MAX_OPERATION_NAME_CHARS)),
+            )
             .property(
                 "variables",
                 nullable(
@@ -213,12 +224,22 @@ impl IntoParams for GetParams {
     /// `query`, required, then `operationName`, `variables` and `extensions`.
     fn into_params(_parameter_in: impl Fn() -> Option<ParameterIn>) -> Vec<Parameter> {
         vec![
-            query_parameter("query", Required::True, QUERY_TEXT, string())
-                .example(Some(json!(EXAMPLE_SUBSCRIPTION)))
-                .build(),
-            query_parameter("operationName", Required::False, OPERATION_TEXT, string())
-                .example(Some(json!(EXAMPLE_OPERATION)))
-                .build(),
+            query_parameter(
+                "query",
+                Required::True,
+                QUERY_TEXT,
+                bounded_string(MAX_QUERY_CHARS),
+            )
+            .example(Some(json!(EXAMPLE_SUBSCRIPTION)))
+            .build(),
+            query_parameter(
+                "operationName",
+                Required::False,
+                OPERATION_TEXT,
+                bounded_string(MAX_OPERATION_NAME_CHARS),
+            )
+            .example(Some(json!(EXAMPLE_OPERATION)))
+            .build(),
             json_object_parameter("variables", VARIABLES_TEXT),
             json_object_parameter("extensions", EXTENSIONS_TEXT),
         ]
@@ -298,12 +319,28 @@ fn text(description: &str) -> Object {
         .build()
 }
 
+/// A string of at most `bound` characters.
+fn bounded_string(bound: usize) -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::String)
+        .max_length(Some(bound))
+        .build()
+}
+
+/// A string of at most `bound` characters, with a description.
+fn bounded(description: &str, bound: usize) -> Object {
+    ObjectBuilder::new()
+        .schema_type(Type::String)
+        .description(Some(description))
+        .max_length(Some(bound))
+        .build()
+}
+
 /// A value of `kind` or `null`, with a description.
-fn nullable(kind: Type, description: &str) -> Object {
+fn nullable(kind: Type, description: &str) -> ObjectBuilder {
     ObjectBuilder::new()
         .schema_type(SchemaType::from_iter([kind, Type::Null]))
         .description(Some(description))
-        .build()
 }
 
 /// A query parameter of the GET form, without its example.
