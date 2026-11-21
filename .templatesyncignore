@@ -28,6 +28,7 @@ docs/requests.http
 _typos.toml
 architecture.toml
 deny.toml
+.spectral.yaml
 docs/adr/
 docs/environment.md
 crates/internal/health-check/domain/src/value_object/dependency.rs
