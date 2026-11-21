@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::get;
 use shared_application::http::fallback::{method_not_allowed, not_found, panic_response};
 use shared_application::http::middleware::request_timeout;
 use tower::ServiceBuilder;
@@ -13,16 +12,13 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::config::{AppEnv, Config};
-use crate::graphql::handler::{execute, subscribe, subscribe_or_explore};
+use crate::config::Config;
 use crate::graphql::schema::ApiSchema;
-use crate::http::docs::{docs_asset, docs_page, openapi_json};
 use crate::http::origin;
-use crate::http::ping::ping;
 use crate::http::request_id::{REQUEST_ID_HEADER, sanitize_request_id};
 use crate::http::vary::vary_accept;
 use crate::http::{AppState, security_headers, trace};
-use crate::openapi::api_router;
+use crate::openapi::{api_router, graphql_router, operational_router};
 
 /// The path of the `GraphQL` route.
 pub const GRAPHQL_PATH: &str = "/api/graphql";
@@ -30,9 +26,13 @@ pub const GRAPHQL_PATH: &str = "/api/graphql";
 /// Builds the complete router.
 ///
 /// It holds the REST routes, the `GraphQL` route, liveness, the documentation routes and the two
-/// fallbacks. A GET of the `GraphQL` path serves the event stream in every mode when `Accept`
-/// admits it, and otherwise the explorer in `dev` and the 405 problem elsewhere, so the `Allow` of
-/// every other method lists `GET`, `HEAD` and `POST`. All of them sit under one middleware stack
+/// fallbacks. Every route comes from one of the three routers of the `OpenAPI` document
+/// ([`api_router`], [`graphql_router`] for the mode and [`operational_router`]), whose handlers
+/// are registered through `routes!`; each is split from its document and merged once its state is
+/// applied, so every route served is an operation of the document. A GET of the `GraphQL` path
+/// serves the event stream in every mode when `Accept` admits it, and otherwise the explorer in
+/// `dev` and the 405 problem elsewhere, so the `Allow` of every other method lists `GET`, `HEAD`
+/// and `POST`. All of them sit under one middleware stack
 /// whose first layer is the outermost: the three request id layers (sanitize, set, propagate),
 /// security headers, tracing, the CORS layer of the allowed origins (absent when none is allowed),
 /// `vary_accept` (`Vary: accept` on every answer to a GET or HEAD of the `GraphQL` path), the
@@ -42,12 +42,8 @@ pub const GRAPHQL_PATH: &str = "/api/graphql";
 /// values.
 pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
     let (rest, _document) = api_router().split_for_parts();
-    let graphql = if config.app_env == AppEnv::Dev {
-        get(subscribe_or_explore)
-    } else {
-        get(subscribe)
-    }
-    .post(execute);
+    let (graphql, _document) = graphql_router(config.app_env).split_for_parts();
+    let (operational, _document) = operational_router().split_for_parts();
     let middleware = ServiceBuilder::new()
         .layer(from_fn(sanitize_request_id))
         .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
@@ -69,11 +65,8 @@ pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
         .layer(from_fn_with_state(config.request_timeout, request_timeout))
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     rest.with_state(state)
-        .route(GRAPHQL_PATH, graphql.with_state(schema))
-        .route("/ping", get(ping))
-        .route("/api/docs", get(docs_page))
-        .route("/api/docs/openapi.json", get(openapi_json))
-        .route("/api/docs/{*file}", get(docs_asset))
+        .merge(graphql.with_state(schema))
+        .merge(operational)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware)

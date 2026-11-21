@@ -1,5 +1,6 @@
 //! GraphQL schema and transport (AD-18).
 
+pub mod document;
 mod event_stream;
 pub mod handler;
 mod negotiation;

@@ -14,6 +14,116 @@ servers:
 - url: /
   description: Current host
 paths:
+  /api/docs:
+    get:
+      tags:
+      - Documentation
+      summary: Serves the API documentation page.
+      description: Serves the Swagger UI page, which renders `GET /api/docs/openapi.json` and loads its files from `GET /api/docs/{file}`, nothing from a third-party origin. It is answered directly, without a redirect, under its own content security policy.
+      operationId: api_docs_get
+      responses:
+        '200':
+          description: The documentation page.
+          headers:
+            content-security-policy:
+              schema:
+                type: string
+              description: 'The policy of the page: everything from the service itself, nothing third-party.'
+          content:
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/docs/openapi.json:
+    get:
+      tags:
+      - Documentation
+      summary: Serves the OpenAPI document.
+      description: 'Serves this document as JSON: every operation the service serves, the one `make generate-openapi-spec` writes to `.github/openapi-spec/spec.yaml`.'
+      operationId: api_docs_openapi_json_get
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+                propertyNames:
+                  type: string
+              example:
+                openapi: 3.1.0
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/docs/{file}:
+    get:
+      tags:
+      - Documentation
+      summary: Serves a file of the documentation page.
+      description: 'Serves one file of the embedded Swagger UI, which the page loads: the style sheets, the scripts, the HTML pages and the icons of its distribution, each with its media type. Every file is one path segment deep; a deeper path matches no route.'
+      operationId: api_docs_file_get
+      parameters:
+      - name: file
+        in: path
+        description: The name of the file, as the page references it.
+        required: true
+        schema:
+          type: string
+        example: swagger-ui.css
+      responses:
+        '200':
+          description: The file, with its media type.
+          content:
+            text/css:
+              schema:
+                type: string
+              example: /* the style sheet */
+            text/javascript:
+              schema:
+                type: string
+              example: /* the script */
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+            image/png: {}
+        '400':
+          description: The file name is not percent-encoded UTF-8; the detail names the `file` parameter.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Invalid URL: Invalid UTF-8 in `file`'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '404':
+          description: No file of the page has this name.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 404
+                title: Not Found
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/event-types:
     get:
       tags:
@@ -359,6 +469,269 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /api/graphql:
+    get:
+      tags:
+      - GraphQL
+      summary: Runs the GraphQL operation of the query string as an event stream.
+      description: Runs the GraphQL operation of the query string as graphql-sse's distinct connections mode, for clients such as a browser `EventSource` that can only send a GET. The event stream is chosen when an `Accept` field admits `text/event-stream`, also through `*/*` or `text/*`, ranked above `text/html` and both JSON types. A GET without `Accept`, or one that ranks `text/html` or a JSON type at least as high, gets the explorer page in `dev` and the 405 problem elsewhere. The query-string problems come before any stream. docs/streaming-protocol.md describes the event stream.
+      operationId: api_graphql_get
+      parameters:
+      - name: query
+        in: query
+        description: The GraphQL document. A missing `query`, a parameter given twice or a value that is not percent-encoded UTF-8 is the 400 problem.
+        required: true
+        schema:
+          type: string
+        example: 'subscription LoadTest { events(types: ["load.test"]) { id type data } }'
+      - name: operationName
+        in: query
+        description: The name of the operation of the document to run; needed only when the document holds more than one.
+        required: false
+        schema:
+          type: string
+        example: LoadTest
+      - name: variables
+        in: query
+        description: 'The values of the variables of the operation: a JSON-encoded object. Any other value is the 422 problem with one `format` violation on `variables`.'
+        required: false
+        schema:
+          type: string
+          examples:
+          - '{}'
+          contentMediaType: application/json
+          contentSchema:
+            type: object
+        example: '{}'
+      - name: extensions
+        in: query
+        description: 'Protocol extensions: a JSON-encoded object, accepted and ignored. Any other value is the 422 problem with one `format` violation on `extensions`.'
+        required: false
+        schema:
+          type: string
+          examples:
+          - '{}'
+          contentMediaType: application/json
+          contentSchema:
+            type: object
+        example: '{}'
+      - name: Last-Event-ID
+        in: header
+        description: 'The cursor of a subscription: the id of the last event received, a decimal unsigned 64-bit integer. It wins over the `lastEventId` argument of `events`. A browser `EventSource` sends it by itself when it reconnects. A value that is not a cursor fails the subscription inside the accepted stream with one `VALIDATION_FAILED` result on `Last-Event-ID`, and is ignored by every other operation.'
+        required: false
+        schema:
+          type: string
+        example: '1043'
+      responses:
+        '200':
+          description: 'The event stream, as on POST: the comment line `:` first, then one `next` block per execution result, each subscription result with the event id; `complete` follows a single result only. Its schema describes one event. In `dev` only, a GET that does not negotiate the event stream gets the explorer page as `text/html`.'
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/GraphQLEvent'
+              examples:
+                complete:
+                  summary: The end of a single result
+                  value:
+                    data: ''
+                    event: complete
+                next:
+                  summary: A subscription result
+                  value:
+                    data: '{"data":{"events":{"id":"1043","type":"load.test","data":{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}}}}'
+                    event: next
+                    id: '1043'
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+        '400':
+          description: 'The query string cannot be read: `query` is missing, a known parameter is given twice, or a name or a value is not percent-encoded UTF-8. The detail names only the four known parameters.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to deserialize query string: missing field `query`'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '405':
+          description: A GET that does not negotiate the event stream, outside `dev`.
+          headers:
+            Allow:
+              schema:
+                type: string
+              description: '`POST`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 405
+                title: Method Not Allowed
+                type: about:blank
+        '414':
+          description: The query string is longer than `HTTP_MAX_BODY_BYTES` as received.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The query string is too long.
+                status: 414
+                title: URI Too Long
+                type: about:blank
+        '422':
+          description: '`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: format
+                  message: variables must be a JSON-encoded object
+                  propertyPath: variables
+        '503':
+          description: A subscription the node cannot take, because it is shutting down, starting or at its subscriber capacity, in this precedence; or a request that exceeded its time budget before the head. Safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    post:
+      tags:
+      - GraphQL
+      summary: Executes a GraphQL operation, answered as JSON or as an event stream.
+      description: 'Executes one GraphQL operation. Without an `Accept` that ranks `text/event-stream` above both JSON types the answer is the execution result as `application/json`, as it always was. With one, the operation runs as graphql-sse''s distinct connections mode: the subscription `events` delivers one `next` block per event, and a query one `next` block, then `complete`. The transport problems come before any stream; document errors, a breach of the one-root-field rule and invalid arguments are results. docs/streaming-protocol.md describes the event stream.'
+      operationId: api_graphql_post
+      parameters:
+      - name: Last-Event-ID
+        in: header
+        description: 'The cursor of a subscription: the id of the last event received, a decimal unsigned 64-bit integer. It wins over the `lastEventId` argument of `events`. A browser `EventSource` sends it by itself when it reconnects. A value that is not a cursor fails the subscription inside the accepted stream with one `VALIDATION_FAILED` result on `Last-Event-ID`, and is ignored by every other operation.'
+        required: false
+        schema:
+          type: string
+        example: '1043'
+      requestBody:
+        description: One GraphQL operation.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GraphQLRequest'
+            examples:
+              query:
+                summary: The catalog query
+                value:
+                  query: '{ eventTypes { name } }'
+              subscription:
+                summary: The subscription to load.test
+                value:
+                  operationName: LoadTest
+                  query: 'subscription LoadTest { events(types: ["load.test"]) { id type data } }'
+        required: true
+      responses:
+        '200':
+          description: 'The execution result as `application/json`, operation errors included; or, when `Accept` negotiates it, the event stream: the comment line `:` first, then one `next` block per execution result, each subscription result with the event id; `complete` follows a single result only. A subscription stream stays open, writes the comment whenever `STREAM_KEEP_ALIVE` passes without a block, and ends without `complete` when the node shuts down or a replay cannot read Kafka. The schema of the event stream describes one event.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphQLResponse'
+              example:
+                data:
+                  eventTypes:
+                  - name: load.test
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/GraphQLEvent'
+              examples:
+                complete:
+                  summary: The end of a single result
+                  value:
+                    data: ''
+                    event: complete
+                next:
+                  summary: A subscription result
+                  value:
+                    data: '{"data":{"events":{"id":"1043","type":"load.test","data":{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}}}}'
+                    event: next
+                    id: '1043'
+        '400':
+          description: The body is not JSON.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to parse the request body as JSON: expected value at line 1 column 1'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '413':
+          description: The body is larger than `HTTP_MAX_BODY_BYTES`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to buffer the request body: length limit exceeded'
+                status: 413
+                title: Payload Too Large
+                type: about:blank
+        '415':
+          description: The body is not `application/json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Expected request with `Content-Type: application/json`'
+                status: 415
+                title: Unsupported Media Type
+                type: about:blank
+        '422':
+          description: 'The body is JSON but not a GraphQL request: not an object, without a string `query`, or with a member of the wrong type.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request body is not a GraphQL request.
+                status: 422
+                title: Unprocessable Entity
+                type: about:blank
+        '503':
+          description: A subscription the node cannot take, because it is shutting down, starting or at its subscriber capacity, in this precedence; or a request that exceeded its time budget before the head. Safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/health:
     get:
       tags:
@@ -375,6 +748,27 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /ping:
+    get:
+      tags:
+      - HealthCheck
+      summary: Checks that the process is alive.
+      description: Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.
+      operationId: ping_get
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: pong
         default:
           description: Problem response.
           content:
@@ -491,6 +885,104 @@ components:
           maxLength: 128
           minLength: 1
           pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+    GraphQLEvent:
+      type: object
+      description: One event of the `text/event-stream` answer of the GraphQL path (graphql-sse, distinct connections mode), as the fields of its block. A `next` block carries one execution result; a subscription writes one per event, with the event id, and never `complete`; a single result is followed by `complete`, whose `data` line is empty. The comment line `:` followed by an empty line is the keep-alive and carries no event.
+      required:
+      - event
+      - data
+      properties:
+        data:
+          anyOf:
+          - type: string
+            maxLength: 0
+          - type: string
+            minLength: 1
+            contentMediaType: application/json
+            contentSchema:
+              $ref: '#/components/schemas/GraphQLResponse'
+          description: The execution result as one line of compact JSON for `next`; empty for `complete`.
+        event:
+          type: string
+          description: '`next` for an execution result, `complete` after a single result.'
+          enum:
+          - next
+          - complete
+        id:
+          type: string
+          description: The event id of a subscription result in decimal, the `id` of the event; a single result and `complete` have none. An `EventSource` sends the last one back as `Last-Event-ID`.
+          examples:
+          - '1043'
+          maxLength: 20
+          minLength: 1
+          pattern: ^[1-9][0-9]*$
+    GraphQLRequest:
+      type: object
+      description: One GraphQL operation, the JSON body of GraphQL over HTTP (section 4.4). Members other than the four listed are accepted and ignored; a JSON array, a batch, is refused.
+      required:
+      - query
+      properties:
+        extensions:
+          type:
+          - object
+          - 'null'
+          description: Protocol extensions, accepted and ignored.
+        operationName:
+          type:
+          - string
+          - 'null'
+          description: The name of the operation of the document to run; needed only when the document holds more than one.
+        query:
+          type: string
+          description: The GraphQL document.
+        variables:
+          type:
+          - object
+          - 'null'
+          description: The values of the variables of the operation.
+      additionalProperties: true
+    GraphQLResponse:
+      type: object
+      description: The execution result of one GraphQL operation. `data` is always written, `null` when a request error stopped the operation; `errors` and `extensions` only when they are not empty. An operation error, a document error or an invalid argument is a result, not a problem.
+      required:
+      - data
+      properties:
+        data:
+          description: The selected fields under their response names, or `null`.
+        errors:
+          type: array
+          items:
+            type: object
+            required:
+            - message
+            properties:
+              extensions:
+                type: object
+                description: '`code` (`VALIDATION_FAILED` or `INTERNAL_SERVER_ERROR`) and the `violations` of a validation error.'
+              locations:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    column:
+                      type: integer
+                    line:
+                      type: integer
+                description: The places of the document the error refers to.
+              message:
+                type: string
+                description: What went wrong.
+              path:
+                type: array
+                items:
+                  type:
+                  - string
+                  - integer
+                description: The response names and list indexes that led to the field.
+          description: The errors of the operation, each with its message.
+        extensions:
+          type: object
+          description: Protocol extensions of the result.
     Problem:
       type: object
       description: An RFC 9457 problem document.
@@ -605,7 +1097,11 @@ components:
           type: string
           description: Wire name of the invalid field.
 tags:
+- name: Documentation
+  description: The API documentation page and its document.
 - name: EventStream
   description: Event catalog and event stream status endpoints.
+- name: GraphQL
+  description: GraphQL queries and subscriptions over Server-Sent Events.
 - name: HealthCheck
   description: Runtime health-check endpoints.

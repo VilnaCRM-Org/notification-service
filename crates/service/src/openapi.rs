@@ -1,10 +1,19 @@
-//! The `OpenAPI` document of the REST API (AD-16).
+//! The `OpenAPI` document of every route the service serves (AD-16, FR-26, ADR 0022).
+//!
+//! Every route is registered through `OpenApiRouter::routes(routes!(..))`, which adds the route to
+//! the axum router and its operation to the document from the same `#[utoipa::path]` annotation.
+//! Three routers carry the routes, one per state their handlers take: the REST routes of the
+//! contexts, the `GraphQL` path and the operational routes (liveness and documentation).
 
 use shared_domain::BoxError;
 use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
+use utoipa_axum::routes;
 
-use crate::http::AppState;
+use crate::config::AppEnv;
+use crate::graphql::handler;
+use crate::graphql::schema::ApiSchema;
+use crate::http::{AppState, docs, ping};
 
 /// Version of the API contract, not of the release.
 ///
@@ -22,7 +31,9 @@ pub const API_VERSION: &str = "2.1.0";
     ),
     servers((url = "/", description = "Current host")),
     tags(
+        (name = "Documentation", description = "The API documentation page and its document."),
         (name = "EventStream", description = "Event catalog and event stream status endpoints."),
+        (name = "GraphQL", description = "GraphQL queries and subscriptions over Server-Sent Events."),
         (name = "HealthCheck", description = "Runtime health-check endpoints."),
     )
 )]
@@ -42,7 +53,8 @@ impl ExportError {
     }
 }
 
-/// One router for every REST operation, built without any state value.
+/// One router for every REST operation, built without any state value; its document carries the
+/// metadata of the whole document.
 ///
 /// The routes of each context are nested under `/api`.
 #[must_use]
@@ -62,10 +74,39 @@ pub fn api_router() -> OpenApiRouter<AppState> {
         .nest("/api", event_stream_application::http::router())
 }
 
-/// The document.
+/// `/api/graphql`: on GET `subscribe`, or `subscribe_or_explore` in `dev`, and `execute` on POST.
+///
+/// Both GET handlers carry the same annotation, so the document does not depend on the
+/// environment. GET is registered first, so the `Allow` of every other method reads
+/// `GET,HEAD,POST`.
+#[must_use]
+pub fn graphql_router(app_env: AppEnv) -> OpenApiRouter<ApiSchema> {
+    let routes = if app_env == AppEnv::Dev {
+        routes!(handler::subscribe_or_explore, handler::execute)
+    } else {
+        routes!(handler::subscribe, handler::execute)
+    };
+    OpenApiRouter::new().routes(routes)
+}
+
+/// `/ping` and the three documentation routes, whose handlers take no state.
+#[must_use]
+pub fn operational_router() -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(ping::ping))
+        .routes(routes!(docs::docs_page))
+        .routes(routes!(docs::openapi_json))
+        .routes(routes!(docs::docs_asset))
+}
+
+/// The document: the documents of the three routers merged, with the `prod` variant of
+/// [`graphql_router`]. `GET /api/docs/openapi.json` serves it and `openapi-export` writes it.
 #[must_use]
 pub fn document() -> utoipa::openapi::OpenApi {
-    api_router().into_openapi()
+    let mut document = api_router().into_openapi();
+    document.merge(graphql_router(AppEnv::Prod).into_openapi());
+    document.merge(operational_router().into_openapi());
+    document
 }
 
 /// The document as YAML.

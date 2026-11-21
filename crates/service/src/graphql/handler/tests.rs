@@ -1440,3 +1440,117 @@ async fn a_get_without_sse_on_a_schema_without_the_query_string_limit_keeps_its_
     );
     assert_eq!(recorder.lines(), Vec::<LogLine>::new());
 }
+
+/// The entry of the document for `method` of the `GraphQL` path.
+fn entry(method: &str) -> Value {
+    serde_json::to_value(crate::openapi::document()).unwrap()["paths"]["/api/graphql"][method]
+        .clone()
+}
+
+/// The sorted keys of `object`.
+fn keys(object: &Value) -> Vec<String> {
+    let mut keys: Vec<String> = object.as_object().unwrap().keys().cloned().collect();
+    keys.sort_unstable();
+    keys
+}
+
+#[test]
+fn the_post_entry_documents_the_body_both_transports_and_the_problems() {
+    let post = entry("post");
+
+    assert_eq!(post["operationId"], "api_graphql_post");
+    assert_eq!(post["tags"], json!(["GraphQL"]));
+    let body = &post["requestBody"]["content"]["application/json"];
+    assert_eq!(
+        body["schema"],
+        json!({"$ref": "#/components/schemas/GraphQLRequest"})
+    );
+    assert_eq!(
+        body["examples"]["query"]["value"],
+        json!({"query": "{ eventTypes { name } }"})
+    );
+    let subscription = body["examples"]["subscription"]["value"]["query"]
+        .as_str()
+        .unwrap();
+    assert!(subscription.contains(r#"events(types: ["load.test"])"#));
+    let ok = &post["responses"]["200"]["content"];
+    assert_eq!(
+        ok["application/json"]["schema"],
+        json!({"$ref": "#/components/schemas/GraphQLResponse"})
+    );
+    assert_eq!(
+        ok["text/event-stream"]["schema"],
+        json!({"$ref": "#/components/schemas/GraphQLEvent"})
+    );
+    assert_eq!(
+        keys(&ok["text/event-stream"]["examples"]),
+        ["complete", "next"]
+    );
+    assert_eq!(
+        keys(&post["responses"]),
+        ["200", "400", "413", "415", "422", "503", "default"]
+    );
+    assert_eq!(post["parameters"][0]["name"], "Last-Event-ID");
+}
+
+#[test]
+fn the_get_entry_documents_the_query_string_both_answers_and_the_problems() {
+    let get = entry("get");
+
+    assert_eq!(get["operationId"], "api_graphql_get");
+    assert_eq!(get["tags"], json!(["GraphQL"]));
+    let parameters: Vec<(&str, bool)> = get["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|parameter| {
+            (
+                parameter["name"].as_str().unwrap(),
+                parameter["required"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        parameters,
+        [
+            ("query", true),
+            ("operationName", false),
+            ("variables", false),
+            ("extensions", false),
+            ("Last-Event-ID", false),
+        ]
+    );
+    for index in [2, 3] {
+        let schema = &get["parameters"][index]["schema"];
+        assert_eq!(schema["contentMediaType"], "application/json");
+        assert_eq!(schema["contentSchema"], json!({"type": "object"}));
+    }
+    assert!(
+        get["parameters"][0]["example"]
+            .as_str()
+            .unwrap()
+            .contains(r#"events(types: ["load.test"])"#)
+    );
+    let ok = &get["responses"]["200"]["content"];
+    assert_eq!(keys(ok), ["text/event-stream", "text/html"]);
+    assert_eq!(
+        ok["text/event-stream"]["schema"],
+        json!({"$ref": "#/components/schemas/GraphQLEvent"})
+    );
+    assert_eq!(
+        keys(&get["responses"]),
+        ["200", "400", "405", "414", "422", "503", "default"]
+    );
+}
+
+#[test]
+fn both_get_handlers_carry_the_same_operation() {
+    use utoipa::Path as _;
+
+    assert_eq!(
+        serde_json::to_value(__path_subscribe::operation()).unwrap(),
+        serde_json::to_value(__path_subscribe_or_explore::operation()).unwrap()
+    );
+    assert_eq!(__path_subscribe::path(), GRAPHQL_PATH);
+    assert_eq!(__path_execute::path(), GRAPHQL_PATH);
+}

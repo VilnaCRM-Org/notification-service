@@ -45,6 +45,10 @@ crates/service/src/http/router.rs
 crates/service/src/http/router/tests.rs
 crates/service/src/http/origin.rs
 crates/service/src/http/origin/
+crates/service/src/http/ping.rs
+crates/service/src/http/ping/
+crates/service/src/http/docs.rs
+crates/service/src/http/docs/
 crates/service/tests/integration/bootstrap.rs
 crates/service/tests/integration/migrate.rs
 crates/service/tests/integration/serve.rs
