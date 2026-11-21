@@ -24,7 +24,7 @@ These records explain why the structure of the service is what it is. Each one h
 | [0018](0018-sqs-stays.md) | SQS stays | D11, FR-29 |
 | [0019](0019-readiness-follows-the-freshness-of-the-tail.md) | Readiness follows the freshness of the tail | design brief 3.7, FR-20, NFR-5, NFR-6 |
 | [0020](0020-postgresql-is-removed.md) | PostgreSQL is removed | D10, FR-31, FR-32, FR-33, FR-34 |
-| [0021](0021-graphql-subscriptions-over-server-sent-events.md) | GraphQL subscriptions over Server-Sent Events | P1 to P20, FR-1 to FR-21, NFR-3, NFR-5, NFR-7, NFR-8 |
-| [0022](0022-every-route-in-the-openapi-document.md) | Every route in the OpenAPI document | maintainer decision of 2026-11-17, FR-26 to FR-29, NFR-13, NFR-16, NFR-17, NFR-20 |
+| [0021](0021-graphql-subscriptions-over-server-sent-events.md) | GraphQL subscriptions over Server-Sent Events (amended by [0022](0022-every-route-in-the-openapi-document.md)) | P1 to P20, FR-1 to FR-21, NFR-3, NFR-5, NFR-7, NFR-8 |
+| [0022](0022-every-route-in-the-openapi-document.md) | Every route in the OpenAPI document | maintainer decisions of 2026-11-17 and M5 of 2026-11-21, FR-26 to FR-29, NFR-13, NFR-16, NFR-17, NFR-20 |
 
 A service keeps its own records in this directory next to the twelve of the template, as this one does from 0013 on. To add one, copy the form of an existing record, number it with the next free four-digit prefix and add a row to the table above. A superseded record stays as history: its title and first line name the record that replaces it. An amended record is not rewritten either: the record that amends it names the changed sentence, and the table above marks the amended record.
