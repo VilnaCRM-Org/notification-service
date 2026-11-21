@@ -3,3 +3,7 @@
 #   # <date of acceptance>: <reason>. Review by <review date, at most three months later>.
 #   <identifier, for example CVE-2026-00000>
 # A fix is preferred; an entry is only for a finding that has no fix yet.
+# 2026-11-21: libssl3t64 3.5.7-1~deb13u3 in the distroless cc-debian13 runtime layer; no fixed package exists yet.
+# The service binary does not link libssl (it needs only libgcc_s, libm, libc and the loader; TLS goes through rustls)
+# and uses no QUIC, so the vulnerable code is never loaded. Review by 2027-02-21.
+CVE-2026-124709
