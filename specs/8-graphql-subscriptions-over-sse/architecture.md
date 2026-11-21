@@ -12,7 +12,7 @@ author: bmad-autonomous-planning (create-architecture stage)
 
 # Architecture: GraphQL subscriptions over Server-Sent Events (issue #8)
 
-The issue gained two criteria on 2026-11-17 (every route in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green); the section "OpenAPI Document of Every Route" designs them (`prd.md` FR-26 to FR-29). The maintainer's decision M4 of 2026-11-20 on two RustSec advisories adds the section "Durations and Timestamps without humantime" (story 1.4, `prd.md` NFR-21) and the section "Protected Changes".
+The issue gained two criteria on 2026-11-17 (every route in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green); the section "OpenAPI Document of Every Route" designs them (`prd.md` FR-26 to FR-29). The maintainer's decision M4 of 2026-11-20 on two RustSec advisories adds the section "Durations and Timestamps without humantime" (story 1.4, `prd.md` NFR-21) and the section "Protected Changes". Two implementation-time amendments of 2026-11-21 follow: the maintainer's decision M5 approves the length bounds of the GraphQL `query` (4 096 characters) and `operationName` (128) on both transports and both forms, the root-cause fix of Schemathesis ST202 (`graphql/handler.rs`, "Schemathesis on every operation"); and review finding CQ-4 merges the two GET handlers of `/api/graphql` into one, which reads the explorer flag `ExplorerPage` from the schema data (`graphql/handler.rs`, "One registration per route").
 
 This document turns `prd.md` of this bundle into a design that can be coded story by story in the existing layers. The PRD binds the requirements, the protocol choices P1 to P20, the messages and the status codes. This document binds where each piece of code lives, how the GraphQL subscription field and the Server-Sent Events transport reuse the hub and the subscription state machine of bundle 4, the request flow, the error and 503 mapping, the contract changes, the tests per layer, the documentation and the decision record.
 
@@ -51,7 +51,7 @@ When the rust-backend-sdlc:rust-implementer agent is available, independent stor
 DB rule: parallel agents run only the DB-free targets `make.format` (make format), `make.lint_code` (make lint-code), `make.unit_tests` (make unit-tests), `make.architecture` (make architecture) and `make.complexity` (make complexity); one serialized verify step at a time runs the DB-backed targets `make.setup_test_db` (not available: capability absent), `make.integration_tests` (make integration-tests), `make.tests_with_coverage` (make tests-with-coverage), `make.e2e_tests` (make e2e-tests) and `make.sqlx_prepare` (not available: capability absent). A target that reads not available is skipped and reported.
 
 - Scope: only issue #8; the four commits of issue #7 already on the branch stay as they are.
-- Placement: code changes only in `crates/notification/event-stream/application/src/{envelope.rs,graphql.rs,graphql/,http.rs,http/dto.rs,http/handler.rs}` and `crates/service/src/{config.rs,graphql.rs,graphql/,http.rs,http/,openapi.rs,bootstrap.rs}`, plus tests, features, docs, `workspace.dsl`, `.templatesyncignore` and both snapshots; domain, infrastructure and shared crates stay unchanged.
+- Placement: code changes only in `crates/notification/event-stream/application/src/{envelope.rs,graphql.rs,graphql/,http.rs,http/dto.rs,http/handler.rs}` and `crates/service/src/{config.rs,graphql.rs,graphql/,http.rs,http/,openapi.rs,bootstrap.rs}`, plus tests, features, docs, `workspace.dsl`, `.templatesyncignore` and both snapshots; domain, infrastructure and shared crates stay unchanged. Review fix CQ-9 also changes `tail.rs`.
 - Protected: no story edits a protected file; the maintainer's approved changes are committed (`.spectral.yaml` a374895, `make/gates.mk` 71aab46, `deny.toml` c4f83b3, `tests/CLI/bats/make_quality_gates.bats` 49641e7). Manifests: `futures-util` moved (2.3); story 1.4 alone drops `humantime` everywhere and adds `jiff` 1.0.1 to `crates/service` only, `architecture.toml` unchanged. async-graphql keeps features `uuid` only, never `raw_value`.
 - Advisories: no crate a RustSec advisory marks unmaintained in the build without dev edges; `make.check_security` passes (NFR-21).
 - No suppression: no `#[allow]`, `#[mutants::skip]`, `#[coverage(off)]`, exclusion or lowered bar; `#[expect]` only with a reason.
@@ -59,7 +59,7 @@ DB rule: parallel agents run only the DB-free targets `make.format` (make format
 - Publish path untouched: `Frame`, `Hub::deliver`, the tail and the window do not change; GraphQL parsing, resolution and encoding run in the connection task.
 - Before the head nothing reads the broker: a subscription takes no step until `StreamLink::release`; the phase before the head runs inside `HTTP_REQUEST_TIMEOUT`.
 - Wire: only `next`, `complete` with a bare `data:`, the comment `:`, and `id:` on subscription results; bytes written by hand, never `axum::response::sse`; no `retry:`, no `connection` header.
-- The JSON transport keeps its bytes; GET answers gain only `Vary: accept`; a GET whose `Accept` admits the stream by a wildcard gets the stream, one without `Accept` keeps today's answer; other methods get `Allow` from axum.
+- The JSON transport keeps its bytes, except the length 422 of M5 (`query` over 4 096, `operationName` over 128 characters); GET answers gain only `Vary: accept`; a GET whose `Accept` admits the stream by a wildcard gets the stream, one without `Accept` keeps today's answer; other methods get `Allow` from axum.
 - Contracts: regenerate `.github/graphql-spec/spec` with `make.generate_graphql_spec` and `.github/openapi-spec/spec.yaml` with `make.generate_openapi_spec` in the story that changes each; no GraphQL description holds node, Connection, update, delete or "input ".
 - OpenAPI: every route registered through `routes!` and documented; no Schemathesis exclusion beyond the approved one; a failure that cannot be fixed at its root is escalated to the maintainer.
 - Tests: paused tokio time; every await bounded by `tokio::time::timeout`; wire blocks compared byte for byte; broker tests only in the serialized step.
@@ -84,7 +84,7 @@ This change adds one subscription field, one per-request link between the transp
 
 What the design must achieve, from the PRD:
 
-- One transport choice by `Accept` on one path (FR-2), with a POST form (FR-3) and a GET form (FR-4), and every other request unchanged (FR-5, NFR-17).
+- One transport choice by `Accept` on one path (FR-2), with a POST form (FR-3) and a GET form (FR-4), and every other request unchanged (FR-5, NFR-17), apart from the length refusal that decision M5 approved.
 - The graphql-sse wire format written byte for byte (FR-7, FR-8), with `id:` on subscription results (FR-10).
 - The head written only after the operation registered, was refused or produced its first result, inside the request budget (FR-9), and never after a broker read (NFR-2).
 - Validation answered inside the stream (FR-13 to FR-15), availability before it (FR-16).
@@ -153,24 +153,25 @@ Every new or changed component, in the order a request meets it:
 | `crates/service/src/http/vary.rs` (+ `vary/tests.rs`) | middleware `vary_accept` | new | FR-5 |
 | `crates/service/src/http.rs` | `pub mod vary;` | changed | FR-5 |
 | `crates/service/src/http/router.rs` | `GRAPHQL_PATH`; GET on `/api/graphql` in every `APP_ENV`; the `vary_accept` layer | changed | FR-4, FR-5 |
-| `crates/service/src/graphql/handler.rs` | `execute` (POST), `subscribe` (GET outside `dev`), `subscribe_or_explore` (GET in `dev`), `explorer`, `to_request` | changed | FR-2 to FR-6 |
+| `crates/service/src/graphql/handler.rs` | `execute` (POST), `subscribe` (GET in every `APP_ENV`), `ExplorerPage`, `explorer`, `to_request` with `MAX_QUERY_CHARS` and `MAX_OPERATION_NAME_CHARS`; amended on 2026-11-21 (M5, CQ-4) | changed | FR-2 to FR-6 |
 | `crates/service/src/graphql/negotiation.rs` (+ tests) | `negotiates_event_stream` (POST rule), `negotiates_event_stream_on_get` (GET rule) | new | FR-2, FR-29 |
 | `crates/service/src/graphql/query_string.rs` (+ tests) | `read`, the GET form; `QueryStringLimit` and `limit` | new | FR-4 |
 | `crates/service/src/graphql/single_root.rs` (+ tests) | `check`, the one-root-field rule | new | FR-14 |
 | `crates/service/src/graphql/event_stream.rs` (+ tests) | `respond`, the keep-alive read from the schema data, the wire encoders and the body | new | FR-6 to FR-9, FR-16 to FR-20 |
 | `crates/service/src/graphql.rs` | the four new module declarations and `pub(crate) use query_string::QueryStringLimit;` | changed | NFR-13 |
 | `crates/service/src/graphql/schema.rs` (+ `schema/tests.rs`) | `Subscription` root, `ApiSchema`, `builder` | changed | FR-1 |
-| `crates/service/src/bootstrap.rs` | `QueryStringLimit` in the schema data | changed | FR-4 |
+| `crates/service/src/bootstrap.rs` | `QueryStringLimit` and, since review finding CQ-4, `ExplorerPage::of(config.app_env)` in the schema data | changed | FR-4, FR-5 |
 | `crates/service/Cargo.toml` | `futures-util` in `[dependencies]` | changed | NFR-13 |
 | `crates/notification/event-stream/application/src/graphql/subscription.rs` (+ tests) | `StreamPhase`, `StreamLink`, `EventObject`, `EventStreamSubscription` | new | FR-1, FR-9 to FR-13, FR-16, FR-19 |
 | `crates/notification/event-stream/application/src/graphql.rs` | `mod subscription;` and its re-exports; `state(ctx)` visible to the submodule | changed | NFR-13 |
 | `crates/notification/event-stream/application/src/http/dto.rs` | `CursorFault` and `read_cursor`, one cursor rule with two answers; `types_problem` visible in the crate | changed | FR-11, FR-13 |
 | `crates/notification/event-stream/application/src/http.rs` | `#[cfg(test)] pub(crate) mod test_node;`, so the tests of `graphql/subscription.rs` use the test node; the streaming routes registered through `routes!` | changed | FR-23, FR-26, FR-27 |
 | `crates/notification/event-stream/application/src/http/handler.rs`, `http/dto.rs` | `#[utoipa::path]` of `stream` and `ws`; `IntoParams` of `StreamParams` and `WsParams`; the header parameters and the event and frame schemas | changed | FR-26 |
-| `crates/service/src/openapi.rs` (+ `openapi/tests.rs`) | `graphql_router`, `operational_router`, `document()` merging the three routers; `API_VERSION` 2.1.0; the tags `GraphQL` and `Documentation`; the completeness oracles | changed | FR-26 to FR-28 |
-| `crates/service/src/graphql/handler.rs`, `http/ping.rs`, `http/docs.rs` | `#[utoipa::path]` of `execute`, `subscribe`, `subscribe_or_explore`, `ping`, `docs_page`, `openapi_json` and `docs_asset` (one segment) | changed | FR-26 |
+| `crates/service/src/openapi.rs` (+ `openapi/tests.rs`) | `graphql_router()`, `operational_router`, `document()` merging the three routers; `API_VERSION` 2.1.0; the tags `GraphQL` and `Documentation`; the completeness oracles | changed | FR-26 to FR-28 |
+| `crates/service/src/graphql/handler.rs`, `http/ping.rs`, `http/docs.rs` | `#[utoipa::path]` of `execute`, `subscribe`, `ping`, `docs_page`, `openapi_json` and `docs_asset` (one segment) | changed | FR-26 |
 | `crates/service/src/config.rs` (+ `config/tests.rs`, `config/tests/kafka.rs`) | `parse_duration`, used by `ranged_duration` and `duration` | changed | NFR-21 |
 | `crates/notification/event-stream/application/src/envelope.rs` (+ `envelope/tests.rs`) | `is_utc_time` with its own calendar rule in place of `humantime::parse_rfc3339` | changed | NFR-21 |
+| `crates/notification/event-stream/application/src/tail.rs` (+ `tail/tests.rs`) | `TailEvents::round` publishes the tail state before it writes the fault, readiness and health entries; review finding CQ-9 of 2026-11-21 in a file of story 3.3 of issue #4 | changed | NFR-14 |
 | `Cargo.toml`, `Cargo.lock`, `crates/service/Cargo.toml`, `crates/notification/event-stream/application/Cargo.toml` | `humantime` out, `jiff` into `[workspace.dependencies]` and `crates/service` | changed | NFR-21 |
 
 > Assumption: the resolver and its objects live in the event-stream application crate's `graphql` module, and the transport lives in the composition root. AD-18 puts the schema and its transports in the composition root. The crate's module rule lets only `http` and `graphql` import `async_graphql`, and the resolver reaches `parse_names`, `types_problem`, the cursor rule and `Subscriptions::open` crate-internally, as `EventStreamQuery` reaches `list_types`. The transport never names a type of the hub other than `HubError` and `Sequence`.
@@ -479,7 +480,7 @@ The head of every event stream is `200` with:
 
 > Assumption: the stream is written as bytes through `Body::from_stream`, because axum's `Event::data("")` cannot write the bare `data:` line of `complete` (Verified Library Facts 2). The head copies the three headers of the SSE route plus `vary`. It has no `charset`, no `connection` and no `content-encoding` (FR-7).
 
-> Assumption: the transport reads the keep-alive from the `EventStreamState` that the bootstrap already puts into the schema data (Verified Library Facts 6), and not from a second settings value. The route state stays `State<ApiSchema>`, which the extractor oracle and every router test already use. One source of the interval means no duplicated setting, no bootstrap change for the POST form and no struct literal that a later story must extend. A schema built without the state, which only a test can build, answers the 500 problem. The GET form's bound is the one transport value that the state does not hold; it travels as `QueryStringLimit` (see `graphql/query_string.rs`).
+> Assumption: the transport reads the keep-alive from the `EventStreamState` that the bootstrap already puts into the schema data (Verified Library Facts 6), and not from a second settings value. The route state stays `State<ApiSchema>`, which the extractor oracle and every router test already use. One source of the interval means no duplicated setting, no bootstrap change for the POST form and no struct literal that a later story must extend. A schema built without the state, which only a test can build, answers the 500 problem. The GET form's bound is a transport value that the state does not hold; it travels as `QueryStringLimit` (see `graphql/query_string.rs`). Amended on 2026-11-21 (review finding CQ-4): the explorer flag `ExplorerPage` is the second such value and travels the same way (see `graphql/handler.rs`).
 
 #### `graphql/handler.rs`
 
@@ -491,28 +492,45 @@ pub async fn execute(
     ApiJson(body): ApiJson<Map<String, Value>>,
 ) -> Result<Response, Problem>;
 
-/// GET outside `dev`: the event stream when `Accept` negotiates it, else the 405 problem with
+/// GET in every `APP_ENV`: the event stream when `Accept` negotiates it; otherwise the explorer
+/// page when the schema data's `ExplorerPage` serves it, as in `dev`, else the 405 problem with
 /// `Allow: POST` (FR-4, FR-5).
 pub async fn subscribe(State(schema): State<ApiSchema>, headers: HeaderMap, RawQuery(query): RawQuery) -> Response;
 
-/// GET in `dev`: the event stream when `Accept` negotiates it, else the explorer page.
-pub async fn subscribe_or_explore(State(schema): State<ApiSchema>, headers: HeaderMap, RawQuery(query): RawQuery) -> Response;
+/// Whether a GET that does not negotiate the event stream gets the explorer page; set in the
+/// schema data by the bootstrap from `APP_ENV`, as `QueryStringLimit` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExplorerPage {
+    /// The page is served.
+    pub(crate) served: bool,
+}
+
+impl ExplorerPage {
+    /// The flag of `app_env`: the page is served in `dev` only.
+    pub(crate) const fn of(app_env: AppEnv) -> Self;
+}
 
 /// The development explorer page with its content security policy (unchanged).
-pub async fn explorer() -> Response;
+fn explorer() -> Response;
 
-/// The request for a body with a string member `query` (unchanged rule, now shared by both forms).
-pub(crate) fn to_request(body: Map<String, Value>) -> Option<async_graphql::Request>;
+/// The longest `query` and `operationName` of either form, in characters (decision M5).
+pub(crate) const MAX_QUERY_CHARS: usize = 4_096;
+pub(crate) const MAX_OPERATION_NAME_CHARS: usize = 128;
+
+/// The request for a body with a string member `query`, shared by both forms: else the 422
+/// problem `The request body is not a GraphQL request.`, then the validation problem with one
+/// `length` violation for each member over its bound.
+pub(crate) fn to_request(body: Map<String, Value>) -> Result<async_graphql::Request, Problem>;
 ```
 
-- `execute` without SSE answers `Json(schema.execute(request).await)` exactly as today.
-- `execute` with SSE builds the request with `to_request` (else the 422 problem of today), then calls `respond` with the `last-event-id` header value.
-- `subscribe` and `subscribe_or_explore` decide with `negotiates_event_stream_on_get` and share a crate-private helper that, with SSE, runs `query_string::limit(&schema)`, then `query_string::read(query.as_deref(), limit.max_bytes)`, then `to_request`, then `respond`.
+- `execute` builds the request with `to_request` on both transports, so a body refused today keeps its 422 and a member over its bound gets the length 422 of decision M5. Without SSE it then answers `Json(schema.execute(request).await)` as today; with SSE it calls `respond` with the `last-event-id` header value.
+- `subscribe` decides with `negotiates_event_stream_on_get`. With SSE, a crate-private helper runs `query_string::limit(&schema)`, then `query_string::read(query.as_deref(), limit.max_bytes)`, then `to_request`, then `respond`. Without SSE it answers the explorer page when `schema.data::<ExplorerPage>()` is present with `served` true, and otherwise the 405 problem, also on a schema built without the flag.
 - The 405 of `subscribe` is `Problem::new(StatusCode::METHOD_NOT_ALLOWED)` with `Allow: POST`, the body and header of today's method-router answer.
+- `to_request` counts characters as Unicode code points (`chars().count()`). Each member over its bound gives one `Violation { property_path: <member>, code: "length", message: "<member> must contain at most <bound> characters" }`, and the violations go into `Problem::validation_failed`; a violation names the bound and never holds the value (NFR-8). `MAX_QUERY_CHARS` is about twice the explorer's introspection query (2 038 characters) and `MAX_OPERATION_NAME_CHARS` the bound of an event type name. In their longest encoding, twelve bytes per character (a `\u` escape pair in JSON, percent-encoded UTF-8 in a query string), both members at their bound fit the default `HTTP_MAX_BODY_BYTES` of 65 536, so no `query` or `operationName` that the document admits is refused by the size limit alone (FR-29).
 
-> Assumption: the three GraphQL handlers that can answer an event stream take `HeaderMap`, the recorded streaming exception, and the two GET handlers also take `RawQuery`. Both extractors are infallible. `RawQuery` is the only way to apply the 414 bound to the query string "as received" and to parse it strictly. `ValidatedQuery` would reject a malformed query string before the handler could keep today's 405 for a GET that does not negotiate SSE. The extractor oracle names these two exceptions for the handlers `execute`, `subscribe` and `subscribe_or_explore` only, as the event-stream crate's oracle names its streaming handlers, and as NFR-13 states.
+> Assumption: the two GraphQL handlers that can answer an event stream, `execute` and `subscribe`, take `HeaderMap`, the recorded streaming exception, and the GET handler also takes `RawQuery`. Both extractors are infallible. `RawQuery` is the only way to apply the 414 bound to the query string "as received" and to parse it strictly. `ValidatedQuery` would reject a malformed query string before the handler could keep today's 405 for a GET that does not negotiate SSE. The extractor oracle names these two exceptions for the handlers `execute` and `subscribe` only, as the event-stream crate's oracle names its streaming handlers, and as NFR-13 states. Amended on 2026-11-21 (review finding CQ-4): the third handler `subscribe_or_explore` no longer exists, and the oracle reports a `HeaderMap` or `RawQuery` parameter of it.
 
-> Assumption: the router keeps today's split by environment. In `dev` it registers `get(subscribe_or_explore)`, otherwise `get(subscribe)`. No environment flag is added to the route state.
+> Assumption: amended on 2026-11-21 (review finding CQ-4), one annotated GET handler, `subscribe`, serves every `APP_ENV`. Without the event stream it reads the flag `ExplorerPage { served }` that `bootstrap::assemble_router` puts into the schema data from `config.app_env`, as it puts `QueryStringLimit`: the explorer page when the flag is set, else the 405 problem with `Allow: POST`; a schema without the flag also answers the 405. `graphql_router()` takes no argument and registers `routes!(handler::subscribe, handler::execute)` in every `APP_ENV`, the route state stays `State<ApiSchema>`, and the OpenAPI document is unchanged. The plan had kept today's split by environment (`get(subscribe_or_explore)` in `dev`, `get(subscribe)` otherwise) and added no environment flag to the route state; stories 2.6 and 4.5 built it so, with the same `#[utoipa::path]` block on both GET handlers, and the review named the duplicated handler and annotation (CQ-4). One handler removes the duplicate and keeps every answer.
 
 #### `http/vary.rs` and `http/router.rs`
 
@@ -530,7 +548,7 @@ pub(crate) async fn vary_accept(request: Request, next: Next) -> Response;
 
 #### `bootstrap.rs` and `Cargo.toml`
 
-- `assemble_router` (`bootstrap.rs:260`) builds `schema::builder().data(event_stream.clone()).data(QueryStringLimit { max_bytes: config.max_body_bytes }).finish()`. The keep-alive of the event stream comes from the `EventStreamState` that the first `.data(..)` already holds. The test schemas of `bootstrap.rs` that serve the GET form add the same line.
+- `assemble_router` (`bootstrap.rs:260`) builds `schema::builder().data(event_stream.clone()).data(QueryStringLimit { max_bytes: config.max_body_bytes }).finish()`. The keep-alive of the event stream comes from the `EventStreamState` that the first `.data(..)` already holds. The test schemas of `bootstrap.rs` that serve the GET form add the same line. Amended on 2026-11-21 (review finding CQ-4): it also adds `.data(ExplorerPage::of(config.app_env))`, the explorer flag of `subscribe`.
 - `crates/service/Cargo.toml` moves `futures-util.workspace = true` from `[dev-dependencies]` to `[dependencies]`. `Cargo.lock` already lists `futures-util` for `service`. The composition root allows every external crate (`architecture.toml:76-80`).
 
 ## Reuse of the Hub and the Subscription State Machine
@@ -557,10 +575,11 @@ A GraphQL subscriber is therefore a hub subscriber in every respect: it counts i
 client --POST|GET /api/graphql--> request id, security headers, trace, CORS, vary_accept (GET/HEAD),
                                   WebSocket origin, panic catcher, request budget, body limit
   handler: POST negotiates_event_stream(Accept)? / GET negotiates_event_stream_on_get(Accept)?
-    no:  POST -> JSON transport (today)   GET dev -> explorer   GET other -> 405, Allow: POST
-    yes: POST -> ApiJson (415/413/400/422) -> to_request (422)
+    no:  POST -> ApiJson (415/413/400/422) -> to_request (422, then 422 length) -> JSON transport
+         GET  -> ExplorerPage served (dev) ? explorer : 405, Allow: POST
+    yes: POST -> ApiJson (415/413/400/422) -> to_request (422, then 422 length)
          GET  -> query_string::limit (500 when unwired) -> query_string::read (414/400/422)
-              -> to_request
+              -> to_request (422 length)
          -> respond: keep-alive from EventStreamState in the schema data (500 when unwired)
          -> single_root::check -- breach --> head, ":", next {errors VALIDATION_FAILED}, complete
          -> link = StreamLink::new(Last-Event-ID); responses = schema.execute_stream(request + link)
@@ -588,7 +607,7 @@ How the phase before the head unfolds:
 FR-6's order follows from where each check sits:
 
 1. CORS preflight (layer);
-2. transport errors (extractor, `to_request`, `query_string::read`);
+2. transport errors (extractor, `query_string::read`, `to_request`, whose length check of decision M5 comes last);
 3. the root rule and document errors (in the stream);
 4. invalid arguments (resolver, in the stream);
 5. availability (the 503 problem);
@@ -613,10 +632,11 @@ FR-6's order follows from where each check sits:
 | --- | --- | --- | --- |
 | CORS preflight | CORS layer | preflight answer (FR-21) | none |
 | POST: media type, size, JSON syntax, JSON shape | `ApiJson` | 415, 413, 400 or 422 problem, as today | none |
-| POST: no string `query` | `to_request` | 422 `The request body is not a GraphQL request.` | none |
+| POST: no string `query`, or a member of the wrong type | `to_request` | 422 `The request body is not a GraphQL request.` | none |
 | GET: query string above `HTTP_MAX_BODY_BYTES` | `query_string::read` | 414 problem | none |
 | GET: undecodable, duplicate known parameter, no `query` | `query_string::read` | 400 problem | none |
 | GET: `variables` or `extensions` not a JSON object | `query_string::read` | 422 problem, one violation, `code` `format` | none |
+| POST, on both transports, or GET with SSE: `query` over 4 096 or `operationName` over 128 characters (decision M5) | `to_request`, after every row above that applies to the form | 422 `/problems/validation-failed`, one violation per member over its bound, `code` `length`, the value never echoed | none |
 | subscription breaks the root rule | `single_root::check` | stream: one `next` with `VALIDATION_FAILED`, `single_root_field`; then `complete` | none |
 | parse error, unknown field or argument, wrong type, variable not coercible, ambiguous or unknown operation, depth above 16, complexity above 1 000 (a second selection of `Event.data` included), mutation | async-graphql in `execute_stream` | stream: one `next` with async-graphql's errors, without a code; then `complete` | none |
 | invalid `types` | resolver, `parse_names` | stream: one `next` with `VALIDATION_FAILED`, `propertyPath` `types`; then `complete` | none |
@@ -661,18 +681,20 @@ Every route is registered through `OpenApiRouter::routes(routes!(..))`, which ta
 /// now also holds `stream` and `ws`).
 pub fn api_router() -> OpenApiRouter<AppState>;
 
-/// `/api/graphql`: `routes!(execute, subscribe)`, or `routes!(execute, subscribe_or_explore)` in
-/// `dev`; both GET handlers carry the same annotation, so the document does not depend on the
-/// environment.
-pub fn graphql_router(app_env: AppEnv) -> OpenApiRouter<ApiSchema>;
+/// `/api/graphql`: `routes!(handler::subscribe, handler::execute)` in every `APP_ENV`; the one
+/// GET handler reads the explorer flag from the schema data, so neither the routes nor the
+/// document depend on the environment.
+pub fn graphql_router() -> OpenApiRouter<ApiSchema>;
 
 /// `/ping` and the three documentation routes, which take no state.
 pub fn operational_router() -> OpenApiRouter;
 
-/// The document: the three routers' documents merged, the `prod` variant of `graphql_router`;
-/// served by `/api/docs/openapi.json` and exported by `openapi-export`.
+/// The document: the three routers' documents merged; served by `/api/docs/openapi.json` and
+/// exported by `openapi-export`.
 pub fn document() -> utoipa::openapi::OpenApi;
 ```
+
+Amended on 2026-11-21 (review finding CQ-4): story 4.5 had written `graphql_router(app_env: AppEnv)`, which registered `subscribe_or_explore` in `dev` and `subscribe` otherwise, both with the same annotation, and `document()` used its `prod` variant. With one GET handler the router takes no argument, GET is still registered first, so the `Allow` of every other method reads `GET,HEAD,POST`, and the document is the one of before.
 
 - `assemble` builds the axum router from the same three routers with `split_for_parts()`: `rest.with_state(state).merge(graphql.with_state(schema)).merge(operational)`, then the two fallbacks and the middleware, unchanged.
 - The event-stream router registers `.routes(routes!(handler::stream))` and `.routes(routes!(handler::ws))` in place of its two `.route(..)` calls, and its comment and the handler module's comment drop "not operations of the `OpenAPI` document".
@@ -687,15 +709,15 @@ pub fn document() -> utoipa::openapi::OpenApi;
 | --- | --- | --- | --- |
 | `GET /api/events/stream` (`api_events_stream_get`) | `types` (query, required, the comma-separated grammar of the names), `lastEventId` (query) and `Last-Event-ID` (header), both the cursor grammar | `200 text/event-stream`: schema `SseFrame` of one event (`event` the type name, `id` the decimal id, `data` with `contentMediaType: application/json` and the event object as `contentSchema`), headers `cache-control` and `x-accel-buffering`; `400`, `422`, `503` problems; `default` | `types=load.test`; one frame |
 | `GET /api/events/ws` (`api_events_ws_get`) | `types`, `lastEventId` (query, optional); `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key` (header, required, the values the upgrade accepts); `Last-Event-ID` (header) | `101 Switching Protocols` with the headers `Upgrade`, `Connection` and `Sec-WebSocket-Accept`, its description holding the server frames (`{"id","type","data"}` and the error frame) and the client commands (`subscribe`, `unsubscribe`); `400` (an invalid cursor or a handshake the upgrade refuses), `403` (an `Origin` outside the allow-list), `422`, `426`, `503` problems; `default` | a handshake for `load.test`; one frame of each direction |
-| `POST /api/graphql` (`api_graphql_post`) | body `application/json` schema `GraphQLRequest` (`query` required, `operationName`, `variables`, `extensions`, unknown members accepted); header `Last-Event-ID` | `200 application/json` schema `GraphQLResponse` (`data` any JSON value or null, `errors`, `extensions`); `200 text/event-stream` schema `GraphQLEvent` (`event` `next` or `complete`, `id` on subscription results, `data` the execution result as JSON, or empty for `complete`); `400`, `413`, `415`, `422`, `503` problems; `default` | the query `{ eventTypes { name } }`; the subscription to `load.test`; one `next` and `complete` |
-| `GET /api/graphql` (`api_graphql_get`) | `query` (required), `operationName`, `variables` and `extensions` (query; the last two strings with `contentMediaType: application/json` and an object `contentSchema`); header `Last-Event-ID` | `200 text/event-stream` (`GraphQLEvent`); `200 text/html` (the explorer, `dev` only, so stated); `400`, `405` (a GET that does not negotiate an event stream, outside `dev`), `414`, `422`, `503` problems; `default` | the URL-encoded subscription to `load.test` |
+| `POST /api/graphql` (`api_graphql_post`) | body `application/json` schema `GraphQLRequest` (`query` required with `maxLength` 4 096, `operationName` with `maxLength` 128, `variables`, `extensions`, unknown members accepted); header `Last-Event-ID` | `200 application/json` schema `GraphQLResponse` (`data` any JSON value or null, `errors`, `extensions`); `200 text/event-stream` schema `GraphQLEvent` (`event` `next` or `complete`, `id` on subscription results, `data` the execution result as JSON, or empty for `complete`); `400`, `413`, `415`, `422`, `503` problems; `default` | the query `{ eventTypes { name } }`; the subscription to `load.test`; one `next` and `complete` |
+| `GET /api/graphql` (`api_graphql_get`) | `query` (required, `maxLength` 4 096), `operationName` (`maxLength` 128), `variables` and `extensions` (query; the last two strings with `contentMediaType: application/json` and an object `contentSchema`); header `Last-Event-ID` | `200 text/event-stream` (`GraphQLEvent`); `200 text/html` (the explorer, `dev` only, so stated); `400`, `405` (a GET that does not negotiate an event stream, outside `dev`), `414`, `422`, `503` problems; `default` | the URL-encoded subscription to `load.test` |
 | `GET /ping` (`ping_get`) | none | `200 text/plain` `pong`; `default` | `pong` |
 | `GET /api/docs` (`api_docs_get`) | none | `200 text/html` with the content security policy header; `default` | none needed beyond the media type |
 | `GET /api/docs/openapi.json` (`api_docs_openapi_json_get`) | none | `200 application/json`, an object; `default` | none needed beyond the media type |
 | `GET /api/docs/{file}` (`api_docs_file_get`) | `file` (path) | `200` with `text/css`, `application/javascript`, `text/html` or `image/png`; `400`, `404` problems; `default` | `swagger-ui.css` |
 
 - Every parameter schema admits the values the service accepts and refuses those it refuses, so Schemathesis's positive cases are accepted and its negative cases refused: the cursor as a decimal of the accepted range, the type list as the grammar of the names, the handshake headers as the values axum's upgrade checks.
-- Every string member of a request body has a `maxLength` that the service enforces with the 422 problem. Schemathesis 4.33.1 sends 65 537 characters to a body string without one as a schema-valid case, so the size limit alone would refuse a schema-valid body with the 413 (the run on `9bf9de6`, ST202 on `POST /api/graphql`; fixed by story 5.1). The GraphQL `query` holds at most 4 096 characters and `operationName` at most 128, on both forms (`MAX_QUERY_CHARS` and `MAX_OPERATION_NAME_CHARS` in `crates/service/src/graphql/handler.rs`), sized so that the default `HTTP_MAX_BODY_BYTES` holds both at their bound in their longest encoding, twelve bytes per character.
+- Every string member of a request body has a `maxLength` that the service enforces with the 422 problem. Schemathesis 4.33.1 sends 65 537 characters to a body string without one as a schema-valid case, so the size limit alone would refuse a schema-valid body with the 413 (the run on `9bf9de6`, ST202 on `POST /api/graphql`; fixed by story 5.1). The GraphQL `query` holds at most 4 096 characters and `operationName` at most 128, on both forms (`MAX_QUERY_CHARS` and `MAX_OPERATION_NAME_CHARS` in `crates/service/src/graphql/handler.rs`), sized so that the default `HTTP_MAX_BODY_BYTES` holds both at their bound in their longest encoding, twelve bytes per character. The negative case `maxLength + 1` is then refused with the 422 problem, which `negative_data_rejection` accepts, and never with the 413, which it does not. Because the bound also refuses a JSON-transport request that ran before, the maintainer approved it as decision M5 of 2026-11-21 (`prd.md` FR-3, FR-5); CI on `99da8cb` passed every check, Schemathesis included.
 - Every status code the route can answer is listed with its media type and schema; the problems reference `Problem`. Every operation keeps a `default` problem response, which also meets the protected Spectral rules that ask for a 2xx or `default` and a 4xx or `default` response. Spectral's built-in rule `operation-success-response` asks every operation for a 2xx or 3xx answer, which the WebSocket route cannot give: it answers 101. The maintainer approved on 2026-11-17 an override in the protected `.spectral.yaml` (commit `a374895`) that turns that one rule off for `GET /api/events/ws` only; every other rule keeps applying to it.
 - The event schemas `SseFrame` and `GraphQLEvent` describe one event, the convention of OpenAPI 3.2 that Schemathesis reads (Verified Library Facts 8); `GraphQLEvent.data` admits the empty data of `complete` next to the JSON of a result.
 - The descriptions carry the frame formats of `docs/streaming-protocol.md` in short, and the Swagger page renders them with the examples.
@@ -817,7 +839,7 @@ After the story the graph without dev edges holds no `humantime`, so the maintai
   - the bans on `node`, `Connection`, `update`, `delete` and `input ` stay;
   - the first-type oracle names `Event`;
   - `EXPECTED_SDL`, the full-SDL oracle of `the_sdl_is_the_documented_schema`, becomes the full SDL of FR-1.
-- **OpenAPI snapshot** (`.github/openapi-spec/spec.yaml`), regenerated with `make.generate_openapi_spec` in the stories that change the document: eight operations, two tags and the new schemas are added, `info.version` becomes `2.1.0`, nothing is removed. `make.openapi_diff` reports only non-breaking changes, and `make.validate_openapi_spec` and `make.schemathesis_validate` pass (see "OpenAPI Document of Every Route").
+- **OpenAPI snapshot** (`.github/openapi-spec/spec.yaml`), regenerated with `make.generate_openapi_spec` in the stories that change the document: eight operations, two tags and the new schemas are added, `info.version` becomes `2.1.0`, nothing is removed. `make.openapi_diff` reports only non-breaking changes, and `make.validate_openapi_spec` and `make.schemathesis_validate` pass (see "OpenAPI Document of Every Route"). The fix `56a8725` gives `query` and `operationName` their `maxLength` of 4 096 and 128 on both GraphQL operations. That narrows a request of today's JSON transport, which oasdiff cannot report because `POST /api/graphql` is new to the base document; the maintainer approved it as decision M5 of 2026-11-21. The CQ-4 refactor of 2026-11-21 leaves the snapshot unchanged; review finding CQ-10 of 2026-11-21 changes it only in the description of `POST /api/graphql`, which names the M5 bound, regenerated with `make.generate_openapi_spec`.
 - `make.validate_contract_snapshots` is clean after the regeneration.
 
 ## Architecture Model Impact
@@ -862,7 +884,7 @@ The `dto.rs` tests cover `CursorFault::violation` and `read_cursor`. The existin
 **Composition root (unit):**
 
 - `negotiation/tests.rs`: every row of FR-2's table for POST and for GET; case; `q` edge values `0`, `0.001`, `1.000`, `1.0001`, `2`; a non-ASCII field ignored; several `Accept` fields joined; on GET, no field, `*/*`, `text/*`, a browser navigation header and `application/json`, and the ties `text/html` = wildcard and JSON = wildcard.
-- `openapi/tests.rs`: the completeness tests of "OpenAPI Document of Every Route".
+- `openapi/tests.rs`: the completeness tests of "OpenAPI Document of Every Route"; since review finding CQ-4, `graphql_router()` documents exactly one GET and one POST operation of the path, equal to those of `document()`.
 - `query_string/tests.rs`: 414 at `max_bytes` and one byte above; each 400 text (bad `%`, `%` at the end, invalid UTF-8, a duplicate known parameter, a duplicate unknown parameter ignored, missing `query`); `+` decoded as a space; each 422; the order 414, then 400, then 422; the produced map.
 - `single_root/tests.rs`: one field passes; aliases pass; the cases two fields, the same response name twice, a root fragment spread, a root inline fragment, `__typename`, `@skip` and `@include` each give the error at the right position; a parse error, an unknown operation and a query pass through.
 - `event_stream/tests.rs` builds a started node from public APIs (`Hub`, `Window`, `Subscriptions`, `StatusSource`, `EventStreamState`, test-support fakes):
@@ -876,7 +898,7 @@ The `dto.rs` tests cover `CursorFault::violation` and `read_cursor`. The existin
   - `Event.data` under two aliases or repeated through a fragment: one `next` with async-graphql's complexity error, then `complete`, `subscribers` unchanged; `{ id type data }` runs;
   - under a `LogRecorder`, no entry for a query, a document error, an invalid argument and a subscription that opens, delivers one event and ends by client close (FR-22, NFR-9);
   - a schema without `EventStreamState` giving the 500 problem.
-- `handler/tests.rs`: the JSON transport unchanged for every `Accept` that does not negotiate SSE, including subscriptions on JSON of every root shape and `subscription { __typename }` (FR-5); POST and GET with SSE; a schema without `QueryStringLimit` giving the 500 problem on a GET with SSE; the explorer and the 405 with `Allow: POST`.
+- `handler/tests.rs`: the JSON transport unchanged for every `Accept` that does not negotiate SSE, including subscriptions on JSON of every root shape and `subscription { __typename }` (FR-5); POST and GET with SSE; a schema without `QueryStringLimit` giving the 500 problem on a GET with SSE; the explorer and the 405 with `Allow: POST`. Amended on 2026-11-21: the 422 length problem on both transports and both forms, the format problem of the GET form before the length problem, and both members at their bound executed (decision M5); the explorer flag of each `APP_ENV`, served in `dev` only, and the 405 of a schema without the flag, through the one handler `subscribe` (CQ-4); its annotation and that of `execute` are the two entries of the path.
 - `vary/tests.rs`: GET and HEAD of the path get `Vary: accept`; POST and other paths do not; no duplicate value on an event-stream head.
 
 **Router tests (`http/router/tests.rs`):**
@@ -888,7 +910,8 @@ The `dto.rs` tests cover `CursorFault::violation` and `read_cursor`. The existin
 - the panic 500 of a GET carrying `Vary: accept`;
 - a GraphQL subscription that outlives the budget: a started application on a `StaticTopic` the test keeps, with `HTTP_REQUEST_TIMEOUT` 1 s and `STREAM_KEEP_ALIVE` 2 s under paused time; 5 s after the head the body still writes `:\n\n` every interval, delivers an event appended then, and `subscribers` still counts it;
 - the CORS cases of "Browser Access", with `has_cors_headers` narrowed to an `access-control-*` header or a `vary` value `origin`;
-- the extractor oracle extended with `HeaderMap` and `RawQuery` for the three named handlers only;
+- the extractor oracle extended with `HeaderMap` for `execute` and `subscribe` and `RawQuery` for `subscribe` only (amended on 2026-11-21 by review finding CQ-4; a planted parameter of the former `subscribe_or_explore` is reported);
+- both members at their bound within the default `HTTP_MAX_BODY_BYTES` in their longest encoding, as a JSON body and as a query string (decision M5);
 - the middleware order.
 
 **Integration tests against the broker** (`crates/service/tests/integration/graphql_sse.rs`, new; `main.rs` declares it; `client.rs` gains a raw HTTP/1.1 POST event-stream client that parses `next`, `complete` and comment blocks). They run under the serialized verify step:
@@ -936,7 +959,7 @@ The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unch
 | `SECURITY.md` | the GraphQL limits among the bounded inputs, `Event.data` at most once per document included; no authorization for the GraphQL subscription either; the GET form needs no preflight and can change no state; async-graphql's document errors may quote the client's own request back to that client, as on the JSON transport, while no log entry, problem or error of the service holds a value of the request |
 | `docs/load-testing.md` | the GraphQL subscriber |
 | `workspace.dsl` | the descriptions of "Architecture Model Impact" |
-| `.templatesyncignore` | `crates/service/src/graphql.rs`, `crates/service/src/graphql/handler.rs`, `crates/service/src/http/ping.rs`, `crates/service/src/http/ping/`, `crates/service/src/http/docs.rs` and `crates/service/src/http/docs/` |
+| `.templatesyncignore` | `crates/service/src/graphql.rs`, `crates/service/src/graphql/handler.rs`, `crates/service/src/http/ping.rs`, `crates/service/src/http/ping/`, `crates/service/src/http/docs.rs` and `crates/service/src/http/docs/`; `.spectral.yaml` next to `deny.toml`, since the approved override `a374895` (see "Protected Changes") changes the template's ruleset; later template changes to it are applied by hand (`docs/extension-seams.md`, "Seams and the template sync", point 2) |
 | `docs/adr/0022-every-route-in-the-openapi-document.md` | new (see "Decision Record") |
 | `docs/adr/README.md`, `docs/architecture.md`, `docs/streaming-protocol.md` | a row for 0022, the rows of 0006 and 0007 marked "(amended by 0022)"; "outside the OpenAPI document" replaced by a pointer to the Swagger page; the GET rule of the negotiation and its `dev` effect on curl |
 | `docs/environment.md` | line 9: the accepted duration syntax without naming a crate (story 1.4, see "Durations and Timestamps without humantime") |
@@ -964,7 +987,7 @@ The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unch
 3. **Streaming operations:** the event schema of one event (the OpenAPI 3.2 convention), the 101 of the WebSocket route with its handshake headers and its frames in the description.
 4. **The GET rule of the negotiation:** a wildcard admits the event stream on GET; a missing `Accept` keeps the 405.
 5. **Completeness tests:** the source oracle, the exact operation set, every operation served.
-6. **Schemathesis:** the operations tested with the protected flags; a failure fixed at its root; an exclusion only as a maintainer's decision after an escalation, never by a story. The one such decision excludes `GET /api/events/ws` (`71aab46`), whose valid 101 Schemathesis reports as a failure; the operation stays on the Swagger page, and the other ten are tested.
+6. **Schemathesis:** the operations tested with the protected flags; a failure fixed at its root; an exclusion only as a maintainer's decision after an escalation, never by a story. The one such decision excludes `GET /api/events/ws` (`71aab46`), whose valid 101 Schemathesis reports as a failure; the operation stays on the Swagger page, and the other ten are tested. Every string member of a request body carries a `maxLength` that the service enforces with the 422 problem; the GraphQL `query` (4 096 characters) and `operationName` (128) are bounded on both forms, a bound the maintainer approved as decision M5 of 2026-11-21 (`56a8725`).
 
 ## Protected Changes
 

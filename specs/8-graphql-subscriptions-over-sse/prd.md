@@ -11,7 +11,7 @@ author: bmad-autonomous-planning (create-prd stage)
 
 # PRD: GraphQL subscriptions over Server-Sent Events (issue #8)
 
-Source: <https://github.com/VilnaCRM-Org/notification-service/issues/8>, as read on 2026-11-16 and again on 2026-11-17, after the maintainer's decision of 2026-11-17 added two criteria (every route of the service in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green). Bundle: `specs/8-graphql-subscriptions-over-sse/`. Context: `notification/event-stream` (application layer) and the composition root `crates/service`. Inputs: `research.md` (its section 8 holds the resolved questions), `product-brief.md` (success criteria S1 to S15) and the maintainer decisions M1 to M3 named there. Decision M4 of 2026-11-20 (answer "Ignore both, replace ours"): the RustSec advisories RUSTSEC-2026-0542 (humantime) and RUSTSEC-2026-0543 (chrono), published after 2026-11-17, made `make check-security` fail; both are ignored in the protected `deny.toml` by two approved entries with a reason and a removal condition, and humantime is replaced in the two service crates in this pull request (NFR-21, NFR-15, `research.md` section 9).
+Source: <https://github.com/VilnaCRM-Org/notification-service/issues/8>, as read on 2026-11-16 and again on 2026-11-17, after the maintainer's decision of 2026-11-17 added two criteria (every route of the service in the OpenAPI document and on the Swagger page; the OpenAPI gates and Schemathesis green). Bundle: `specs/8-graphql-subscriptions-over-sse/`. Context: `notification/event-stream` (application layer) and the composition root `crates/service`. Inputs: `research.md` (its section 8 holds the resolved questions), `product-brief.md` (success criteria S1 to S15) and the maintainer decisions M1 to M3 named there. Decision M4 of 2026-11-20 (answer "Ignore both, replace ours"): the RustSec advisories RUSTSEC-2026-0542 (humantime) and RUSTSEC-2026-0543 (chrono), published after 2026-11-17, made `make check-security` fail; both are ignored in the protected `deny.toml` by two approved entries with a reason and a removal condition, and humantime is replaced in the two service crates in this pull request (NFR-21, NFR-15, `research.md` section 9). Decision M5 of 2026-11-21 (answer "Approve the bound"): the CI check Schemathesis failed on `9bf9de6` with ST202 on `POST /api/graphql`, because Schemathesis 4.33.1 sends a string of 65 537 characters to every request-body string without `maxLength`, so the body exceeded `HTTP_MAX_BODY_BYTES` and the service answered 413 (`research.md` section 3.11). The fix `56a8725` bounds `query` to 4 096 and `operationName` to 128 characters, counted in Unicode code points, documents both as `maxLength` on the POST body and on the GET parameters, and refuses a longer member with the 422 validation problem on both transports and both forms. The maintainer approved this bound as a recorded change of today's GraphQL behaviour: a document longer than 4 096 characters, or an operation name longer than 128, that used to run is now refused with the 422 problem, on the JSON transport too (FR-3 to FR-6, FR-29, NFR-8, NFR-17). CI on `99da8cb`: 49 of 49 checks green, Schemathesis included.
 
 Notation:
 
@@ -32,7 +32,7 @@ What a client does:
 How it works:
 
 - The GraphQL subscription is one more subscriber of the node's existing hub. It has the window, the replay from Kafka, the cursor rules, the type rules, the subscriber cap, the readiness rule, the shutdown and the slow-client handling of the SSE and WebSocket routes of bundle 4. Delivery stays at least once, in order and resumable on any node, and the client deduplicates by the envelope id.
-- The transport is chosen by the `Accept` header on the existing path. A request that does not ask for an event stream keeps today's JSON answer.
+- The transport is chosen by the `Accept` header on the existing path. A request that does not ask for an event stream keeps today's JSON answer, apart from the length bounds of `query` and `operationName` that decision M5 approved (FR-3, FR-5).
 - An invalid operation is answered inside an accepted event stream, with `VALIDATION_FAILED` or the GraphQL document errors, then `complete`, as the protocol requires. A node that cannot take the subscription answers the 503 problem of the REST streaming routes before any stream, and graphql-sse clients retry it.
 - Every route the service serves becomes an operation of the OpenAPI document and of the Swagger page at `/api/docs`, fully documented: the two streaming routes, both forms of the GraphQL endpoint, the liveness probe and the documentation routes join the three REST operations, and a test fails when a route is served without an entry (FR-26 to FR-29, maintainer decision of 2026-11-17).
 - The change adds no configuration variable, no bounded context and no state shared between requests. Its one dependency change replaces `humantime` with `jiff` in `crates/service` and drops it from the event-stream application crate (NFR-21, M4). Its protected changes are the four the maintainer approved, committed outside the stories (NFR-15).
@@ -60,7 +60,7 @@ Each choice is specified as a testable requirement in the FR named in the last c
 | P15 | End and shutdown | `complete` only after a single result; a subscription cut by shutdown or a failed replay ends without it, so the client resumes | FR-19 |
 | P16 | Queries and mutations over SSE | a query: one `next`, then `complete`; a mutation: a document error, because the schema has no mutation root | FR-20 |
 | P17 | CORS | the existing allow-list, unchanged, proved for both forms | FR-21 |
-| P18 | Limits | body and query string `HTTP_MAX_BODY_BYTES`, depth 16, complexity 1 000 with `Event.data` costing 501 (so a document selects it at most once), one root field, 100 types, a 64-bit cursor, one operation per request, `MAX_SUBSCRIBERS` | FR-1, FR-4, NFR-8 |
+| P18 | Limits | body and query string `HTTP_MAX_BODY_BYTES`, `query` 4 096 and `operationName` 128 characters on both forms (decision M5), depth 16, complexity 1 000 with `Event.data` costing 501 (so a document selects it at most once), one root field, 100 types, a 64-bit cursor, one operation per request, `MAX_SUBSCRIBERS` | FR-1, FR-3, FR-4, NFR-8 |
 | P19 | Response head | `text/event-stream` without a charset, `cache-control: no-cache`, `x-accel-buffering: no`, `vary: accept`; no `connection` header | FR-7 |
 | P20 | Caching of negotiated answers | `Vary: Accept` on every event stream and on every answer to a GET of `/api/graphql` | FR-5, FR-7 |
 
@@ -161,7 +161,16 @@ These headers are tested with the answer the rule gives:
 
 > Assumption: only the distinct connections mode of graphql-sse is served. Its single connection mode keeps a reservation in the memory of one node across a PUT, the stream, every POST and a DELETE. That needs sticky sessions or shared state, which ADR 0013 and ADR 0014 exclude. The protocol's recipes say the distinct mode suffices for most uses.
 
-**FR-3 The POST form.** `POST /api/graphql` takes a body of media type `application/json` holding one JSON object with the members `query` (string, required), `operationName` (string or null), `variables` (object or null) and `extensions` (object or null, accepted and ignored). The body rules, the body limit `HTTP_MAX_BODY_BYTES` and the problems are those of today and are the same on both transports. A POST that negotiates SSE and is refused for its body gets the problem that the same POST without SSE gets, and no stream (FR-6). One request carries one operation. A JSON array (a batch) is refused as today.
+**FR-3 The POST form.** `POST /api/graphql` takes a body of media type `application/json` holding one JSON object with the members `query` (string, required), `operationName` (string or null), `variables` (object or null) and `extensions` (object or null, accepted and ignored). `query` holds at most 4 096 characters and `operationName` at most 128, counted in Unicode code points (decision M5 of 2026-11-21). The body is refused with the first problem that applies, in this order, the same on both transports:
+
+1. 415, the body is not `application/json`;
+2. 413, the body is larger than `HTTP_MAX_BODY_BYTES`;
+3. 400, the body is not JSON;
+4. 422, the body is not one JSON object, so a JSON array (a batch) is refused;
+5. 422 `The request body is not a GraphQL request.`, the object has no string member `query`, or a member of the wrong type;
+6. 422 of type `/problems/validation-failed` with one violation per member over its bound: `propertyPath` `query` or `operationName`, `code` `length`, `message` `query must contain at most 4096 characters` or `operationName must contain at most 128 characters`.
+
+Problems 1 to 5 are those of today, with today's types and texts. Problem 6 is the length refusal of M5; its violations name the member and its bound and never hold its value (NFR-8). A POST that negotiates SSE and is refused for its body gets the problem that the same POST without SSE gets, and no stream (FR-6). One request carries one operation.
 
 > Assumption: the POST form is the GraphQL over HTTP request that the specification requires every server to support (4.4). The graphql-sse client always sends it, with `content-type: application/json` and exactly `accept: text/event-stream`.
 
@@ -178,6 +187,7 @@ Unknown parameters are ignored. The `Last-Event-ID` header is read as on POST (F
 | 1 | 414 | type `about:blank`, `detail` `The query string is too long.` | the query string, as received, is longer than `HTTP_MAX_BODY_BYTES` bytes |
 | 2 | 400 | type `about:blank`, `detail` the parser text, which names the parameter | the query string cannot be read (invalid percent-encoding or UTF-8), `query` is missing, or one of `query`, `operationName`, `variables`, `extensions` is given twice; an unknown parameter, also when repeated, is ignored |
 | 3 | 422 | type `/problems/validation-failed`, one violation with `propertyPath` `variables` or `extensions`, `code` `format`, `message` `variables must be a JSON-encoded object` or `extensions must be a JSON-encoded object` | the parameter is present and is not a JSON object |
+| 4 | 422 | type `/problems/validation-failed`, one violation per parameter over its bound, with `propertyPath` `query` or `operationName`, `code` `length`, `message` `query must contain at most 4096 characters` or `operationName must contain at most 128 characters`; the value is never echoed | `query` is longer than 4 096 characters or `operationName` longer than 128, counted in Unicode code points after decoding: the bounds of the POST form (FR-3, decision M5). A query string that also breaks row 3 gets only the problem of row 3 |
 
 A GET that runs a query is answered as in FR-20. A mutation cannot run over GET, because the schema has no mutation root (FR-15).
 
@@ -187,9 +197,10 @@ A GET that runs a query is answered as in FR-20. A mutation cannot run over GET,
 
 > Assumption: `variables` and `extensions` that are not JSON objects are answered with the 422 violation of the codebase's query-parameter convention: a parameter that is read but breaks a constraint is a 422 with a violation, and a parameter that cannot be read is a 400. GraphQL over HTTP's 405 for a mutation over GET is not reproduced, because no mutation can exist in this schema.
 
-**FR-5 Requests that do not negotiate SSE.** Every request to `/api/graphql` that does not negotiate SSE keeps the status and the body it has today:
+**FR-5 Requests that do not negotiate SSE.** Every request to `/api/graphql` that does not negotiate SSE keeps the status and the body it has today, apart from the length refusal of the second item, which the maintainer approved as decision M5 of 2026-11-21:
 
 - A POST uses the JSON transport, whatever `Accept` lists. No `application/graphql-response+json` answer is introduced.
+- A JSON POST whose `query` is longer than 4 096 characters, or whose `operationName` is longer than 128, is not executed and gets problem 6 of FR-3: the 422 problem of type `/problems/validation-failed` with one violation per member over its bound (`propertyPath` `query` or `operationName`, `code` `length`, `message` `query must contain at most 4096 characters` or `operationName must contain at most 128 characters`). Before this change such a POST ran whenever its body fit `HTTP_MAX_BODY_BYTES`. The maintainer approved this change of today's behaviour as decision M5, made for FR-29 (Schemathesis ST202 on `9bf9de6`), and the pull request names it as a behaviour change for JSON clients. The check comes after the 415, 413, 400 and 422 problems of today, so a body refused today keeps its problem, and it is the same on the event stream and on the GET form (FR-3, FR-4).
 - A subscription operation on the JSON transport registers no hub subscriber and is answered `200 application/json` with `data` `null`. One that passes document validation, whatever its root shape (FR-14 is not applied on the JSON transport), gets the one error `Subscriptions are not supported on this transport.`. One that fails document validation, such as `subscription { __typename }`, gets async-graphql's validation errors as today.
 - A GET that does not negotiate SSE (no `Accept` field, or one that ranks a JSON type or `text/html` at least as high as the event stream) gets, in `dev`, the explorer page with its content security policy.
 - Such a GET outside `dev` gets the 405 problem with `Allow: POST`.
@@ -203,12 +214,14 @@ Every answer to a GET of `/api/graphql` carries `Vary: Accept`, the explorer and
 
 > Assumption: the `Allow` header of the other methods lists `GET, HEAD, POST`, so that the methods the router serves are listed: axum writes it from the registered methods, and GET now serves event streams in every environment. It is the one header of a non-SSE answer whose value changes. `features/http_errors.feature` ("allow should contain POST") still holds.
 
-> Assumption: `Vary: Accept` is added to every answer of GET `/api/graphql`, because the representation now depends on `Accept` (RFC 9110 12.5.5). Without it a shared cache could hand the stored 405 or explorer page to an `EventSource` request for the same URL. POST answers are not reused by caches without explicit freshness, which the service never sends, so the JSON transport stays unchanged. The brief's S8 states the same: same status and body; only `Vary` on GET answers and `Allow` on other methods change.
+> Assumption: `Vary: Accept` is added to every answer of GET `/api/graphql`, because the representation now depends on `Accept` (RFC 9110 12.5.5). Without it a shared cache could hand the stored 405 or explorer page to an `EventSource` request for the same URL. POST answers are not reused by caches without explicit freshness, which the service never sends, so the headers of the JSON transport stay unchanged. The brief's S8 states the same: same status and body apart from the length refusal of decision M5; only `Vary` on GET answers and `Allow` on other methods change.
+
+> Assumption: the length bounds of `query` and `operationName` also apply to the JSON transport, although FR-5 otherwise keeps today's answers. Both transports and both forms build their request in one conversion (`to_request` in `crates/service/src/graphql/handler.rs`), and the OpenAPI document gives the members a `maxLength` on `POST /api/graphql`, which is one operation for both transports. Schemathesis 4.33.1 sends a 65 537-character string to a body string without `maxLength` as a schema-valid case; on the JSON transport such a body exceeds `HTTP_MAX_BODY_BYTES` and gets the 413, which its check `positive_data_acceptance` refuses (ST202 on `POST /api/graphql`, the run on `9bf9de6`), and `operationName` would fail the same way. With a `maxLength`, its negative case `maxLength + 1` must be refused with 400 or 422 and never with 413, which a check inside the service gives and the size limit does not (`research.md` section 3.11). Removing the bound from the JSON transport would bring that failure back, so the bound stays in the shared conversion. 4 096 characters is about twice the explorer's introspection query (2 038 characters), 128 is the bound of an event type name, and the default `HTTP_MAX_BODY_BYTES` holds both members at their bound in their longest encoding, twelve bytes per character, so `query` and `operationName` within their bounds never bring a request to the 413 or the 414; `variables`, `extensions` and unknown members stay bounded only by `HTTP_MAX_BODY_BYTES`. The maintainer approved the bound as decision M5 of 2026-11-21, a recorded change of today's behaviour on the JSON transport; `architecture.md` ("Schemathesis on every operation") and ADR 0022 record the same bound.
 
 **FR-6 The order of the answers.** A request that negotiates SSE is answered by the first rule that applies:
 
 1. A CORS preflight (`OPTIONS`) is answered by the CORS layer (FR-21).
-2. A transport error is answered with its problem and no stream: on POST, the 415, 413, 400 and 422 problems of today, in today's order; on GET, the 414, 400 and 422 problems of FR-4.
+2. A transport error is answered with its problem and no stream: on POST, problems 1 to 6 of FR-3, the 415, 413, 400 and 422 problems of today in today's order and then the 422 length problem of decision M5; on GET, the 414, 400 and 422 problems of FR-4, in the order of its table, the length problem last.
 3. A document error (FR-15) or a breach of the one-root-field rule (FR-14) is answered inside an event stream.
 4. Invalid arguments of `events` (FR-13) are answered inside an event stream.
 5. A node that is shutting down, starting or at its cap answers the 503 problem of FR-16.
@@ -423,7 +436,9 @@ An answer of FR-13, FR-14 or FR-15 writes no entry, like a 422 of the REST route
   - every case of FR-14;
   - a document that selects `Event.data` twice answered with the complexity error, and `{ id type data }` running;
   - no log entry for a query, a document error, an invalid argument and a subscription that ends normally (FR-22, NFR-9);
-  - unchanged JSON-transport answers (FR-5).
+  - unchanged JSON-transport answers (FR-5);
+  - a GET without SSE answered with the explorer page or the 405 problem by the explorer flag in the schema data, the flag set in `dev` only, and the 405 problem on a schema without the flag (FR-5, NFR-13, review finding CQ-4);
+  - the 422 length problem of `query` and `operationName` on both transports and both forms, the format problem of FR-4 row 3 before the length problem, both members at their bound executed, and both at their bound within the default `HTTP_MAX_BODY_BYTES` in their longest encoding (FR-3, FR-4, FR-5, FR-29, decision M5).
 - **Unit tests of the event-stream application crate:**
   - every row of FR-13;
   - the header winning over the argument;
@@ -497,8 +512,8 @@ The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` do not ch
 | `GET /api/health` | HealthCheck | as today | as today |
 | `GET /api/events/stream` | EventStream | query `types` (required), `lastEventId`; header `Last-Event-ID` | `200 text/event-stream` with the SSE frame format; 400, 422 and 503 problems |
 | `GET /api/events/ws` | EventStream | query `types`, `lastEventId`; headers `Connection`, `Upgrade`, `Sec-WebSocket-Version`, `Sec-WebSocket-Key` (required), `Last-Event-ID` | `101 Switching Protocols` with the frames of both directions; 400, 403, 422, 426 and 503 problems |
-| `POST /api/graphql` | GraphQL | body `application/json` `{query, operationName, variables, extensions}`; header `Last-Event-ID` | `200 application/json` (execution result) and `200 text/event-stream` (FR-8 blocks); 400, 413, 415, 422 and 503 problems |
-| `GET /api/graphql` | GraphQL | query `query` (required), `operationName`, `variables`, `extensions`; header `Last-Event-ID` | `200 text/event-stream`, and `200 text/html` (the explorer, `dev` only); 400, 405, 414, 422 and 503 problems |
+| `POST /api/graphql` | GraphQL | body `application/json` `{query, operationName, variables, extensions}`, `query` with `maxLength` 4 096 and `operationName` with `maxLength` 128 (decision M5); header `Last-Event-ID` | `200 application/json` (execution result) and `200 text/event-stream` (FR-8 blocks); 400, 413, 415, 422 and 503 problems |
+| `GET /api/graphql` | GraphQL | query `query` (required, `maxLength` 4 096), `operationName` (`maxLength` 128), `variables`, `extensions`; header `Last-Event-ID` | `200 text/event-stream`, and `200 text/html` (the explorer, `dev` only); 400, 405, 414, 422 and 503 problems |
 | `GET /ping` | HealthCheck | none | `200 text/plain` `pong` |
 | `GET /api/docs` | Documentation | none | `200 text/html` |
 | `GET /api/docs/openapi.json` | Documentation | none | `200 application/json` (this document) |
@@ -534,12 +549,12 @@ The tags gain `GraphQL` and `Documentation`, each with a description. `API_VERSI
 
 - `make.validate_contract_snapshots` reports no drift;
 - `make.validate_openapi_spec` (Spectral with the protected `.spectral.yaml`) reports no finding;
-- `make.openapi_diff` reports no breaking change, so no `approved-breaking-change` label is needed: the change adds operations, tags and schemas and removes nothing;
+- `make.openapi_diff` reports no breaking change, so no `approved-breaking-change` label is needed: the change adds operations, tags and schemas and removes no operation, parameter, response or schema. It does narrow one request of today's behaviour: `query` holds at most 4 096 characters and `operationName` at most 128 on the existing JSON transport too, and a JSON client that sends a longer one gets the 422 length problem of FR-3 instead of a result. oasdiff cannot report this, because `POST /api/graphql` is not in the base document, so the whole operation, its `maxLength` values included, is new to it. The maintainer approved the narrowing as decision M5 of 2026-11-21, and the pull request names it as a behaviour change for JSON clients;
 - `make.schemathesis_validate` (`--checks all --phases=examples,coverage` against the production image in the load-test stack, with the protected flags as amended by the approved `71aab46`) passes with ten of the eleven operations of FR-26 tested, the other streaming ones included; `GET /api/events/ws` is excluded only by that approved change and stays documented on the Swagger page.
 
 A Schemathesis failure on a streaming operation is fixed at its root: in the document (a schema that admits a value the service refuses, a missing status code or header, an event schema that does not match the frames) or in the code (an answer that contradicts the documented contract). Apart from the approved exclusion of `GET /api/events/ws` (`71aab46`), no operation is excluded from Schemathesis and no check is disabled or relaxed. Should a failure be impossible to fix at its root, the story stops and escalates to the maintainer with the failing check, the reason and the exact exclusion that would remove it (where it lives, which operation, which check); an exclusion in a protected file such as `make/gates.mk` goes through the label `approved-config-change`, and the operation stays documented on the Swagger page either way.
 
-> Assumption: no exclusion is planned, because Schemathesis 4.33.1 can test every operation of FR-26 (`research.md` section 3.11): it reads an event stream until the stream ends, 20 events arrive or its 10 s request timeout passes, and treats a stream cut short as a normal response; it validates each event against a `text/event-stream` schema of one event; it sends `Accept: */*`, which the GET rule of FR-2 answers with an event stream instead of the 405 that its check `positive_data_acceptance` would refuse; and it accepts a documented 101. The escalation path is the issue's own rule for a failure that cannot be fixed at its root. Amended on 2026-11-20: the run on `4dfd92e` showed that Schemathesis reports the valid handshake's 101 as a failure (ST101, ST202); the escalation path ran as written, and the maintainer approved the exclusion of `GET /api/events/ws` alone (`71aab46`).
+> Assumption: no exclusion is planned, because Schemathesis 4.33.1 can test every operation of FR-26 (`research.md` section 3.11): it reads an event stream until the stream ends, 20 events arrive or its 10 s request timeout passes, and treats a stream cut short as a normal response; it validates each event against a `text/event-stream` schema of one event; it sends `Accept: */*`, which the GET rule of FR-2 answers with an event stream instead of the 405 that its check `positive_data_acceptance` would refuse; and it accepts a documented 101. The escalation path is the issue's own rule for a failure that cannot be fixed at its root. Amended on 2026-11-20: the run on `4dfd92e` showed that Schemathesis reports the valid handshake's 101 as a failure (ST101, ST202); the escalation path ran as written, and the maintainer approved the exclusion of `GET /api/events/ws` alone (`71aab46`). Amended on 2026-11-21: the run on `9bf9de6` showed ST202 on `POST /api/graphql`, a 65 537-character `query` answered with the 413; it was fixed at its root, without an exclusion or a flag change, by the `maxLength` of `query` and `operationName` in the document and the 422 length problem of FR-3 in the code (`56a8725`), a bound the maintainer approved as decision M5; CI on `99da8cb` passed every check, Schemathesis included.
 
 ### Traceability
 
@@ -558,6 +573,7 @@ A Schemathesis failure on a streaming operation is fixed at its root: in the doc
 | AC11. `docs/streaming-protocol.md` and `docs/requests.http` describe it; every local gate of `make ci` passes, 100 % coverage, no surviving mutant | FR-23, FR-24, FR-25, NFR-10, NFR-11, NFR-12, NFR-13, NFR-14, NFR-15, NFR-16, NFR-19, NFR-21 | S11, S12 |
 | M1. graphql-sse over SSE with GraphQL over HTTP formats, every protocol choice recorded | FR-2 to FR-8, FR-25 (ADR 0021) | S11 |
 | M4. (2026-11-20) RUSTSEC-2026-0542 and RUSTSEC-2026-0543 ignored in `deny.toml` by the two approved entries; humantime replaced in the two service crates in this pull request, keeping the documented duration syntax and the envelope time rule | NFR-21, NFR-15, NFR-17 | S15 |
+| M5. (2026-11-21) `query` at most 4 096 and `operationName` at most 128 characters, documented as `maxLength` on both forms and refused with the 422 length problem on both transports and both forms; approved as a recorded change of today's behaviour of the JSON transport | FR-3, FR-4, FR-5, FR-6, FR-23, FR-29, NFR-3, NFR-8, NFR-17 | S8, S14 |
 
 ## Non-Functional Requirements
 
@@ -572,7 +588,7 @@ An event of a type without a GraphQL subscriber costs nothing more than today.
 
 **NFR-2 Time to the head.** No answer before the head waits for a broker read (4/NFR-3): registering a subscriber reads nothing, and the replay runs after the head. The phase before the head (FR-9) is bounded by `HTTP_REQUEST_TIMEOUT`. A unit test with a broker fake that never answers shows that a subscription with a cursor below the window receives its head and then its keep-alives.
 
-**NFR-3 Bounded memory.** A GraphQL subscriber holds what an SSE subscriber holds (4/NFR-9), plus at most one execution result being written. That result holds at most one copy of the event object plus its id and type, because a document selects `Event.data` at most once (FR-1). The request it came from is bounded by `HTTP_MAX_BODY_BYTES`, as a body or as a query string, and the document by its depth and complexity limits. No GraphQL state outlives its connection, and nothing is kept between requests.
+**NFR-3 Bounded memory.** A GraphQL subscriber holds what an SSE subscriber holds (4/NFR-9), plus at most one execution result being written. That result holds at most one copy of the event object plus its id and type, because a document selects `Event.data` at most once (FR-1). The request it came from is bounded by `HTTP_MAX_BODY_BYTES`, as a body or as a query string, the document by 4 096 characters, its depth and complexity limits, and the operation name by 128 characters (decision M5). No GraphQL state outlives its connection, and nothing is kept between requests.
 
 **NFR-4 Smoke budget and capacity target.** `make.smoke_load_tests` passes with the GraphQL subscribers of FR-24, within the unchanged `endpoints.subscriptions` budgets and the existing success rate of the checks (above 99 %). The design target of 4/NFR-1 is unchanged. It counts GraphQL subscribers among the subscribers of a node, and this change does not measure it.
 
@@ -589,13 +605,14 @@ An event of a type without a GraphQL subscriber costs nothing more than today.
 **NFR-8 Input limits and secrets.** Every input of the GraphQL form is bounded:
 
 - the body by `HTTP_MAX_BODY_BYTES` (default 65 536), and the query string of a GET by the same number of bytes;
+- the document `query` by 4 096 characters and the operation name `operationName` by 128, counted in Unicode code points, on both transports and both forms (decision M5), so that the default `HTTP_MAX_BODY_BYTES` holds both at their bound in any encoding;
 - the document by depth 16 and complexity 1 000;
 - each execution result to one copy of the event object plus id and type, because `Event.data` costs 501 and is selected at most once (FR-1);
 - a subscription to one root field, 100 distinct type names of at most 128 characters each, and a 64-bit cursor;
 - each request to one operation;
 - each node to `MAX_SUBSCRIBERS` subscribers of all transports together.
 
-No log entry or problem holds the document, the variables, a type name or cursor of the request, event data or the value of a variable. The GraphQL errors that this service writes (FR-13, FR-14, and the wiring errors) hold no value of the request. The document errors of FR-15 keep async-graphql's messages, which may quote parts of the client's own request (a source line of a parse error; a field, argument, variable, fragment or operation name), exactly as on the JSON transport today, and they are returned only to the requesting client. `make.check_security` and `make.secrets_scan` pass.
+No log entry or problem holds the document, the variables, a type name or cursor of the request, event data or the value of a variable. The 422 length problem of FR-3 and FR-4 names the member and its bound in each violation and never echoes the value, however long it is. The GraphQL errors that this service writes (FR-13, FR-14, and the wiring errors) hold no value of the request. The document errors of FR-15 keep async-graphql's messages, which may quote parts of the client's own request (a source line of a parse error; a field, argument, variable, fragment or operation name), exactly as on the JSON transport today, and they are returned only to the requesting client. `make.check_security` and `make.secrets_scan` pass.
 
 ### Observability
 
@@ -625,7 +642,7 @@ The rest stays fixed:
 
 - The domain and infrastructure crates of the context, and the shared crates, are not changed. `shared_application::graphql` is unchanged.
 - No crate is added to `[workspace.dependencies]` except `jiff`, which replaces `humantime` there (NFR-21, story 1.4). A crate adds a workspace dependency to its own manifest only within its layer's allow-list: `jiff` goes to `crates/service` only, whose layer allows every crate, and the event-stream application crate drops `humantime` and adds nothing. The application layer uses neither `tokio-stream` nor `async-stream`. No allow-list changes.
-- The GraphQL handlers `execute`, `subscribe` and `subscribe_or_explore` take `HeaderMap`, the recorded streaming exception; `subscribe` and `subscribe_or_explore` also take `RawQuery`, to bound and strictly parse the raw query string. The extractor oracle of the router tests names these two exceptions for these three handlers only.
+- The GraphQL handlers `execute` and `subscribe` take `HeaderMap`, the recorded streaming exception; `subscribe` also takes `RawQuery`, to bound and strictly parse the raw query string. The extractor oracle of the router tests names these two exceptions for these two handlers only. Amended on 2026-11-21 (review finding CQ-4): story 2.6 had added a second GET handler, `subscribe_or_explore`, for `dev`, and story 4.5 had given both GET handlers the same `#[utoipa::path]` block; the second handler is merged into `subscribe`, which reads the explorer flag `ExplorerPage` from the schema data, so one annotated handler serves the GET in every `APP_ENV` and the OpenAPI document is unchanged.
 - **The OpenAPI document (FR-26, FR-27):** the `#[utoipa::path]` annotations of the two streaming handlers and the `IntoParams` of their parameters live in the `http` module of the event-stream application crate, whose router registers them through `routes!`; the annotations of the GraphQL, liveness and documentation handlers and the merge of the three routers (REST, GraphQL, operational) live in `crates/service`.
 - `make.architecture`, `make.check_crate_isolation`, `make.unused_dependencies` and `make.validate_architecture_model` pass.
 
@@ -654,7 +671,7 @@ Every gate of `make ci` that runs locally passes, through the stage keys `make.c
 - The protected Bats test G20 keeps its meaning without a change to the protected file. It removes the first single-line field of the first `type` block, now `data: JSON!` of `Event`, and expects the diff to fail.
 - The protected Bats tests of the OpenAPI gates keep their meaning without a change to their file: G17 removes the first operation-level `description` line, now that of `GET /api/docs`, the first path in sorted order, and still expects Spectral to fail; G19 removes the required `title` of `Problem`, which every new problem response references, and still expects `openapi-diff` to fail; G21 plants an undocumented path and still expects `schemathesis-validate` to fail, and its run ends because Schemathesis bounds every event stream (NFR-20).
 
-**NFR-17 Existing behaviour.** Every request that does not negotiate SSE keeps its status and body (FR-5). Its headers change only by `Vary: Accept` on GET answers and by the `Allow` value of other methods. A GET whose `Accept` admits the event stream only through a wildcard now negotiates SSE (FR-2); a GET without an `Accept` field, which every existing test sends, does not. The rest is unchanged too:
+**NFR-17 Existing behaviour.** Every request that does not negotiate SSE keeps its status and body (FR-5), apart from a JSON POST whose `query` is longer than 4 096 characters or whose `operationName` is longer than 128, which ran before and now gets the 422 length problem of FR-3, the change of today's behaviour that the maintainer approved as decision M5 of 2026-11-21. Its headers change only by `Vary: Accept` on GET answers and by the `Allow` value of other methods. A GET whose `Accept` admits the event stream only through a wildcard now negotiates SSE (FR-2); a GET without an `Accept` field, which every existing test sends, does not. The rest is unchanged too:
 
 - the routes `/api/events/stream` and `/api/events/ws`, their answers and their frames;
 - the configuration variables, of which none is added or changed, and every duration value that `docs/environment.md` and the configuration tests name, which parses to the same `Duration` with the same range and reason after humantime leaves (NFR-21);
@@ -667,7 +684,8 @@ The existing tests of these behaviours pass unchanged (`features/graphql.feature
 - the extractor oracle (NFR-13);
 - the router-test helper `has_cors_headers`, which today counts any `vary` header as a CORS header and is narrowed to an `access-control-*` header or a `vary` value `origin`, because every GET answer now carries `vary: accept`;
 - the OpenAPI oracles of `crates/service/src/openapi/tests.rs` (`documents_exactly_the_three_operations`, `leaves_the_liveness_route_and_the_docs_routes_out`, `defines_exactly_the_five_schemas`, the contract version) and the documentation comments of the event-stream router and handlers that say the streaming routes are not operations of the document, which become the oracles and texts of FR-26 and FR-27;
-- the expected value of `each_kafka_duration_accepts_its_bounds` (`crates/service/src/config/tests/kafka.rs`), which `humantime::parse_duration` computes today and a `Duration` literal per case states after story 1.4 (NFR-21).
+- the expected value of `each_kafka_duration_accepts_its_bounds` (`crates/service/src/config/tests/kafka.rs`), which `humantime::parse_duration` computes today and a `Duration` literal per case states after story 1.4 (NFR-21);
+- the answer to a JSON POST whose `query` is longer than 4 096 characters or whose `operationName` is longer than 128: executed before, now the 422 length problem of FR-3 (decision M5). The new tests of FR-23 pin it, and any oracle that expected such a POST to run expects the 422 problem instead.
 
 **NFR-18 Client compatibility.** The service works with these clients:
 
@@ -711,6 +729,7 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 - The tests of FR-23, the GraphQL subscriber of the K6 scenario, the documentation of FR-25, ADR 0021, the architecture model and the `.templatesyncignore` entries.
 - Every route of the service in the OpenAPI document and on the Swagger page, the route-completeness tests, the regenerated OpenAPI snapshot with `API_VERSION` 2.1.0, ADR 0022, and the OpenAPI gates green on every operation and Schemathesis green on every operation but the approved exclusion of `GET /api/events/ws` (FR-26 to FR-29).
 - `humantime` out of the production build: jiff for the durations of `crates/service`, a rule without a crate for the envelope time, the documented syntax kept, the two approved `deny.toml` entries of 2026-11-20 and the approved plant of `jiff` in the Bats test G8 (NFR-21, M4).
+- The length bounds of `query` (4 096 characters) and `operationName` (128) on both transports and both forms, documented as `maxLength` and refused with the 422 length problem, a change of the JSON transport that the maintainer approved (FR-3, FR-29, M5).
 
 ### Out of scope
 
@@ -720,7 +739,7 @@ The single connection mode of graphql-sse is not supported: its PUT reservation 
 | Subscriber authorization | A later issue, as in bundle 4 (4/NFR-13). |
 | The single connection mode of graphql-sse | Not planned: it needs sticky sessions or shared state (ADR 0014). HTTP/2 at the edge lifts the 6-connection limit of HTTP/1.1 instead. |
 | JSON queries over GET | Not planned; POST serves queries. |
-| `application/graphql-response+json` answers and their status codes on the JSON transport | A later issue; the JSON transport stays as it is. |
+| `application/graphql-response+json` answers and their status codes on the JSON transport | A later issue; the JSON transport stays as it is, apart from the length bounds of FR-3 that decision M5 approved. |
 | Incremental delivery (`@defer`, `@stream`, `multipart/mixed`) | Not planned. |
 | Running subscriptions from the development explorer | Not planned; the documentation names the clients that can. |
 | Subscriptions narrower than an event type | Not planned, as in bundle 4. |

@@ -36,7 +36,7 @@ Notation: `FR-<n>` and `NFR-<n>` are the requirements of this bundle's `prd.md`;
 - No story plans an `#[allow]`, a `#[mutants::skip]`, a `#[coverage(off)]`, a coverage or mutation exclusion, an allow-list edit, a lowered bar or a protected-file edit. An `#[expect(.., reason = "..")]` is used only where `architecture.md` names it: a lint that the `MergedSubscription` expansion triggers in `crates/service/src/graphql/schema.rs`.
 - The mutation run of a wave runs after the commits of the wave: `make.mutation_tests_diff` with `base_ref=<commit before the wave>`. A wave that changed production Rust and whose run names no mutant is not recorded as passed. A surviving or timed-out mutant is fixed by a further commit in the files of the owning story before the next wave.
 - The story that changes the schema regenerates `.github/graphql-spec/spec` with `make.generate_graphql_spec` in the same commit, and each story that changes the OpenAPI document (4.4, 4.5) regenerates `.github/openapi-spec/spec.yaml` with `make.generate_openapi_spec` in its commit. No story adds a configuration variable or a log message.
-- The story that first edits a file the template sync would restore adds it to `.templatesyncignore`. These qualify: `crates/service/src/graphql.rs` and `crates/service/src/graphql/handler.rs`, first edited by story 2.3, and `crates/service/src/http/ping.rs`, `crates/service/src/http/ping/`, `crates/service/src/http/docs.rs` and `crates/service/src/http/docs/`, first edited by story 4.5. Every other touched file is service-owned or already listed.
+- The story that first edits a file the template sync would restore adds it to `.templatesyncignore`. These qualify: `crates/service/src/graphql.rs` and `crates/service/src/graphql/handler.rs`, first edited by story 2.3, and `crates/service/src/http/ping.rs`, `crates/service/src/http/ping/`, `crates/service/src/http/docs.rs` and `crates/service/src/http/docs/`, first edited by story 4.5. The approved override in `.spectral.yaml` (`a374895`, committed outside the stories, see "Protected changes" below) makes the template's Spectral ruleset a changed synchronised file as well, so `.templatesyncignore` lists `.spectral.yaml` next to `deny.toml`, and later template changes to the ruleset are applied by hand, as point 2 of "Seams and the template sync" in `docs/extension-seams.md` describes. Every other touched file is service-owned or already listed, the other three approved protected files `deny.toml`, `make/gates.mk` and `tests/CLI/bats/make_quality_gates.bats` included.
 - A story that adds a request form adds its runnable example to `docs/requests.http`. The descriptive documents of FR-25 are written in Epic 4.
 - No story presents a latency, throughput or capacity number as measured. The design target of bundle 4 stays a design target.
 
@@ -256,7 +256,7 @@ No protected change. After this epic `/api/graphql` serves GraphQL over Server-S
 - `Vary: accept` on every answer to a GET;
 - browser access through the existing allow-list.
 
-Every request that does not negotiate an event stream keeps its answer.
+Every request that does not negotiate an event stream keeps its answer, apart from the length refusal of `query` and `operationName` that the maintainer approved as decision M5 of 2026-11-21 (story 5.1).
 
 ### Story 2.1: Vary accept on every answer to a GET of the GraphQL path
 
@@ -342,7 +342,7 @@ Goal: a POST to `/api/graphql` whose `Accept` negotiates an event stream is answ
 - a refusal is the 503 problem;
 - otherwise the answer is the event-stream head, a comment, one `next` per result with `id:` on subscription results, and `complete` only after a single result.
 
-The keep-alive timer follows in story 2.4. Every POST that does not negotiate an event stream keeps today's answer.
+The keep-alive timer follows in story 2.4. Every POST that does not negotiate an event stream keeps today's answer, apart from the length refusal of `query` and `operationName` that the maintainer approved as decision M5 of 2026-11-21 (story 5.1).
 
 **Scope:**
 
@@ -368,7 +368,7 @@ The keep-alive timer follows in story 2.4. Every POST that does not negotiate an
 **Acceptance Criteria:**
 
 - **Given** each `Accept` of FR-2's table, plus `TEXT/Event-Stream`, the qvalues `0`, `0.001`, `1.000`, `1.0001` and `2`, a field that is not visible ASCII text, and two `Accept` fields, **When** `negotiates_event_stream` runs, **Then** it answers as FR-2 states: an event stream only when `s > j` (`j` is never negative, so `s > 0` follows); wildcards count for neither; an invalid qvalue ignores its range; the fields are joined in order
-- **Given** a POST that does not negotiate an event stream (no `Accept`, `*/*`, urql's query header, `text/event-stream;q=0`), **When** it carries a query, a subscription or a refused body, **Then** its status, headers and body are those of today: the execution result as `200 application/json`; the subscription error `Subscriptions are not supported on this transport.`; the 415, 413, 400 and 422 problems; no `vary` header
+- **Given** a POST that does not negotiate an event stream (no `Accept`, `*/*`, urql's query header, `text/event-stream;q=0`), **When** it carries a query, a subscription or a refused body, **Then** its status, headers and body are those of today: the execution result as `200 application/json`; the subscription error `Subscriptions are not supported on this transport.`; the 415, 413, 400 and 422 problems; no `vary` header (amended on 2026-11-21: a `query` over 4 096 or an `operationName` over 128 characters now gets the 422 length problem, decision M5, story 5.1)
 - **Given** a POST with `Accept: text/event-stream` whose body `ApiJson` or `to_request` refuses, **When** it is answered, **Then** the answer is the same 415, 413, 400 or 422 problem as without SSE, in today's order, and no stream opens
 - **Given** a ready node and `subscription { events(types: ["a"]) { id type data } }` posted with `content-type: application/json` and exactly `accept: text/event-stream`, **When** the subscriber registers, **Then** the head is `200` with `content-type: text/event-stream` (no parameter), `cache-control: no-cache`, `x-accel-buffering: no` and `vary: accept`; the handler sets no `connection`, `content-encoding`, `content-length` or `transfer-encoding`; the first chunk is `:\n\n`, and it carries no `id:` line
 - **Given** that stream, **When** an event of type `b` and the event at offset 1042 of type `a` are delivered, **Then** exactly the block `event: next\nid: 1043\ndata: {"data":{"events":{"id":"1043","type":"a","data":<event object>}}}\n\n` is written and nothing for `b`; with `id` aliased or not selected, the `id:` line still reads `1043`
@@ -464,15 +464,16 @@ Goal: a browser `EventSource` can subscribe and resume natively. A GET of `/api/
   - `QueryStringLimit { max_bytes: usize }` (`Debug, Clone, Copy, PartialEq, Eq`) and `limit(schema) -> Result<QueryStringLimit, Problem>`, whose absence from the schema data is the 500 problem of `Problem::internal`, logged once;
   - `read(raw: Option<&str>, max_bytes: usize) -> Result<Map<String, Value>, Problem>` (414, then 400 with the strict decoder, then 422).
 - `crates/service/src/graphql.rs`: the line `mod query_string;` and `pub(crate) use query_string::QueryStringLimit;`, through which `bootstrap.rs` names the limit while the module stays private.
-- `crates/service/src/bootstrap.rs`: `assemble_router` adds `.data(QueryStringLimit { max_bytes: config.max_body_bytes })` (`HTTP_MAX_BODY_BYTES`); the test schemas of `bootstrap.rs` that serve the GET form add the same line.
+- `crates/service/src/bootstrap.rs`: `assemble_router` adds `.data(QueryStringLimit { max_bytes: config.max_body_bytes })` (`HTTP_MAX_BODY_BYTES`); the test schemas of `bootstrap.rs` that serve the GET form add the same line. Since review finding CQ-4 it also adds `.data(ExplorerPage::of(config.app_env))`.
 - `crates/service/src/graphql/handler.rs`:
-  - `subscribe(State<ApiSchema>, HeaderMap, RawQuery) -> Response`: outside `dev`, the event stream or the 405 problem with `Allow: POST`;
-  - `subscribe_or_explore(..)`: in `dev`, the event stream or the explorer;
-  - the shared crate-private helper: `query_string::limit`, then `query_string::read`, then `to_request`, then `respond`.
+  - `subscribe(State<ApiSchema>, HeaderMap, RawQuery) -> Response`, the one GET handler of every `APP_ENV`: the event stream, else the explorer page when the schema data's `ExplorerPage { served }` is set (`dev`), else the 405 problem with `Allow: POST`, also on a schema without the flag;
+  - `ExplorerPage` with `of(app_env)`, `served` in `dev` only;
+  - the crate-private helper: `query_string::limit`, then `query_string::read`, then `to_request`, then `respond`.
   - Also `handler/tests.rs`.
-- `crates/service/src/http/router.rs`: `get(subscribe_or_explore)` in `dev`, `get(subscribe)` otherwise.
+- `crates/service/src/http/router.rs`: `get(subscribe)` in every `APP_ENV` (story 4.5 moved the registration to `graphql_router()` of `crates/service/src/openapi.rs`).
+- Amended on 2026-11-21 (review finding CQ-4): the story, committed as `f102f26`, had added two GET handlers, `subscribe` outside `dev` and `subscribe_or_explore` in `dev`, and the router chose one by `APP_ENV` without an environment flag in the schema data. The review merged them into the one handler above; every answer and the OpenAPI document stay as they were.
 - `crates/service/src/http/router/tests.rs`:
-  - the extractor oracle allows `HeaderMap` and `RawQuery` for `subscribe` and `subscribe_or_explore`;
+  - the extractor oracle allows `HeaderMap` for `execute` and `subscribe` and `RawQuery` for `subscribe` (since CQ-4; it had named `subscribe_or_explore` as well);
   - GET with SSE in every mode, GET without SSE, `Allow` of the other methods, HEAD, and the budget 503 of a GET query over SSE with `vary: accept`, through the router built with `assemble` around the query bus of story 2.3 that never answers (its schema adds `QueryStringLimit`).
 - `docs/requests.http`: a URL-encoded GET subscription.
 - Not here: `event_stream.rs`, which this story does not change.
@@ -497,8 +498,9 @@ Goal: a browser `EventSource` can subscribe and resume natively. A GET of `/api/
 - **Given** a HEAD that negotiates SSE for a valid subscription, **When** answered, **Then** the event-stream head is returned without a body, and the subscriber registered during the request is freed (`subscribers` back to its value)
 - **Given** the router built with `assemble` around the query bus that never answers, **When** a GET query is sent with SSE and the request budget expires, **Then** the answer is the 503 problem `The request exceeded its time budget.` with `vary: accept`
 - **Given** a schema built without `QueryStringLimit`, **When** a GET negotiates SSE, **Then** the answer is the 500 problem with `vary: accept`, and the error chain is logged once
-- **Given** the extractor oracle, **When** it runs, **Then** `HeaderMap` is accepted for `execute`, `subscribe` and `subscribe_or_explore` and `RawQuery` for the last two only, and a planted `Query<` is still reported
-- **Given** the bootstrap, **When** the router is assembled, **Then** the schema data holds `QueryStringLimit` whose `max_bytes` equals `HTTP_MAX_BODY_BYTES`, and no variable is added
+- **Given** the extractor oracle, **When** it runs, **Then** `HeaderMap` is accepted for `execute` and `subscribe` and `RawQuery` for `subscribe` only, and a planted `Query<`, or a `HeaderMap` or `RawQuery` parameter of another handler such as the former `subscribe_or_explore`, is still reported (amended on 2026-11-21, review finding CQ-4)
+- **Given** the bootstrap, **When** the router is assembled, **Then** the schema data holds `QueryStringLimit` whose `max_bytes` equals `HTTP_MAX_BODY_BYTES` and `ExplorerPage` whose `served` is true in `dev` only (amended on 2026-11-21, review finding CQ-4), and no variable is added
+- **Given** a schema built without `ExplorerPage`, **When** a GET that does not negotiate SSE is sent with each `Accept` that keeps today's answer, **Then** the answer is the 405 problem with `Allow: POST` and no subscriber is registered (added on 2026-11-21, review finding CQ-4)
 - **Given** `docs/requests.http`, **When** read, **Then** it holds the URL-encoded GET subscription
 - **Given** the story is complete, **When** the gates run, **Then** `make.format`, `make.lint_code`, `make.static_analysis`, `make.unit_tests`, `make.architecture`, `make.complexity`, `make.tests_with_coverage`, `make.e2e_tests`, `make.validate_contract_snapshots`, `make.openapi_diff`, `make.docs_check` and `make.mutation_tests_diff` pass
 
@@ -736,9 +738,10 @@ Goal: the GraphQL endpoint in both forms, the liveness probe and the three docum
 
 **Scope:**
 
-- `crates/service/src/openapi.rs`: `graphql_router(app_env)`, `operational_router()` and `document()` merging the three routers' documents; the tags `GraphQL` and `Documentation`.
+- `crates/service/src/openapi.rs`: `graphql_router()`, which registers `routes!(handler::subscribe, handler::execute)` in every `APP_ENV`, `operational_router()` and `document()` merging the three routers' documents; the tags `GraphQL` and `Documentation`.
 - `crates/service/src/http/router.rs`: `assemble` builds its router from the three routers with `split_for_parts()` and holds no `.route(..)` call; the documentation comment names the new registration.
-- `crates/service/src/graphql/handler.rs`: `#[utoipa::path]` of `execute` (`api_graphql_post`), and the same annotation (`api_graphql_get`) on `subscribe` and `subscribe_or_explore`; the `ToSchema` types `GraphQLRequest`, `GraphQLResponse` and `GraphQLEvent` (used by the annotations only). Also `handler/tests.rs`.
+- `crates/service/src/graphql/handler.rs`: `#[utoipa::path]` of `execute` (`api_graphql_post`) and of `subscribe` (`api_graphql_get`), the one GET handler; the `ToSchema` types `GraphQLRequest`, `GraphQLResponse` and `GraphQLEvent` (used by the annotations only). Also `handler/tests.rs`.
+- Amended on 2026-11-21 (review finding CQ-4): the story, committed as `9bf9de6`, had written `graphql_router(app_env)` with `subscribe_or_explore` in `dev`, put the same annotation on both GET handlers and let `document()` use the `prod` variant. With the one GET handler of story 2.6's amendment, `graphql_router()` takes no argument, and the document is unchanged.
 - `crates/service/src/http/ping.rs` and `crates/service/src/http/docs.rs`: `#[utoipa::path]` of `ping`, `docs_page`, `openapi_json` and `docs_asset`, whose route becomes `/api/docs/{file}`. Also their `tests.rs`.
 - `crates/service/src/openapi/tests.rs`: `every_route_is_registered_through_routes`, `documents_exactly_the_eleven_operations`, `every_operation_is_served`, `the_served_document_is_the_exported_one` and `the_page_assets_are_served`, as the architecture's "Completeness tests" state.
 - `crates/service/src/http/router/tests.rs`: the tests of the routes whose registration moved, unchanged in their expectations.
@@ -758,7 +761,7 @@ Goal: the GraphQL endpoint in both forms, the liveness probe and the three docum
 - **Given** the router of `assemble` in `dev`, `test` and `prod`, **When** `every_operation_is_served` sends each operation's method and path, **Then** no answer is the 404 problem of the `not_found` fallback or the 405 problem of `method_not_allowed`
 - **Given** `GET /api/docs/openapi.json`, **When** it is answered, **Then** its body is `document()`, whose YAML equals the committed snapshot, and `features/api_docs.feature` finds each of the eleven operations in it
 - **Given** the Swagger page, **When** each asset that `docs.html` loads is requested at `/api/docs/{file}`, **Then** it answers 200 with its media type; an unknown file answers the 404 problem
-- **Given** `POST /api/graphql` and `GET /api/graphql`, **When** their entries are read, **Then** the POST holds the body `GraphQLRequest`, `200` as `application/json` (`GraphQLResponse`) and as `text/event-stream` (`GraphQLEvent`), and the `400`, `413`, `415`, `422` and `503` problems; the GET holds `query` (required), `operationName`, `variables` and `extensions` (JSON-encoded objects by `contentMediaType` and `contentSchema`), `200` as `text/event-stream` and as `text/html` (the explorer, `dev` only), and the `400`, `405`, `414`, `422` and `503` problems; both hold the header `Last-Event-ID` and examples of a query and of a subscription to `load.test`
+- **Given** `POST /api/graphql` and `GET /api/graphql`, **When** their entries are read, **Then** the POST holds the body `GraphQLRequest`, `200` as `application/json` (`GraphQLResponse`) and as `text/event-stream` (`GraphQLEvent`), and the `400`, `413`, `415`, `422` and `503` problems; the GET holds `query` (required), `operationName`, `variables` and `extensions` (JSON-encoded objects by `contentMediaType` and `contentSchema`), `200` as `text/event-stream` and as `text/html` (the explorer, `dev` only), and the `400`, `405`, `414`, `422` and `503` problems; both hold the header `Last-Event-ID` and examples of a query and of a subscription to `load.test`; on both, `query` has `maxLength` 4 096 and `operationName` `maxLength` 128 (added by the fix `56a8725`, decision M5 of 2026-11-21)
 - **Given** `GET /ping` and the three documentation routes, **When** their entries are read, **Then** `/ping` answers `200 text/plain` with the example `pong` under the tag `HealthCheck`, and the documentation routes answer `200 text/html`, `200 application/json` and `200` with the asset types plus the `400` and `404` problems, under the tag `Documentation`
 - **Given** the regenerated snapshot, **When** `make.validate_contract_snapshots`, `make.validate_openapi_spec` and `make.openapi_diff` run, **Then** there is no drift, Spectral reports no finding, and oasdiff reports only non-breaking changes, so no `approved-breaking-change` label is needed
 - **Given** the production image in the load-test stack, **When** `make.schemathesis_validate` runs with the protected flags as amended by the approved `71aab46`, **Then** it passes with ten of the eleven operations tested; `GET /api/events/ws` is excluded only by that approved change and stays documented on the Swagger page; any other failure is fixed at its root in the document or the code; should one be impossible to fix, the story stops and escalates to the maintainer with the failing check, the reason and the exact exclusion, and excludes nothing itself
@@ -779,7 +782,11 @@ Goal: every gate of `make ci` that can run locally passes on the final head of p
 
 **Scope:** no new file; fixes only, each in the files of the story that owns them.
 
-**Covers:** NFR-10, NFR-11, NFR-12, NFR-13, NFR-15, NFR-16, NFR-17, NFR-19, NFR-20, NFR-21; AC10, AC11, M4.
+**Fix found by a gate:** the CI check Schemathesis failed on `9bf9de6` with ST202 on `POST /api/graphql`: Schemathesis 4.33.1 sends a 65 537-character string to every request-body string without `maxLength`, so the body exceeded `HTTP_MAX_BODY_BYTES` and was answered with the 413; `operationName` would have failed the same way. The root-cause fix `56a8725`, in the files of story 4.5, bounds `query` to 4 096 characters and `operationName` to 128, counted in Unicode code points, in `to_request` (`crates/service/src/graphql/handler.rs`), which both transports and both forms use, documents both bounds as `maxLength` on the POST body and on the GET parameters, and answers a longer member with the 422 validation problem, one `length` violation per member that never echoes the value. It changes today's behaviour of the JSON transport (FR-3, FR-5, FR-29): a JSON POST whose `query` is over 4 096 characters, or whose `operationName` is over 128, now gets that 422 instead of being executed. The maintainer approved this bound as decision M5 of 2026-11-21 (answer "Approve the bound"), a recorded change of today's GraphQL behaviour, and the pull request description names it as a behaviour change for JSON clients. The bound stays in `to_request`: removing it from the JSON transport brings back the 413 that Schemathesis refuses. CI on `99da8cb`, which records the fix in this bundle: 49 of 49 checks green, Schemathesis included.
+
+**Fix found by the review:** review finding CQ-4 of 2026-11-21 merged the two GET handlers `subscribe` and `subscribe_or_explore`, whose `#[utoipa::path]` blocks were duplicated, into one annotated GET handler `subscribe` in the files of stories 2.6 and 4.5 (`crates/service/src/graphql/handler.rs` and its tests, `bootstrap.rs`, `openapi.rs` and its tests, `http/router.rs` and its tests, and `graphql/document/tests.rs`). Without the event stream it reads the flag `ExplorerPage { served }` that `bootstrap::assemble_router` puts into the schema data from `config.app_env`, as it puts `QueryStringLimit`: the explorer page when the flag is set, else the 405 problem with `Allow: POST`, also on a schema without the flag. `graphql_router()` takes no argument and registers `routes!(handler::subscribe, handler::execute)` in every `APP_ENV`; the OpenAPI document is unchanged. Stories 2.6 and 4.5 record the amendment. Review finding CQ-9 of 2026-11-21 fixed the cause of an intermittent failure at `crates/service/tests/integration/serve_stream.rs:78`, where the status route still gave the reason `catching-up` after the entry `event topic invalid` with `topic-not-found` had been written: the tail now publishes its state before it writes the entries of a change of the fault, of readiness or of health (`event topic invalid`, `event topic unreachable`, `event tail ready`, `event tail failed`, `event tail recovered`), each still written once and under the same conditions, so a status read after one of them finds the state it describes. Its files, `crates/notification/event-stream/application/src/tail.rs` and `tail/tests.rs`, belong to no story of this bundle (story 3.3 of issue #4 wrote them), so this paragraph is their record; the new tests are `a_fault_is_published_before_its_entry_is_written`, `the_node_is_published_ready_before_event_tail_ready_is_written`, `a_round_that_starts_the_node_and_then_fails_logs_ready_then_failed` (`event tail ready` before `event tail failed` within one round), `the_failed_and_recovered_entries_come_after_the_state_of_their_round` and the test of their state recorder, `the_state_recorder_accepts_spans_and_records_each_entry_with_the_published_state`. Review finding CQ-10 of 2026-11-21: the description of `POST /api/graphql` (`POST_TEXT`) and the doc of `execute` in `crates/service/src/graphql/handler.rs`, files of story 4.5, name the M5 bound, and `make.generate_openapi_spec` regenerated `.github/openapi-spec/spec.yaml`, which changes only by that description; the GraphQL snapshot is unchanged.
+
+**Covers:** FR-3, FR-4, FR-5, FR-6 and FR-29 (the length bounds of the fix above, decision M5), FR-23 (the tests of the bounds and of the explorer flag), NFR-3 (the character bounds, M5), NFR-8 (the value never echoed), NFR-10, NFR-11, NFR-12, NFR-13, NFR-15, NFR-16, NFR-17, NFR-19, NFR-20, NFR-21; AC10, AC11, M4, M5.
 
 **Tests:** the whole suite.
 
@@ -792,11 +799,13 @@ Goal: every gate of `make ci` that can run locally passes on the final head of p
 - **Given** `make.architecture`, `make.check_crate_isolation`, `make.unused_dependencies` and `make.validate_architecture_model`, **When** they run, **Then** they pass; the domain, infrastructure and shared crates are unchanged since `c36f708`, and `[workspace.dependencies]` differs from it only by `humantime` replaced with `jiff` (story 1.4)
 - **Given** `git diff --name-only c36f708..HEAD`, the commits of issue #8, **When** it is compared with `protected-config.toml`, **Then** the only protected files it lists are the four of "Protected Changes" in `architecture.md` (`.spectral.yaml` from `a374895`, `make/gates.mk` from `71aab46`, `deny.toml` from `c4f83b3`, `tests/CLI/bats/make_quality_gates.bats` from `49641e7`), each changed exactly as listed there and in no story commit, and it does not list `.claude/rust-sdlc.yml`; over the whole branch, the other protected files changed against the merge base are only `.prettierignore`, `_typos.toml` and `taplo.toml` of issue #7
 - **Given** the contract gates, **When** they run, **Then** `make.validate_contract_snapshots` is clean, `make.validate_openapi_spec` reports no finding, `make.graphql_diff` and `make.openapi_diff` report only non-breaking changes, and `make.schemathesis_validate` passes with the eleven operations of FR-26 tested, apart from `GET /api/events/ws`, which only the approved `make/gates.mk` change `71aab46` excludes
+- **Given** a JSON POST without SSE whose `query` is longer than 4 096 characters or whose `operationName` is longer than 128, **When** it is answered, **Then** it is not executed and gets the 422 problem of type `/problems/validation-failed` with one `length` violation per member over its bound, which never holds the value, as on the event stream and the GET form (`a_post_whose_document_or_operation_name_is_too_long_is_the_422_problem_on_both_transports`, `a_get_whose_document_or_operation_name_is_too_long_is_the_422_problem_in_every_mode`); the format problem of the GET form comes before it (`the_format_violation_of_the_get_form_comes_before_the_length_violations`); both members at their bound are executed (`a_document_and_an_operation_name_at_their_bounds_are_executed_on_both_forms`) and fit the default `HTTP_MAX_BODY_BYTES` in any encoding (`the_longest_document_and_operation_name_fit_the_default_size_limit_in_any_encoding`); FR-3, FR-5 and FR-29 of `prd.md` state this change of the JSON transport as decision M5 of 2026-11-21, and the pull request description names it as a behaviour change for JSON clients
+- **Given** the GraphQL GET route in `dev`, `test` and `prod`, **When** its registration, its answers and the document are read, **Then** one annotated handler `subscribe` serves it, `graphql_router()` registers `routes!(handler::subscribe, handler::execute)` in every `APP_ENV`, a GET that does not negotiate the event stream gets the explorer page where `ExplorerPage { served }` is set (`dev`) and the 405 problem with `Allow: POST` otherwise and on a schema without the flag, and the document is unchanged (`the_explorer_page_is_served_in_dev_only`, `a_get_without_sse_on_a_schema_without_the_explorer_flag_is_the_405_problem`, `the_entries_of_the_path_are_the_operations_of_the_one_get_handler_and_execute`, `the_graphql_router_documents_one_get_and_one_post_operation_as_the_document_does`; review finding CQ-4)
 - **Given** `make.smoke_load_tests`, **When** it runs, **Then** it passes within its unchanged budgets
 - **Given** `make.check_security` and the final `Cargo.lock`, **When** the gate runs and the lock is read, **Then** the gate passes with only the two approved `deny.toml` entries, and no crate that a RustSec advisory marks unmaintained is reached without a dev edge: `humantime` only through `cucumber`, `chrono` only through `aws-smithy-mocks` (NFR-21)
 - **Given** every FR and NFR of `prd.md` and AC1 to AC11, **When** the table "Requirement to stories" is checked against the tests and documents, **Then** each is covered by at least one passing test, or by a document that `make.docs_check` validates
 - **Given** `docs/environment.md` and the log messages of the streams, **When** compared with `c36f708`, **Then** no configuration variable and no log message was added, and the only change of `docs/environment.md` is the duration-syntax line of story 1.4
-- **Given** the commits since `c36f708`, **When** `make.check_commit_message` judges each subject, **Then** every subject passes as `<type>(#8): <subject>`; each story commit reads `<type>(#8): story N.M <title>`; the only other commits are the planning-bundle commits (`docs(#8): ...`, from `7b44808` on), the four approved protected commits of "Protected Changes" in `architecture.md` (`a374895`, `71aab46`, `c4f83b3` and `49641e7` "test(#8): plant jiff instead of humantime in the unused-dependency Bats test") and the root-cause fix `584f868`; no hook was bypassed, and no implementer pushed
+- **Given** the commits since `c36f708`, **When** `make.check_commit_message` judges each subject, **Then** every subject passes as `<type>(#8): <subject>`; each story commit reads `<type>(#8): story N.M <title>`; the only other commits are the planning-bundle commits (`docs(#8): ...`, from `7b44808` on), the four approved protected commits of "Protected Changes" in `architecture.md` (`a374895`, `71aab46`, `c4f83b3` and `49641e7` "test(#8): plant jiff instead of humantime in the unused-dependency Bats test") and the root-cause fixes `584f868` and `56a8725` (the GraphQL length bounds above), and the commits that fix review findings, among them the one-GET-handler refactor of CQ-4; no hook was bypassed, and no implementer pushed
 
 **Depends on:** 1.4, 2.7, 3.1, 3.2, 4.1, 4.2, 4.3, 4.4, 4.5
 
@@ -806,10 +815,10 @@ Goal: every gate of `make ci` that can run locally passes on the final head of p
 | --- | --- |
 | FR-1 | 1.2, 1.3, 2.2 |
 | FR-2 | 2.3, 2.6 |
-| FR-3 | 2.3 |
-| FR-4 | 2.6, 3.2 |
-| FR-5 | 2.1, 2.2, 2.3, 2.5, 2.6 |
-| FR-6 | 2.3, 2.5, 2.6 |
+| FR-3 | 2.3, 5.1 (the length bounds, M5) |
+| FR-4 | 2.6, 3.2, 5.1 (the length bounds, M5) |
+| FR-5 | 2.1, 2.2, 2.3, 2.5, 2.6, 5.1 (the length bounds, M5) |
+| FR-6 | 2.3, 2.5, 2.6, 5.1 (the length problem last, M5) |
 | FR-7 | 2.3 |
 | FR-8 | 2.3, 2.4, 3.2 |
 | FR-9 | 1.3, 2.3, 2.4 |
@@ -826,21 +835,21 @@ Goal: every gate of `make ci` that can run locally passes on the final head of p
 | FR-20 | 2.3, 3.2 |
 | FR-21 | 2.7, 3.2 |
 | FR-22 | 1.3, 2.3, 2.5 |
-| FR-23 | 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 4.4, 4.5 (each story its part of the list) |
+| FR-23 | 1.1, 1.2, 1.3, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 4.4, 4.5 (each story its part of the list), 5.1 (the tests of the bounds, M5, and of the explorer flag) |
 | FR-24 | 4.3 |
 | FR-25 | 2.3, 2.6, 4.1, 4.2, 4.5 |
 | FR-26 | 4.4, 4.5 |
 | FR-27 | 4.5 |
 | FR-28 | 4.5 |
-| FR-29 | 2.6, 4.5 |
+| FR-29 | 2.6, 4.5, 5.1 (the ST202 fix, M5) |
 | NFR-1 | 1.2, 1.3 |
 | NFR-2 | 2.3, 2.4 |
-| NFR-3 | 1.2, 2.3, 2.6 |
+| NFR-3 | 1.2, 2.3, 2.6, 5.1 (the character bounds, M5) |
 | NFR-4 | 4.3 |
 | NFR-5 | 3.1, 4.2 |
 | NFR-6 | 1.3 |
 | NFR-7 | 4.1, 4.2 |
-| NFR-8 | 1.2, 1.3, 2.3, 2.5, 2.6, 4.2 |
+| NFR-8 | 1.2, 1.3, 2.3, 2.5, 2.6, 4.2, 5.1 (the length bounds, M5) |
 | NFR-9 | 1.3, 2.3, 4.2 |
 | NFR-10 | 5.1 (every story carries 100 % coverage of its code) |
 | NFR-11 | 5.1 (every wave runs the diff mutation gate) |
@@ -867,3 +876,4 @@ Goal: every gate of `make ci` that can run locally passes on the final head of p
 | AC11 | 4.1, 4.2, 4.3, 5.1 |
 | M1 (protocol choices recorded) | 2.3, 2.4, 2.5, 2.6, 4.1, 4.2 |
 | M4 (maintainer decision of 2026-11-20: the two advisories, humantime replaced) | 1.4, 5.1 |
+| M5 (maintainer decision of 2026-11-21: `query` at most 4 096 and `operationName` at most 128 characters, a recorded change of the JSON transport) | 5.1 |
