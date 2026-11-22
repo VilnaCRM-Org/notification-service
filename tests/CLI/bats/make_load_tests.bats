@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Tests of the load-test targets (architecture-delivery.md "CLI Tests (Bats)", file make_load_tests.bats): the
-# single-scenario runner, the profile runners, the start times of the profiles, the AWS dry run against LocalStack
+# single-scenario runner, the profile runners, the start times of the profiles, the AWS dry run against the stub AWS CLI
 # and its instance script, and the negative tests of gates G22 and G24. JSON is edited with json_query of the
 # helper, so the host needs no jq.
 #
@@ -175,25 +175,32 @@ STUB
   assert_output 'average=1m10s smoke=0s spike=3m42s stress=2m26s'
 }
 
-# --- aws-load-tests against LocalStack -------------------------------------------------------------------------
+# --- aws-load-tests against the stub AWS CLI --------------------------------------------------------------------
 
-# bats test_tags=slow
 @test "aws-load-tests with LOCAL_MODE_ENV=true prints the instance and bucket lines, and the cleanup succeeds" {
-  require_docker
-  run make --no-print-directory start-deps DEPS=localstack
-  assert_success
+  require_command git
+  # The dry run calls tests/Load/stub-aws.sh instead of the AWS CLI image; the stub records every call here.
+  export AWS_STUB_LOG="${BATS_TEST_TMPDIR}/aws-calls.log"
   # The branch and the repository URL are given: a pull-request job checks out a detached HEAD, and a clone made
   # from a local path has no HTTPS origin, which the script refuses on purpose.
   run make --no-print-directory aws-load-tests LOCAL_MODE_ENV=true branch=load-dry-run repo_url=https://example.com/acme/service.git
   assert_success
   assert_output --partial 'Repository URL: https://example.com/acme/service.git'
   assert_output --partial 'Repository branch: load-dry-run'
-  assert_output --partial 'Launched instance'
-  assert_output --partial 'You can access the S3 bucket here'
+  assert_output --partial 'Launched instance: i-'
+  assert_output --regexp 'You can access the S3 bucket here: https://[a-z0-9-]+\.console\.aws\.amazon\.com/s3/buckets/loadtest-bucket-[0-9a-f]{8}\?region='
   assert_file_exists tests/Load/aws-run.env
+  run grep -c -E '^(ec2 run-instances|s3 mb|iam create-role) ' "${AWS_STUB_LOG}"
+  assert_output '3'
   run make --no-print-directory aws-load-tests-cleanup LOCAL_MODE_ENV=true
   assert_success
+  assert_output --partial 'Cleanup complete!'
   assert_file_not_exists tests/Load/aws-run.env
+  # The cleanup removed what the run created, the instance before the security group it uses.
+  run grep -n -E '^(ec2 terminate-instances|ec2 delete-security-group|s3 rb|iam delete-role) ' "${AWS_STUB_LOG}"
+  assert_success
+  assert_equal "${#lines[@]}" 4
+  assert_line --index 3 --regexp '^[0-9]+:ec2 delete-security-group '
 }
 
 @test "aws-load-tests refuses a detached HEAD without a branch and exits 2 before any container or AWS call" {

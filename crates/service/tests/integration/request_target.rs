@@ -14,12 +14,10 @@ use crate::support::{Answer, Finished, Scratch, messages_of, serve};
 /// The origin that the served binaries allow, and that every request of these tests comes from.
 const ORIGIN: &str = "https://app.example.com";
 
-/// The configuration of a node whose dependencies do not answer (SQS and the Kafka broker on port
-/// 1, where nothing listens) and that allows [`ORIGIN`]: a query that touches no dependency is
-/// still answered.
-const NODE: [(&str, &str); 4] = [
-    ("AWS_REGION", "us-east-1"),
-    ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
+/// The configuration of a node whose broker does not answer (the Kafka broker on port 1, where
+/// nothing listens) and that allows [`ORIGIN`]: a query that touches no dependency is still
+/// answered.
+const NODE: [(&str, &str); 2] = [
     ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
     ("CORS_ALLOWED_ORIGINS", ORIGIN),
 ];

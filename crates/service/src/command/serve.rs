@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::serve::{Listener, ListenerExt as _};
 use shared_domain::BoxError;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::runtime::Runtime;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::watch;
@@ -27,6 +27,18 @@ const FORCED_EXIT_LIMIT: Duration = Duration::from_secs(1);
 
 /// Level filter of the report of an invalid configuration: `LOG_LEVEL` is not known then.
 const REPORT_LOG_LEVEL: &str = "info";
+
+/// Length of the queue of connections the kernel completed and the server has not accepted yet.
+/// A burst of connects beyond it has its SYNs dropped and retried a second later; the kernel caps
+/// it at `net.core.somaxconn`.
+const LISTEN_BACKLOG: u32 = 4096;
+
+/// The most threads the runtime starts for blocking work (name resolution and file reads only).
+/// It stays under the process limit of a container (`pids`), which the default of 512 exceeds.
+const MAX_BLOCKING_THREADS: usize = 64;
+
+/// The name of every thread of the serving runtime.
+const THREAD_NAME: &str = "service-worker";
 
 /// How the server stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,17 +102,52 @@ fn log_failed(error: &BoxError) {
     tracing::error!(error = %error, "serve failed");
 }
 
+/// Raises the soft limit of open files to the hard limit and returns the soft limit before and
+/// after: every connection holds a descriptor, and a default soft limit of 1024 refuses
+/// connections with `EMFILE` long before `MAX_SUBSCRIBERS` is reached.
+fn raise_file_limit() -> std::io::Result<(u64, u64)> {
+    let (before, _hard) = rlimit::Resource::NOFILE.get()?;
+    let after = rlimit::increase_nofile_limit(u64::MAX)?;
+    Ok((before, after))
+}
+
+fn log_file_limit_raised(before: u64, after: u64) {
+    tracing::info!(before, after, "open file limit");
+}
+
+fn log_file_limit_kept(error: &std::io::Error) {
+    tracing::warn!(error = %error, "open file limit not raised");
+}
+
+/// Writes the outcome of [`raise_file_limit`]; a limit that cannot be raised is served as it is.
+fn log_file_limit(outcome: &std::io::Result<(u64, u64)>) {
+    match outcome {
+        Ok((before, after)) => log_file_limit_raised(*before, *after),
+        Err(error) => log_file_limit_kept(error),
+    }
+}
+
 /// Completes when the stop flag is set; the graceful shutdown of the server waits for it.
 async fn stopped(mut stopping: watch::Receiver<bool>) {
     drop(stopping.wait_for(|stopping| *stopping).await);
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the serve command owns the listening socket"
-)]
-async fn bind(config: &Config) -> std::io::Result<TcpListener> {
-    TcpListener::bind((config.host, config.port)).await
+/// A TCP socket of the address family of `address`.
+fn socket_for(address: SocketAddr) -> std::io::Result<TcpSocket> {
+    if address.is_ipv4() {
+        TcpSocket::new_v4()
+    } else {
+        TcpSocket::new_v6()
+    }
+}
+
+/// The listening socket of `address`, with its address reusable at once after a restart, as
+/// `TcpListener::bind` makes it, and a queue of [`LISTEN_BACKLOG`] connections.
+fn listen_on(address: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = socket_for(address)?;
+    socket.set_reuseaddr(true)?;
+    socket.bind(address)?;
+    socket.listen(LISTEN_BACKLOG)
 }
 
 /// Bounds a stalled peer at the socket: the kernel ends a connection whose peer leaves sent data
@@ -115,14 +162,23 @@ fn bound_stalled_peer<S: AsFd>(socket: &S, limit: Duration) {
 #[cfg(not(target_os = "linux"))]
 fn bound_stalled_peer<S>(_socket: &S, _limit: Duration) {}
 
-/// `listener` with every connection it accepts bounded by [`bound_stalled_peer`] at
-/// `STREAM_KEEP_ALIVE` (FR-24).
+/// Prepares an accepted connection: Nagle's algorithm is off, so a small frame written after
+/// another leaves at once instead of waiting for the acknowledgement of the first, and a stalled
+/// peer is bounded at `limit` by [`bound_stalled_peer`]. A socket that refuses an option is served
+/// without it.
+fn prepare_connection(stream: &TcpStream, limit: Duration) {
+    drop(stream.set_nodelay(true));
+    bound_stalled_peer(stream, limit);
+}
+
+/// `listener` with every connection it accepts prepared by [`prepare_connection`], its stalled
+/// peer bounded at `STREAM_KEEP_ALIVE` (FR-24).
 fn bounded_listener(
     listener: TcpListener,
     streams: &StreamConfig,
 ) -> impl Listener<Io = TcpStream, Addr = SocketAddr> {
     let keep_alive = streams.keep_alive;
-    listener.tap_io(move |stream| bound_stalled_peer(stream, keep_alive))
+    listener.tap_io(move |stream| prepare_connection(stream, keep_alive))
 }
 
 /// The shutdown up to the end of the HTTP drain: the background work, then the server.
@@ -140,7 +196,7 @@ async fn serve(config: &Config) -> Result<Shutdown, BoxError> {
     let signals = Signals::install()?;
     let adapters = Adapters::connect(config).await;
     let application = bootstrap::application(adapters, config)?;
-    let listener = bind(config).await?;
+    let listener = listen_on(SocketAddr::new(config.host, config.port))?;
     run_until(application, listener, config, signals.received()).await
 }
 
@@ -176,10 +232,14 @@ async fn run_until<S: Future<Output = &'static str> + Send>(
     }
 }
 
-/// The runtime of the serve command: several worker threads, I/O and timers.
+/// The runtime of the serve command: I/O, timers and one worker thread per CPU the process may
+/// use (the cgroup quota counts), at most [`MAX_BLOCKING_THREADS`] blocking threads, every thread
+/// named [`THREAD_NAME`].
 fn serving_runtime() -> std::io::Result<Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .thread_name(THREAD_NAME)
         .build()
 }
 
@@ -194,6 +254,7 @@ fn serve_on<F: Future>(runtime: Runtime, serving: F) -> F::Output {
 
 fn start(config: &Config) -> Result<Shutdown, BoxError> {
     telemetry::init(&config.log_level, std::io::stdout)?;
+    log_file_limit(&raise_file_limit());
     serve_on(serving_runtime()?, serve(config))
 }
 

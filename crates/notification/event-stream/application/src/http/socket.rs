@@ -2,8 +2,15 @@
 //! keep-alive period, the error frames of invalid commands and the close frame of an ended
 //! subscription (FR-9 to FR-11, FR-24).
 //!
-//! Every write has the keep-alive period as its deadline: `WebSocket::send` has none, and its
-//! flush stays pending while the peer reads nothing. A turn that reads Kafka (a replay turn) is
+//! Every write has the keep-alive period as its deadline: a flush has none of its own, and stays
+//! pending while the peer reads nothing. A frame is written with the frames that are already
+//! ready after it, at most [`MAX_BATCH_FRAMES`] and up to [`MAX_BATCH_BYTES`]: each is fed to the
+//! socket and the batch is flushed once, so a burst of events costs one write to the peer and not
+//! one per frame. Each feed and the flush has its own deadline, so a client that takes data more
+//! slowly than a whole batch per period but takes some every period is never evicted (FR-24).
+//! Before it takes a further frame, a batch handles every inbound message that already arrived,
+//! without awaiting one, so a command applies to every frame not yet written (FR-10); the floor
+//! and type rules apply to every frame. A turn that reads Kafka (a replay turn) is
 //! polled to its end without reading an inbound frame, because a cancelled page read would re-enter
 //! the permit queue at its end and read the page again; it still writes the pings. A live turn
 //! never starts a Kafka read. Tungstenite writes the reply to a client's close frame only on its
@@ -16,9 +23,12 @@ use std::time::Duration;
 use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
 use event_stream_domain::Cursor;
+use futures_util::{FutureExt as _, SinkExt};
 use tokio::task::coop::consume_budget;
+use tokio::time::error::Elapsed;
 use tokio::time::{Interval, MissedTickBehavior, interval, timeout};
 
+use super::frame::Frame;
 use super::session::{Inbound, Session};
 use super::subscription::{EndReason, Step, log_replay_failed};
 
@@ -30,11 +40,12 @@ pub(crate) trait Connection: Send {
     /// The next inbound message; `None` once the connection ended. Cancel safe.
     fn receive(&mut self) -> impl Future<Output = Received> + Send;
 
-    /// Writes and flushes one message.
-    fn transmit(
-        &mut self,
-        message: Message,
-    ) -> impl Future<Output = Result<(), axum::Error>> + Send;
+    /// Buffers one message: it reaches the peer with the next flush, or earlier once the buffer
+    /// passes its write size.
+    fn feed(&mut self, message: Message) -> impl Future<Output = Result<(), axum::Error>> + Send;
+
+    /// Writes every buffered message to the peer.
+    fn flush(&mut self) -> impl Future<Output = Result<(), axum::Error>> + Send;
 }
 
 impl Connection for WebSocket {
@@ -42,13 +53,23 @@ impl Connection for WebSocket {
         self.recv()
     }
 
-    fn transmit(
-        &mut self,
-        message: Message,
-    ) -> impl Future<Output = Result<(), axum::Error>> + Send {
-        self.send(message)
+    fn feed(&mut self, message: Message) -> impl Future<Output = Result<(), axum::Error>> + Send {
+        SinkExt::feed(self, message)
+    }
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), axum::Error>> + Send {
+        SinkExt::flush(self)
     }
 }
+
+/// The most frames one write batch holds.
+pub(crate) const MAX_BATCH_FRAMES: usize = 16;
+
+/// The size up to which a write batch takes another ready frame, in bytes; the frame that crosses
+/// it is the last of its batch. The write buffer of the connection has the same size
+/// ([`super::handler::WRITE_BUFFER_BYTES`]), so a batch stays in it until its flush, or until the
+/// frame that crosses the size, and never holds more than that frame on top (NFR-9).
+pub(crate) const MAX_BATCH_BYTES: usize = 16_384;
 
 /// How long the pump waits for the client's close frame after its own, or for the client to hang
 /// up after the client's close frame.
@@ -160,7 +181,7 @@ impl<C: Connection> Pump<C> {
     /// chain of steps that awaits nothing still hands the thread back to the scheduler.
     async fn on_step(&mut self, step: Step) -> ControlFlow<Stop> {
         match step {
-            Step::Frame(frame) => self.send(Message::Text(frame.json.clone())).await,
+            Step::Frame(frame) => self.write_batch(&frame).await,
             Step::Idle => {
                 consume_budget().await;
                 ControlFlow::Continue(())
@@ -171,6 +192,41 @@ impl<C: Connection> Pump<C> {
 
     async fn send(&mut self, message: Message) -> ControlFlow<Stop> {
         send(&mut self.connection, self.keep_alive, message).await
+    }
+
+    /// Feeds the text of `first` and of the frames that are ready after it, while the batch holds
+    /// fewer than [`MAX_BATCH_FRAMES`] and fewer than [`MAX_BATCH_BYTES`], then flushes once; each
+    /// feed and the flush within its own deadline. Before each further frame the inbound messages
+    /// that already arrived are handled, so a command applies to the rest of the batch; one that
+    /// ends the connection ends the batch unflushed.
+    async fn write_batch(&mut self, first: &Frame) -> ControlFlow<Stop> {
+        self.feed(first).await?;
+        let mut frames = 1_usize;
+        let mut bytes = first.json().len();
+        while frames < MAX_BATCH_FRAMES && bytes < MAX_BATCH_BYTES {
+            self.on_arrived().await?;
+            let Some(frame) = self.session.try_next() else {
+                break;
+            };
+            frames = frames.saturating_add(1);
+            bytes = bytes.saturating_add(frame.json().len());
+            self.feed(&frame).await?;
+        }
+        outcome(timeout(self.keep_alive, self.connection.flush()).await)
+    }
+
+    /// Handles every inbound message that already arrived, without awaiting one; a message that
+    /// ends the connection stops at once.
+    async fn on_arrived(&mut self) -> ControlFlow<Stop> {
+        while let Some(received) = self.connection.receive().now_or_never() {
+            self.on_inbound(received).await?;
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Feeds the text of `frame` within the keep-alive period.
+    async fn feed(&mut self, frame: &Frame) -> ControlFlow<Stop> {
+        outcome(timeout(self.keep_alive, self.connection.feed(text(frame))).await)
     }
 
     /// What follows the last turn: an evicted subscriber is logged, a client close frame and the
@@ -208,7 +264,8 @@ impl<C: Connection> Pump<C> {
 
 /// The first of a ping, an inbound message and a live step; every branch is cancel safe. The
 /// order is fixed: the ping first, so that it is sent on time, then the inbound message, so that a
-/// command applies to every frame not yet written. The live step never reads Kafka: when the
+/// command applies to every frame not yet written; within a batch, [`Pump::write_batch`] handles
+/// the inbound messages that arrived before each further frame. The live step never reads Kafka: when the
 /// window evicted past the floor after the turn asked `replaying()`, it idles, and the next turn
 /// is a replay turn.
 async fn pick<C: Connection>(
@@ -224,14 +281,28 @@ async fn pick<C: Connection>(
     }
 }
 
-/// Writes one message within `deadline`: a transport error ends the connection, a missed deadline
-/// evicts the subscriber.
+/// Writes one message within `deadline`.
 async fn send<C: Connection>(
     connection: &mut C,
     deadline: Duration,
     message: Message,
 ) -> ControlFlow<Stop> {
-    match timeout(deadline, connection.transmit(message)).await {
+    let write = async {
+        connection.feed(message).await?;
+        connection.flush().await
+    };
+    outcome(timeout(deadline, write).await)
+}
+
+/// The text message of a frame: a clone of its shared bytes.
+fn text(frame: &Frame) -> Message {
+    Message::Text(frame.json().clone())
+}
+
+/// What a write within its deadline means for the pump: a transport error ends the connection, a
+/// missed deadline evicts the subscriber.
+fn outcome(written: Result<Result<(), axum::Error>, Elapsed>) -> ControlFlow<Stop> {
+    match written {
         Ok(Ok(())) => ControlFlow::Continue(()),
         Ok(Err(_transport)) => ControlFlow::Break(Stop::Gone),
         Err(_elapsed) => ControlFlow::Break(Stop::Stalled),

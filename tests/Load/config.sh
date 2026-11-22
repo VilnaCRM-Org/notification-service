@@ -4,13 +4,13 @@
 #
 # Options: -r region, -a ami, -t instance type, -i instance tag, -o role, -b branch, -u repository URL, -s security
 #          group, -l load target (the Make target that runs on the instance).
-# Environment: LOCAL_MODE_ENV=true talks to LocalStack with the placeholder credentials `test`; otherwise
-#   AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN for temporary credentials) are
-#   required. AWS_REGION is used when -r is not given; without both the region is us-east-1.
+# Environment: LOCAL_MODE_ENV=true is the dry run: every AWS call goes to the stub CLI stub-aws.sh, which needs
+#   no credentials and no Docker; otherwise AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN for
+#   temporary credentials) are required. AWS_REGION is used when -r is not given; without both the region is us-east-1.
 #   AWS_CLI_IMAGE (read from make/tool-versions.mk when unset) is the AWS CLI image.
 #
 # Provides: the variables below (exported), the function AWS_CLI (every AWS call goes through it: the CLI runs
-# from the pinned image, so neither aws, uuidgen nor envsubst is needed on the host), `render` (sed rendering
+# from the pinned image, or the stub in the dry run, so neither aws, uuidgen nor envsubst is needed on the host), `render` (sed rendering
 # of a template into WORK_DIR) and `resolve_repository`.
 # Exit status of a sourcing script: 2 when the configuration is unusable.
 
@@ -19,8 +19,8 @@ REPO_ROOT="$(cd "${LOAD_DIR}/../.." && pwd)"
 RUN_FILE="${LOAD_DIR}/aws-run.env"
 
 DEFAULT_REGION="us-east-1"
-# The fixed placeholder AMI of the LocalStack dry run (the emulator does not look at it).
-LOCAL_AMI_ID="ami-0e86e20dae9224db8"
+# The stub AWS CLI of the dry run (LOCAL_MODE_ENV=true).
+AWS_STUB="${LOAD_DIR}/stub-aws.sh"
 # Public SSM parameter of Canonical: the current Ubuntu 24.04 AMI of the chosen region.
 AMI_PARAMETER="/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
 # 4 vCPU and 8 GiB: a cold release build of the image takes about 5 minutes, which t2.micro cannot do.
@@ -42,7 +42,10 @@ config_check() {
   [[ $2 =~ $3 ]] || config_fail "$1 '$2' is not valid."
 }
 
-for tool in docker git; do
+# The dry run calls the stub instead of the AWS CLI image, so it needs no Docker.
+required_tools="git"
+[[ ${LOCAL_MODE_ENV:-false} == true ]] || required_tools="docker git"
+for tool in ${required_tools}; do
   command -v "${tool}" >/dev/null 2>&1 || config_fail "${tool} is required and was not found on PATH."
 done
 
@@ -99,41 +102,36 @@ fi
 
 case ${LOCAL_MODE} in
   true)
-    # LOCALSTACK_PORT comes from the environment or, with the semantics of scripts/with-env.sh, from .env.
-    if [[ -z ${LOCALSTACK_PORT:-} && -f "${REPO_ROOT}/.env" ]]; then
-      LOCALSTACK_PORT="$("${REPO_ROOT}/scripts/with-env.sh" "${REPO_ROOT}/.env" -- printenv LOCALSTACK_PORT || true)"
-    fi
-    LOCALSTACK_PORT=${LOCALSTACK_PORT:-4566}
-    config_check "LOCALSTACK_PORT" "${LOCALSTACK_PORT}" '^[0-9]+$'
-    ENDPOINT_URL="http://localhost:${LOCALSTACK_PORT}"
-    AWS_ACCESS_KEY_ID='test'
-    AWS_SECRET_ACCESS_KEY='test'
-    unset AWS_SESSION_TOKEN
+    # The stub reads no credentials: the caller's credentials never reach the dry run.
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
     ;;
   false)
-    ENDPOINT_URL=""
     if [[ -z ${AWS_ACCESS_KEY_ID:-} || -z ${AWS_SECRET_ACCESS_KEY:-} ]]; then
-      config_fail "AWS credentials are missing. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN for temporary credentials) in the environment, or use LOCAL_MODE_ENV=true for the LocalStack dry run."
+      config_fail "AWS credentials are missing. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN for temporary credentials) in the environment, or use LOCAL_MODE_ENV=true for the dry run with the stub AWS CLI."
     fi
     ;;
   *) config_fail "LOCAL_MODE_ENV must be true or false, not '${LOCAL_MODE}'." ;;
 esac
 AWS_REGION=${REGION}
 export REGION AMI_ID INSTANCE_TYPE INSTANCE_TAG ROLE_NAME SECURITY_GROUP_NAME LOAD_TARGET BRANCH_NAME LOCAL_MODE
-export ENDPOINT_URL AWS_CLI_IMAGE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY LOAD_DIR REPO_ROOT RUN_FILE
-export LOCAL_AMI_ID AMI_PARAMETER
+export AWS_CLI_IMAGE AWS_REGION LOAD_DIR REPO_ROOT RUN_FILE AWS_STUB AMI_PARAMETER
+[[ ${LOCAL_MODE} == true ]] || export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 
 # The temporary directory that holds the rendered files; it is mounted at /work in the AWS CLI container.
 WORK_DIR="$(mktemp -d)"
 export WORK_DIR
 trap 'rm -rf -- "${WORK_DIR:?}"' EXIT
 
-# AWS_CLI <aws arguments>: runs the AWS CLI from the pinned image. Files are read as file://<name> from /work.
+# AWS_CLI <aws arguments>: runs the AWS CLI from the pinned image, or the stub in the dry run, in WORK_DIR. Files
+# are read as file://<name> from /work.
 AWS_CLI() {
+  if [[ ${LOCAL_MODE} == true ]]; then
+    (cd "${WORK_DIR}" && "${AWS_STUB}" "$@")
+    return
+  fi
   docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
-    -v "${WORK_DIR}:/work" -w /work "${AWS_CLI_IMAGE}" \
-    ${ENDPOINT_URL:+--endpoint-url "${ENDPOINT_URL}"} "$@"
+    -v "${WORK_DIR}:/work" -w /work "${AWS_CLI_IMAGE}" "$@"
 }
 
 # sed_escape <value>: escape a value for the replacement of an s command that uses | as its delimiter.

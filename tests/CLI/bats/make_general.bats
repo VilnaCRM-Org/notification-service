@@ -79,13 +79,14 @@ run_hook() {
   [[ -z "${missing}" ]] || fail "FR62: PHP target names missing from make help:${missing}"
 }
 
-@test "FR55(a): features/health_check.feature is the PHP template file without its database scenario" {
-  # The SHA-256 of features/health_check.feature of the PHP template without the scenario "database is unavailable"
-  # (the service has no database). The end-to-end gate runs that file (FR55(a), NFR30), so it changes only together
-  # with the PHP template; a service adds scenarios in a file of its own.
-  local file=features/health_check.feature expected=67eba235193e7b19d91467687d2dd6367dee05ca969dbf5c6d533ab165a7a1e0
+@test "FR55(a): features/health_check.feature is the PHP template file without its database and queue scenarios" {
+  # The SHA-256 of features/health_check.feature of the PHP template without the scenarios "database is unavailable"
+  # (the service has no database) and "queue service is unavailable" (SQS is removed, ADR 0023). The end-to-end gate
+  # runs that file (FR55(a), NFR30), so it changes only together with the PHP template; a service adds scenarios in a
+  # file of its own.
+  local file=features/health_check.feature expected=ae37042f6b64447ee07f66b41de51929a5bad842f876ae620f55dcc51c628f8a
   local actual reason
-  reason="FR55(a), NFR30: ${file} must stay the PHP template's file without its database scenario and changes only together with it"
+  reason="FR55(a), NFR30: ${file} must stay the PHP template's file without its database and queue scenarios and changes only together with it"
   [[ -f "${file}" ]] || fail "${reason}; the file is missing"
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "${file}" | cut -d ' ' -f 1)"
@@ -572,19 +573,19 @@ SHARED_FORMS=(PLAIN DOUBLE SINGLE COMMENTED HASH ESCAPES REFERENCES EMPTY)
 probe:
 > @printf 'outer: BATS_ARGS=[%s] BATS_PATH=[%s] CI_STAGES=[%s] DEPS=[%s] base_ref=[%s]\n' "$(BATS_ARGS)" "$(BATS_PATH)" "$(CI_STAGES)" "$(DEPS)" "$(base_ref)"
 > @printf 'kept: BUILD_IMAGE=[%s] DOCKER=[%s] DOCKER_COMPOSE=[%s] APP_IMAGE=[%s] DEV_IMAGE=[%s] LOAD_TEST_PROJECT=[%s]\n' "$(BUILD_IMAGE)" "$(DOCKER)" "$(DOCKER_COMPOSE)" "$(APP_IMAGE)" "$(DEV_IMAGE)" "$(LOAD_TEST_PROJECT)"
-> @printf 'kept: COMPOSE_PROJECT_NAME=[%s] RUN_IN_CONTAINER=[%s] DB_PORT=[%s] LOCALSTACK_PORT=[%s]\n' "$(COMPOSE_PROJECT_NAME)" "$(RUN_IN_CONTAINER)" "$$DB_PORT" "$$LOCALSTACK_PORT"
+> @printf 'kept: COMPOSE_PROJECT_NAME=[%s] RUN_IN_CONTAINER=[%s] DB_PORT=[%s] APP_PORT=[%s]\n' "$(COMPOSE_PROJECT_NAME)" "$(RUN_IN_CONTAINER)" "$$DB_PORT" "$$APP_PORT"
 > @printf 'flags: [%s] level=[%s]\n' "$(findstring CI_STAGES,$(MAKEFLAGS))" "$(MAKELEVEL)"
 PROBE
   run env MAKEFLAGS=' -- BATS_ARGS=--filter-tags=none CI_STAGES=help BUILD_IMAGE=0' MAKELEVEL=1 \
     BATS_ARGS=--filter-tags=none BATS_PATH=/nonexistent CI_STAGES=help DEPS=x base_ref=nowhere \
     BUILD_IMAGE=0 DOCKER=/nonexistent/docker DOCKER_COMPOSE='nonexistent compose' APP_IMAGE=a:b DEV_IMAGE=c:d \
-    LOAD_TEST_PROJECT=lp COMPOSE_PROJECT_NAME=cpn DB_PORT=1111 LOCALSTACK_PORT=2222 RUN_IN_CONTAINER=1 \
+    LOAD_TEST_PROJECT=lp COMPOSE_PROJECT_NAME=cpn DB_PORT=1111 APP_PORT=2222 RUN_IN_CONTAINER=1 \
     bash -c "source tests/CLI/bats/test_helper.bash && isolate_make_environment && make --no-print-directory -f Makefile -f \"\$1\" probe" \
     _ "${tmp}/probe.mk"
   assert_success
-  assert_line 'outer: BATS_ARGS=[] BATS_PATH=[tests/CLI/bats] CI_STAGES=[ci-preflight ci-static-analysis ci-tests ci-contracts ci-mutation ci-delivery ci-cli] DEPS=[localstack] base_ref=[origin/main]'
+  assert_line 'outer: BATS_ARGS=[] BATS_PATH=[tests/CLI/bats] CI_STAGES=[ci-preflight ci-static-analysis ci-tests ci-contracts ci-mutation ci-delivery ci-cli] DEPS=[kafka] base_ref=[origin/main]'
   assert_line 'kept: BUILD_IMAGE=[0] DOCKER=[/nonexistent/docker] DOCKER_COMPOSE=[nonexistent compose] APP_IMAGE=[a:b] DEV_IMAGE=[c:d] LOAD_TEST_PROJECT=[lp]'
-  assert_line 'kept: COMPOSE_PROJECT_NAME=[cpn] RUN_IN_CONTAINER=[1] DB_PORT=[1111] LOCALSTACK_PORT=[2222]'
+  assert_line 'kept: COMPOSE_PROJECT_NAME=[cpn] RUN_IN_CONTAINER=[1] DB_PORT=[1111] APP_PORT=[2222]'
   assert_line 'flags: [] level=[0]'
 }
 

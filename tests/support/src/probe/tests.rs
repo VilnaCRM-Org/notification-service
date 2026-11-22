@@ -37,7 +37,7 @@ fn the_failing_probe_returns_an_error() {
 
 #[test]
 fn the_hanging_probe_never_completes() {
-    let probe = StubProbe::hanging(Dependency::MessageBroker);
+    let probe = StubProbe::hanging(Dependency::EventStream);
     let mut future = std::pin::pin!(probe.check());
     let mut context = Context::from_waker(Waker::noop());
 

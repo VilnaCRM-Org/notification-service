@@ -152,3 +152,19 @@ docs/README.md
 docs/new-service.md
 docs/repository-settings.md
 docs/troubleshooting.md
+# The removal of SQS and LocalStack (ADR 0023) deletes or changes these template files; a sync would re-add SQS.
+crates/internal/health-check/infrastructure/src/probe/sqs.rs
+crates/internal/health-check/infrastructure/src/probe/sqs/tests.rs
+crates/internal/health-check/infrastructure/tests/integration/sqs_probe.rs
+crates/internal/health-check/infrastructure/tests/integration/cache_probe.rs
+crates/shared/infrastructure/src/messaging.rs
+crates/shared/infrastructure/src/messaging/tests.rs
+crates/shared/infrastructure/tests/integration/messaging.rs
+crates/service/src/main.rs
+crates/service/src/command/serve/
+tests/CLI/bats/test_helper.bash
+tests/Load/aws-execute-load-tests.sh
+tests/Load/cleanup.sh
+tests/Load/config.sh
+tests/Load/stub-aws.sh
+.claude/skills/load-testing/SKILL.md

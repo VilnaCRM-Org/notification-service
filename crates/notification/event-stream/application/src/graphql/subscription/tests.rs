@@ -7,15 +7,11 @@ use std::task::Poll;
 use std::time::Duration;
 
 use async_graphql::{
-    Context, EmptyMutation, EmptySubscription, Json, Object, Request, Response, SDLExportOptions,
-    Schema, Variables,
+    Context, EmptyMutation, EmptySubscription, Json, Object, OutputType, Request, Response,
+    SDLExportOptions, Schema, Variables,
 };
-use axum::extract::ws::Utf8Bytes;
 use axum::http::HeaderValue;
-use axum::response::sse::Event;
-use event_stream_domain::{
-    Cursor, EventType, Offset, Sequence, TopicError, TopicRecord, TopicReplay,
-};
+use event_stream_domain::{Cursor, Offset, Sequence, TopicError, TopicRecord, TopicReplay};
 use futures_util::StreamExt as _;
 use futures_util::stream::BoxStream;
 use rstest::rstest;
@@ -29,7 +25,7 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tracing::Level;
 
-use super::{EventObject, EventStreamSubscription, StreamLink, StreamPhase};
+use super::{EventData, EventObject, EventStreamSubscription, StreamLink, StreamPhase};
 use crate::graphql::EventStreamQuery;
 use crate::http::frame::Frame;
 use crate::http::hub::{Delivery, Hub, HubError, HubSettings};
@@ -70,18 +66,18 @@ type TestSchema = Schema<EventQuery, EmptyMutation, EmptySubscription>;
 #[derive(Debug, Default)]
 struct Resolved(AtomicUsize);
 
-/// A query root whose one field returns the `Event` of the frame at offset 1042.
+/// A query root whose one field returns the `Event` of the frame in the schema data.
 #[derive(Debug, Default)]
 struct EventQuery;
 
 #[Object]
 impl EventQuery {
-    /// The event at offset 1042.
+    /// The event of the frame in the schema data.
     async fn event(&self, ctx: &Context<'_>) -> async_graphql::Result<EventObject> {
         ctx.data::<Arc<Resolved>>()?
             .0
             .fetch_add(1, Ordering::SeqCst);
-        let object = EventObject::from(&encoded(1043, "user.created", EVENT_JSON));
+        let object = EventObject::from(Arc::clone(ctx.data::<Arc<Frame>>()?));
         // The `Object` macro accepts only async resolvers; the object is ready at once.
         std::future::ready(Ok(object)).await
     }
@@ -91,26 +87,39 @@ fn encoded(sequence: u64, event_type: &str, json: &str) -> Frame {
     Frame::encode(&stored_event(sequence, event_type, json))
 }
 
-/// A frame built by hand whose WebSocket text is `json`, as `Frame::encode` never writes it.
-fn hand_built(json: &'static str) -> Frame {
-    Frame {
-        sequence: Sequence::new(5).unwrap(),
-        event_type: EventType::new("order.paid".to_owned()).unwrap(),
-        sse: Event::default(),
-        json: Utf8Bytes::from_static(json),
-    }
-}
-
-/// The compact JSON of the object's `data`, as a GraphQL response writes it.
-fn compact(object: &EventObject) -> String {
-    serde_json::to_string(&object.data).unwrap()
-}
-
+/// A schema over the frame of the event at offset 1042.
 fn schema(resolved: &Arc<Resolved>) -> TestSchema {
+    schema_of(resolved, encoded(1043, "user.created", EVENT_JSON))
+}
+
+fn schema_of(resolved: &Arc<Resolved>, frame: Frame) -> TestSchema {
     Schema::build(EventQuery, EmptyMutation, EmptySubscription)
         .data(Arc::clone(resolved))
+        .data(Arc::new(frame))
         .limit_complexity(MAX_COMPLEXITY)
         .finish()
+}
+
+/// The compact JSON of the `event` field of `document` over `frame`, as a GraphQL response writes
+/// it.
+async fn written(frame: Frame, document: &str) -> String {
+    let response = execute(&schema_of(&Arc::default(), frame), document).await;
+    assert_eq!(messages(&response), Vec::<&str>::new());
+    let text = serde_json::to_string(&response.data).unwrap();
+    text.strip_prefix(r#"{"event":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap()
+        .to_owned()
+}
+
+/// The compact JSON of the `data` of the `Event` of `frame`.
+async fn compact(frame: Frame) -> String {
+    let event = written(frame, "{ event { data } }").await;
+    event
+        .strip_prefix(r#"{"data":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap()
+        .to_owned()
 }
 
 fn sdl() -> String {
@@ -139,37 +148,43 @@ fn messages(response: &Response) -> Vec<&str> {
         .collect()
 }
 
-// ---- EventObject::from(&Frame) ----
+// ---- the Event of a Frame ----
 
-#[test]
-fn an_encoded_frame_gives_the_id_the_type_and_the_event_object_byte_for_byte() {
+#[tokio::test]
+async fn an_encoded_frame_gives_the_id_the_type_and_the_event_object_byte_for_byte() {
     let offset = 1042;
 
-    let object = EventObject::from(&encoded(offset + 1, "user.created", EVENT_JSON));
+    let event = written(
+        encoded(offset + 1, "user.created", EVENT_JSON),
+        "{ event { id type data } }",
+    )
+    .await;
 
-    assert_eq!(object.id, "1043");
-    assert_eq!(object.event_type, "user.created");
-    assert_eq!(compact(&object), EVENT_JSON);
+    assert_eq!(
+        event,
+        format!(r#"{{"id":"1043","type":"user.created","data":{EVENT_JSON}}}"#)
+    );
 }
 
 #[rstest]
 #[case::the_first_id(1, "order.paid", "1")]
 #[case::a_middle_id(1_000_000, "a.b-c_d", "1000000")]
 #[case::the_largest_id(u64::MAX, "user.deleted", "18446744073709551615")]
-fn the_id_is_the_sequence_in_decimal_and_the_type_is_the_type_name(
+#[tokio::test]
+async fn the_id_is_the_sequence_in_decimal_and_the_type_is_the_type_name(
     #[case] sequence: u64,
     #[case] event_type: &str,
     #[case] id: &str,
 ) {
-    let object = EventObject::from(&encoded(sequence, event_type, "{}"));
+    let event = written(
+        encoded(sequence, event_type, "{}"),
+        "{ event { type data id } }",
+    )
+    .await;
 
     assert_eq!(
-        object,
-        EventObject {
-            id: id.to_owned(),
-            event_type: event_type.to_owned(),
-            data: Json(async_graphql::Value::from_json(serde_json::json!({})).unwrap()),
-        }
+        event,
+        format!(r#"{{"type":"{event_type}","data":{{}},"id":"{id}"}}"#)
     );
 }
 
@@ -181,10 +196,9 @@ fn the_id_is_the_sequence_in_decimal_and_the_type_is_the_type_name(
     r#"{"type":"a","id":"x","data":{"z":{"y":[{"b":1,"a":2},{"d":true,"c":null}]},"a":"last"},"occurredAt":"t"}"#
 )]
 #[case::numbers(r#"{"z":-1,"y":0,"x":18446744073709551615,"w":-9223372036854775808,"v":1.5}"#)]
-fn the_producers_member_order_is_kept(#[case] json: &str) {
-    let object = EventObject::from(&encoded(1, "a", json));
-
-    assert_eq!(compact(&object), json);
+#[tokio::test]
+async fn the_producers_member_order_is_kept(#[case] json: &str) {
+    assert_eq!(compact(encoded(1, "a", json)).await, json);
 }
 
 #[rstest]
@@ -197,12 +211,13 @@ fn the_producers_member_order_is_kept(#[case] json: &str) {
 #[case::outside_the_basic_multilingual_plane("\"\u{1F600} \u{1D11E} \u{10FFFF}\"")]
 #[case::escaped_surrogate_pair(r#""\ud83d\ude00""#)]
 #[case::escaped_characters_of_the_plane(r#""\u00e9\u20ac""#)]
-fn strings_with_escapes_and_wide_characters_keep_their_value(#[case] text: &str) {
+#[tokio::test]
+async fn strings_with_escapes_and_wide_characters_keep_their_value(#[case] text: &str) {
     let json = format!(
         r#"{{"id":"x","type":"a","occurredAt":"t","data":{{"text":{text},"list":[{text}]}}}}"#
     );
 
-    let written = compact(&EventObject::from(&encoded(1, "a", &json)));
+    let written = compact(encoded(1, "a", &json)).await;
 
     assert_eq!(
         serde_json::from_str::<Value>(&written).unwrap(),
@@ -214,43 +229,35 @@ fn strings_with_escapes_and_wide_characters_keep_their_value(#[case] text: &str)
 #[rstest]
 #[case::text_written_by_serde_json(r#""a\nb \"q\" c:\\d \u0001 😀""#)]
 #[case::plain_text(r#""plain""#)]
-fn text_that_serde_json_wrote_is_written_back_byte_for_byte(#[case] text: &str) {
+#[tokio::test]
+async fn text_that_serde_json_wrote_is_written_back_byte_for_byte(#[case] text: &str) {
     let json = format!(r#"{{"id":"x","type":"a","occurredAt":"t","data":{{"text":{text}}}}}"#);
 
-    let written = compact(&EventObject::from(&encoded(1, "a", &json)));
-
-    assert_eq!(written, json);
-}
-
-#[rstest]
-#[case::not_json("not json")]
-#[case::empty("")]
-#[case::truncated(r#"{"id":"5","type":"order.paid","data":{"x":1"#)]
-#[case::without_a_data_member(r#"{"id":"5","type":"order.paid"}"#)]
-#[case::a_string(r#""text""#)]
-#[case::null("null")]
-fn a_frame_whose_text_cannot_be_read_gives_null_data(#[case] json: &'static str) {
-    let object = EventObject::from(&hand_built(json));
-
-    assert_eq!(
-        object,
-        EventObject {
-            id: "5".to_owned(),
-            event_type: "order.paid".to_owned(),
-            data: Json(async_graphql::Value::Null),
-        }
-    );
+    assert_eq!(compact(encoded(1, "a", &json)).await, json);
 }
 
 #[test]
-fn only_the_data_member_of_the_text_is_read() {
-    let object = EventObject::from(&hand_built(
-        r#"{"id":"999","type":"other.type","data":{"b":[1,"two"],"a":{}}}"#,
-    ));
+fn the_event_data_is_the_json_scalar_of_async_graphql() {
+    assert_eq!(
+        <EventData<'_> as OutputType>::type_name(),
+        <Json<async_graphql::Value> as OutputType>::type_name()
+    );
+    assert_eq!(
+        <EventData<'_> as OutputType>::qualified_type_name(),
+        "JSON!"
+    );
+}
 
-    assert_eq!(object.id, "5");
-    assert_eq!(object.event_type, "order.paid");
-    assert_eq!(compact(&object), r#"{"b":[1,"two"],"a":{}}"#);
+#[tokio::test]
+async fn every_object_of_a_frame_resolves_the_one_shared_value() {
+    let frame = Arc::new(encoded(1, "a", EVENT_JSON));
+    let read = frame.graphql_data();
+
+    let first = EventObject::from(Arc::clone(&frame));
+    let second = EventObject::from(Arc::clone(&frame));
+
+    assert!(std::ptr::eq(first.frame.graphql_data(), read));
+    assert!(std::ptr::eq(second.frame.graphql_data(), read));
 }
 
 // ---- the Event type in a schema ----
@@ -1309,7 +1316,7 @@ async fn a_released_subscriber_that_is_not_polled_falls_behind_without_delaying_
             .await
             .expect("the other subscriber is served at once")
             .unwrap();
-        assert_eq!(frame.sequence, sequence(id));
+        assert_eq!(frame.sequence(), sequence(id));
     }
 
     let delivery = |delivered, behind| Some(Delivery { delivered, behind });

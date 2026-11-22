@@ -15,9 +15,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{advance, timeout};
 use tracing::Level;
 
-use super::{CLOSE_TIMEOUT, Connection, serve};
+use super::{CLOSE_TIMEOUT, Connection, MAX_BATCH_BYTES, MAX_BATCH_FRAMES, serve};
+use crate::http::frame::Frame;
+use crate::http::handler::{MAX_FRAME_BYTES, MAX_WRITE_BUFFER_BYTES, WRITE_BUFFER_BYTES};
 use crate::http::session::Session;
-use crate::http::test_node::{POSITION, event_json, node, node_with};
+use crate::http::test_node::{Node, POSITION, event_json, node, node_with};
 
 /// The ping period and write deadline of these tests; not the default of 15 s, so a lost setting
 /// shows.
@@ -30,6 +32,10 @@ const JUST_BEFORE_KEEP_ALIVE: Duration = Duration::from_millis(6_999);
 const JUST_BEFORE_CLOSE_TIMEOUT: Duration = Duration::from_millis(999);
 
 const ONE_MILLISECOND: Duration = Duration::from_millis(1);
+
+/// How long a [`Write::Slow`] write takes: less than [`KEEP_ALIVE`], so the peer takes data in
+/// every period, but two of them take longer than one.
+const SLOW: Duration = Duration::from_secs(5);
 
 /// Bounds the awaited end of a pump (time is paused, so nothing really waits).
 const WAIT: Duration = Duration::from_millis(1);
@@ -45,6 +51,8 @@ enum Write {
     Accept,
     /// The transport fails.
     Fail,
+    /// The socket takes the message after [`SLOW`].
+    Slow,
     /// The socket never takes the message.
     Stall,
 }
@@ -55,6 +63,10 @@ struct Script {
     attempts: Mutex<Vec<Message>>,
     /// The behaviour of the next writes; a write after the script is accepted.
     writes: Mutex<VecDeque<Write>>,
+    /// For every flush, the number of messages fed before it, in order.
+    flushes: Mutex<Vec<usize>>,
+    /// The behaviour of the next flushes; a flush after the script completes at once.
+    flush_writes: Mutex<VecDeque<Write>>,
 }
 
 impl Script {
@@ -65,11 +77,38 @@ impl Script {
             .clone()
     }
 
+    fn flushes(&self) -> Vec<usize> {
+        self.flushes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     fn then(&self, write: Write) {
         self.writes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push_back(write);
+    }
+
+    fn then_flush(&self, write: Write) {
+        self.flush_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push_back(write);
+    }
+}
+
+/// What a scripted write does.
+async fn perform(write: Write) -> Result<(), axum::Error> {
+    match write {
+        Write::Accept => Ok(()),
+        Write::Fail => Err(axum::Error::new("the peer reset the connection")),
+        Write::Slow => {
+            tokio::time::sleep(SLOW).await;
+            Ok(())
+        }
+        Write::Stall => std::future::pending().await,
     }
 }
 
@@ -89,10 +128,7 @@ impl Connection for ScriptedConnection {
         self.inbound.recv()
     }
 
-    fn transmit(
-        &mut self,
-        message: Message,
-    ) -> impl Future<Output = Result<(), axum::Error>> + Send {
+    fn feed(&mut self, message: Message) -> impl Future<Output = Result<(), axum::Error>> + Send {
         self.script
             .attempts
             .lock()
@@ -105,13 +141,24 @@ impl Connection for ScriptedConnection {
             .unwrap_or_else(PoisonError::into_inner)
             .pop_front()
             .unwrap_or(Write::Accept);
-        async move {
-            match write {
-                Write::Accept => Ok(()),
-                Write::Fail => Err(axum::Error::new("the peer reset the connection")),
-                Write::Stall => std::future::pending().await,
-            }
-        }
+        perform(write)
+    }
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), axum::Error>> + Send {
+        let fed = self.script.attempts().len();
+        self.script
+            .flushes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(fed);
+        let write = self
+            .script
+            .flush_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or(Write::Accept);
+        perform(write)
     }
 }
 
@@ -216,11 +263,12 @@ impl Connection for HookedConnection {
         self.scripted.receive()
     }
 
-    fn transmit(
-        &mut self,
-        message: Message,
-    ) -> impl Future<Output = Result<(), axum::Error>> + Send {
-        self.scripted.transmit(message)
+    fn feed(&mut self, message: Message) -> impl Future<Output = Result<(), axum::Error>> + Send {
+        self.scripted.feed(message)
+    }
+
+    fn flush(&mut self) -> impl Future<Output = Result<(), axum::Error>> + Send {
+        self.scripted.flush()
     }
 }
 
@@ -374,6 +422,258 @@ async fn each_queued_event_of_a_subscribed_type_is_one_text_frame() {
         [frame(1_001, "user.created"), frame(1_003, "user.created")]
     );
     assert!(!pump.ended().await);
+}
+
+#[test]
+fn a_batch_holds_16_frames_or_16_kib_and_the_write_buffer_a_batch_and_the_largest_frame() {
+    assert_eq!(MAX_BATCH_FRAMES, 16);
+    assert_eq!(MAX_BATCH_BYTES, 16_384);
+    assert_eq!(WRITE_BUFFER_BYTES, MAX_BATCH_BYTES);
+    assert_eq!(MAX_FRAME_BYTES, 1_049_600);
+    assert_eq!(MAX_WRITE_BUFFER_BYTES, WRITE_BUFFER_BYTES + MAX_FRAME_BYTES);
+}
+
+#[test]
+fn the_frame_of_the_largest_event_with_the_longest_id_and_type_fits_the_largest_frame() {
+    let data = format!(
+        r#"{{"pad":"{}"}}"#,
+        "x".repeat(1_048_576_usize.saturating_sub(10))
+    );
+    let event_type = "t".repeat(128);
+    let largest = Frame::encode(&stored_event(u64::MAX, &event_type, &data));
+    let frame_header = 10;
+
+    assert_eq!(data.len(), 1_048_576);
+    assert!(largest.json().len().saturating_add(frame_header) <= MAX_FRAME_BYTES);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_frames_that_are_ready_together_are_written_with_one_flush() {
+    let node = node();
+    let pump = spawn(node.session(&["user.created"], None)).await;
+
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "order.paid");
+    node.pass(1_003, "user.created");
+
+    assert_eq!(
+        pump.written().await,
+        [frame(1_001, "user.created"), frame(1_003, "user.created")]
+    );
+    assert_eq!(pump.script.flushes(), [2]);
+    node.pass(1_004, "user.created");
+    assert_eq!(pump.written().await.len(), 3);
+    assert_eq!(pump.script.flushes(), [2, 3]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_batch_holds_at_most_16_frames() {
+    let node = node();
+    for id in 1_001..=1_020 {
+        node.pass(id, "user.created");
+    }
+
+    let pump = spawn(node.session(&["user.created"], Some(POSITION))).await;
+
+    let expected: Vec<Message> = (1_001..=1_020)
+        .map(|id| frame(id, "user.created"))
+        .collect();
+    assert_eq!(pump.written().await, expected);
+    assert_eq!(pump.script.flushes(), [16, 20]);
+}
+
+/// Passes the event `id` whose WebSocket frame takes exactly 4 KiB.
+fn pass_quarter_batch(node: &Node, id: u64) {
+    let frame_bytes = MAX_BATCH_BYTES / 4;
+    let wrapper = r#"{"id":"1001","type":"user.created","data":{"pad":""}}"#.len();
+    let json = format!(
+        r#"{{"pad":"{}"}}"#,
+        "x".repeat(frame_bytes.saturating_sub(wrapper))
+    );
+    let event = stored_event(id, "user.created", &json);
+    node.window.push(Arc::new(event.clone()));
+    node.hub.deliver(&event);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_write_batch_ends_with_the_frame_that_reaches_16_kib() {
+    let node = node();
+    for id in 1_001..=1_006 {
+        pass_quarter_batch(&node, id);
+    }
+
+    let pump = spawn(node.session(&["user.created"], Some(POSITION))).await;
+
+    let written = pump.written().await;
+    assert_eq!(written.len(), 6);
+    assert!(
+        written
+            .iter()
+            .all(|message| message.clone().into_data().len() == MAX_BATCH_BYTES / 4)
+    );
+    assert_eq!(pump.script.flushes(), [4, 6]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_stalled_write_inside_a_batch_evicts_the_subscriber_at_the_deadline() {
+    let node = node();
+    let pump = spawn_with(
+        node.session(&["user.created"], None),
+        &[Write::Accept, Write::Stall],
+    )
+    .await;
+
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "user.created");
+    settle().await;
+    pass_time(JUST_BEFORE_KEEP_ALIVE).await;
+    assert!(!pump.ended().await);
+    pass_time(ONE_MILLISECOND).await;
+
+    assert!(pump.ended().await);
+    assert_eq!(
+        pump.written().await,
+        [frame(1_001, "user.created"), frame(1_002, "user.created")]
+    );
+    assert_eq!(pump.script.flushes(), Vec::<usize>::new());
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_that_takes_one_frame_per_period_is_never_evicted_however_long_its_batch() {
+    let (recorder, _guard) = LogRecorder::install();
+    let node = node();
+    let (connection, sender, script) = scripted(&[Write::Slow; 4]);
+    script.then_flush(Write::Slow);
+    let pump = launch(
+        connection,
+        node.session(&["user.created"], None),
+        sender,
+        script,
+    )
+    .await;
+
+    for id in 1_001..=1_004 {
+        node.pass(id, "user.created");
+    }
+    settle().await;
+    for _ in 0..5 {
+        pass_time(SLOW).await;
+    }
+
+    assert!(!pump.ended().await);
+    assert_eq!(
+        pump.written().await,
+        [
+            frame(1_001, "user.created"),
+            frame(1_002, "user.created"),
+            frame(1_003, "user.created"),
+            frame(1_004, "user.created"),
+            ping()
+        ]
+    );
+    assert_eq!(pump.script.flushes(), [4, 5]);
+    assert_eq!(
+        lines_of(&recorder, "subscriber evicted"),
+        Vec::<LogLine>::new()
+    );
+    assert_eq!(node.hub.subscriber_count(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_flush_of_a_batch_has_a_deadline_of_its_own() {
+    let node = node();
+    let (connection, sender, script) = scripted(&[Write::Slow]);
+    script.then_flush(Write::Stall);
+    let pump = launch(
+        connection,
+        node.session(&["user.created"], None),
+        sender,
+        script,
+    )
+    .await;
+
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "user.created");
+    settle().await;
+    pass_time(SLOW).await;
+    pass_time(JUST_BEFORE_KEEP_ALIVE).await;
+    let running = !pump.task.is_finished();
+    pass_time(ONE_MILLISECOND).await;
+
+    assert!(running);
+    assert!(pump.ended().await);
+    assert_eq!(pump.script.flushes(), [2]);
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unsubscribe_that_arrives_during_a_batch_applies_to_the_rest_of_the_batch() {
+    let node = node();
+    let pump = spawn_with(
+        node.session(&["order.paid", "user.created"], None),
+        &[Write::Slow],
+    )
+    .await;
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "order.paid");
+    node.pass(1_003, "user.created");
+    node.pass(1_004, "order.paid");
+    settle().await;
+
+    pump.send(Message::Text(Utf8Bytes::from_static(
+        r#"{"action":"unsubscribe","types":["order.paid"]}"#,
+    )));
+    pass_time(SLOW).await;
+
+    assert_eq!(
+        pump.written().await,
+        [frame(1_001, "user.created"), frame(1_003, "user.created")]
+    );
+    assert_eq!(pump.script.flushes(), [2]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_inbound_messages_that_arrive_during_a_batch_are_handled_before_its_next_frame() {
+    let node = node();
+    let pump = spawn_with(node.session(&["user.created"], None), &[Write::Slow]).await;
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "user.created");
+    settle().await;
+
+    pump.send(Message::Binary(Bytes::from_static(b"x")));
+    pump.send(Message::Text(Utf8Bytes::from_static("subscribe")));
+    pass_time(SLOW).await;
+
+    assert_eq!(
+        pump.written().await,
+        [
+            frame(1_001, "user.created"),
+            error("binary frames are not supported"),
+            error("invalid command"),
+            frame(1_002, "user.created")
+        ]
+    );
+    assert_eq!(pump.script.flushes(), [2, 3, 4]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_client_close_frame_that_arrives_during_a_batch_ends_it_without_its_other_frames() {
+    let node = node();
+    let mut pump = spawn_with(node.session(&["user.created"], None), &[Write::Slow]).await;
+    node.pass(1_001, "user.created");
+    node.pass(1_002, "user.created");
+    settle().await;
+
+    pump.send(Message::Close(None));
+    pass_time(SLOW).await;
+    let lingering = !pump.ended().await;
+    pump.hang_up();
+
+    assert!(lingering);
+    assert!(pump.ended().await);
+    assert_eq!(pump.written().await, [frame(1_001, "user.created")]);
+    assert_eq!(pump.script.flushes(), Vec::<usize>::new());
 }
 
 #[tokio::test(start_paused = true)]

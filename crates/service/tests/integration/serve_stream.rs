@@ -18,13 +18,10 @@ use crate::support::{Answer, Scratch, messages_of, serve};
 /// only shown over rounds that fail, so the wait is bounded by its fixed length.
 const FAILED_ROUNDS: Duration = Duration::from_secs(1);
 
-/// The configuration of a served binary on `topic` through `bootstrap`: SQS on port 1, which no
-/// request of these tests needs, one event type, short pauses after a failed round and a
-/// keep-alive every second.
+/// The configuration of a served binary on `topic` through `bootstrap`: one event type, short
+/// pauses after a failed round and a keep-alive every second.
 fn variables<'a>(bootstrap: &'a str, topic: &'a str) -> Vec<(&'a str, &'a str)> {
     vec![
-        ("AWS_REGION", "us-east-1"),
-        ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
         ("KAFKA_BOOTSTRAP_SERVERS", bootstrap),
         ("KAFKA_TOPIC", topic),
         ("EVENT_TYPES", TYPE),

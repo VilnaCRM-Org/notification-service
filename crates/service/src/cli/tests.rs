@@ -36,16 +36,6 @@ fn serve_takes_every_setting_as_a_flag() {
         "9000",
         "--log-level",
         "debug",
-        "--aws-region",
-        "eu-west-1",
-        "--aws-endpoint-url-sqs",
-        "http://localhost:4566",
-        "--sqs-connect-timeout",
-        "300ms",
-        "--sqs-operation-timeout",
-        "3s",
-        "--sqs-max-attempts",
-        "2",
         "--health-probe-timeout",
         "4s",
         "--http-request-timeout",
@@ -110,14 +100,6 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.app_host.as_deref(), Some("127.0.0.1"));
     assert_eq!(args.app_port.as_deref(), Some("9000"));
     assert_eq!(args.log_level.as_deref(), Some("debug"));
-    assert_eq!(args.aws_region.as_deref(), Some("eu-west-1"));
-    assert_eq!(
-        args.aws_endpoint_url_sqs.as_deref(),
-        Some("http://localhost:4566")
-    );
-    assert_eq!(args.sqs_connect_timeout.as_deref(), Some("300ms"));
-    assert_eq!(args.sqs_operation_timeout.as_deref(), Some("3s"));
-    assert_eq!(args.sqs_max_attempts.as_deref(), Some("2"));
     assert_eq!(args.health_probe_timeout.as_deref(), Some("4s"));
     assert_eq!(args.http_request_timeout.as_deref(), Some("5s"));
     assert_eq!(args.http_max_body_bytes.as_deref(), Some("2048"));
@@ -149,24 +131,6 @@ fn serve_takes_every_setting_as_a_flag() {
     assert_eq!(args.cors_allowed_origins.as_deref(), Some("*"));
 }
 
-#[test]
-fn the_credentials_are_accepted_as_hidden_flags() {
-    let cli = parse(&[
-        "serve",
-        "--aws-access-key-id",
-        "key",
-        "--aws-secret-access-key",
-        "secret",
-    ])
-    .unwrap();
-
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve");
-    };
-    assert_eq!(args.aws_access_key_id.as_deref(), Some("key"));
-    assert_eq!(args.aws_secret_access_key.as_deref(), Some("secret"));
-}
-
 /// The arguments of `command` with `flag` set to `secret` and `--app-port 9000` after it.
 fn serve_args_with_secret(command: &str, flag: &str, secret: &str) -> ServeArgs {
     let cli = parse(&[command, flag, secret, "--app-port", "9000"]).unwrap();
@@ -175,16 +139,6 @@ fn serve_args_with_secret(command: &str, flag: &str, secret: &str) -> ServeArgs 
     };
     assert_eq!(args.app_port.as_deref(), Some("9000"));
     args
-}
-
-#[rstest]
-fn a_secret_access_key_that_starts_with_a_hyphen_is_taken_as_the_value(
-    #[values("serve", "check-config")] command: &str,
-    #[values("--AwSsEcReT", "-AwSsEcReT", "-", "--")] secret: &str,
-) {
-    let args = serve_args_with_secret(command, "--aws-secret-access-key", secret);
-
-    assert_eq!(args.aws_secret_access_key.as_deref(), Some(secret));
 }
 
 #[rstest]
@@ -198,8 +152,6 @@ fn a_sasl_password_that_starts_with_a_hyphen_is_taken_as_the_value(
 }
 
 #[rstest]
-#[case("--aws-secret-access-key", "--AwSsEcReT")]
-#[case("--aws-secret-access-key", "-AwSsEcReT")]
 #[case("--kafka-sasl-password", "--s3cretpw")]
 #[case("--kafka-sasl-password", "-s3cretpw")]
 fn a_usage_error_after_a_secret_that_starts_with_a_hyphen_never_names_it(
@@ -223,10 +175,6 @@ fn a_usage_error_after_a_secret_that_starts_with_a_hyphen_never_names_it(
 fn the_debug_output_of_the_arguments_redacts_the_secrets(#[case] command: &str) {
     let cli = parse(&[
         command,
-        "--aws-access-key-id",
-        "key-id-value",
-        "--aws-secret-access-key",
-        "aws-secret-value",
         "--kafka-sasl-username",
         "reader",
         "--kafka-sasl-password",
@@ -236,18 +184,9 @@ fn the_debug_output_of_the_arguments_redacts_the_secrets(#[case] command: &str) 
 
     let printed = format!("{cli:?}");
 
-    assert!(!printed.contains("aws-secret-value"), "{printed}");
     assert!(!printed.contains("sasl-secret-value"), "{printed}");
     assert!(
-        printed.contains("aws_secret_access_key: Some(<redacted>)"),
-        "{printed}"
-    );
-    assert!(
         printed.contains("sasl_password: Some(<redacted>)"),
-        "{printed}"
-    );
-    assert!(
-        printed.contains(r#"aws_access_key_id: Some("key-id-value")"#),
         "{printed}"
     );
     assert!(
@@ -276,24 +215,28 @@ fn the_debug_output_of_the_kafka_arguments_changes_only_the_password() {
 }
 
 #[test]
-fn the_debug_output_of_the_serve_arguments_changes_only_the_secret_key() {
+fn the_debug_output_of_the_serve_arguments_redacts_the_password_of_the_kafka_arguments() {
+    let kafka = KafkaArgs {
+        sasl_password: Some("sasl-secret-value".to_owned()),
+        ..KafkaArgs::default()
+    };
     let args = ServeArgs {
         app_port: Some("9000".to_owned()),
-        aws_secret_access_key: Some("aws-secret-value".to_owned()),
+        kafka: kafka.clone(),
         cors_allowed_origins: Some("*".to_owned()),
         ..ServeArgs::default()
     };
 
+    let printed = format!("{args:?}");
+
+    assert!(!printed.contains("sasl-secret-value"), "{printed}");
     assert_eq!(
-        format!("{args:?}"),
+        printed,
         format!(
             "ServeArgs {{ app_env: None, app_host: None, app_port: Some(\"9000\"), log_level: None, \
-             aws_region: None, aws_endpoint_url_sqs: None, aws_access_key_id: None, \
-             aws_secret_access_key: Some(<redacted>), sqs_connect_timeout: None, \
-             sqs_operation_timeout: None, sqs_max_attempts: None, health_probe_timeout: None, \
-             http_request_timeout: None, http_max_body_bytes: None, shutdown_grace_period: None, \
-             event_types: None, kafka: {:?}, streams: {:?}, cors_allowed_origins: Some(\"*\") }}",
-            KafkaArgs::default(),
+             health_probe_timeout: None, http_request_timeout: None, http_max_body_bytes: None, \
+             shutdown_grace_period: None, event_types: None, kafka: {kafka:?}, streams: {:?}, \
+             cors_allowed_origins: Some(\"*\") }}",
             StreamArgs::default()
         )
     );
@@ -319,7 +262,6 @@ fn the_pretty_debug_output_prints_a_set_secret_like_an_option() {
 fn the_debug_output_shows_an_unset_secret_as_none() {
     let printed = format!("{:?}", ServeArgs::default());
 
-    assert!(printed.contains("aws_secret_access_key: None"), "{printed}");
     assert!(printed.contains("sasl_password: None"), "{printed}");
     assert!(!printed.contains("<redacted>"), "{printed}");
 }
@@ -433,10 +375,6 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "APP_ENV",
         "APP_HOST",
         "APP_PORT",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_ENDPOINT_URL_SQS",
-        "AWS_REGION",
-        "AWS_SECRET_ACCESS_KEY",
         "CORS_ALLOWED_ORIGINS",
         "EVENT_MAX_DATA_BYTES",
         "EVENT_REPLAY_MAX_EVENTS",
@@ -463,9 +401,6 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
         "LOG_LEVEL",
         "MAX_SUBSCRIBERS",
         "SHUTDOWN_GRACE_PERIOD",
-        "SQS_CONNECT_TIMEOUT",
-        "SQS_MAX_ATTEMPTS",
-        "SQS_OPERATION_TIMEOUT",
         "STREAM_KEEP_ALIVE",
         "SUBSCRIBER_BUFFER",
     ];
@@ -474,29 +409,20 @@ fn serve_declares_exactly_the_variables_of_the_configuration_table() {
 }
 
 #[test]
-fn only_the_two_credentials_are_hidden_from_the_help() {
-    let mut hidden: Vec<String> = serve_arguments()
-        .iter()
-        .filter(|argument| argument.is_hide_set())
-        .map(|argument| argument.get_id().to_string())
-        .collect();
-    hidden.sort();
-
-    assert_eq!(hidden, ["aws_access_key_id", "aws_secret_access_key"]);
+fn no_setting_is_hidden_from_the_help() {
+    assert!(!serve_arguments().iter().any(Arg::is_hide_set));
 }
 
 #[test]
-fn the_serve_help_lists_every_variable_but_the_credentials() {
+fn the_serve_help_lists_every_variable() {
     let help = subcommand_help("serve");
 
-    for argument in serve_arguments().iter().filter(|a| !a.is_hide_set()) {
+    for argument in serve_arguments() {
         let flag = format!("--{}", argument.get_long().unwrap());
         assert!(help.contains(&flag), "{flag} is missing");
         let variable = argument.get_env().unwrap().to_string_lossy();
         assert!(help.contains(&format!("[env: {variable}]")));
     }
-    assert!(!help.contains("AWS_ACCESS_KEY_ID"));
-    assert!(!help.contains("AWS_SECRET_ACCESS_KEY"));
 }
 
 #[test]

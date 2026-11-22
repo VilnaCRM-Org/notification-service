@@ -36,7 +36,7 @@ pub enum Command {
 }
 
 /// Settings of `serve` and `check-config`: every service variable.
-#[derive(Clone, Default, Args)]
+#[derive(Debug, Clone, Default, Args)]
 pub struct ServeArgs {
     /// Deployment environment: `dev`, `test` or `prod` (default `prod`).
     #[arg(long = "app-env", env = "APP_ENV", hide_env_values = true)]
@@ -50,51 +50,6 @@ pub struct ServeArgs {
     /// `tracing` filter directives of the log output (default `info`).
     #[arg(long = "log-level", env = "LOG_LEVEL", hide_env_values = true)]
     pub log_level: Option<String>,
-    /// AWS region of the message broker (required).
-    #[arg(long = "aws-region", env = "AWS_REGION", hide_env_values = true)]
-    pub aws_region: Option<String>,
-    /// `http://` or `https://` endpoint of SQS (default: the regional AWS endpoint).
-    #[arg(
-        long = "aws-endpoint-url-sqs",
-        env = "AWS_ENDPOINT_URL_SQS",
-        hide_env_values = true
-    )]
-    pub aws_endpoint_url_sqs: Option<String>,
-    /// Access key id; only validated as a pair with the secret, the AWS SDK reads it itself.
-    #[arg(long, env = "AWS_ACCESS_KEY_ID", hide_env_values = true, hide = true)]
-    pub aws_access_key_id: Option<String>,
-    /// Secret access key; only validated as a pair with the key id, the AWS SDK reads it itself.
-    // The token after the flag is always the value, also when it starts with `-`, so a usage error
-    // never names the key.
-    #[arg(
-        long,
-        env = "AWS_SECRET_ACCESS_KEY",
-        hide_env_values = true,
-        hide = true,
-        allow_hyphen_values = true
-    )]
-    pub aws_secret_access_key: Option<String>,
-    /// Timeout of establishing an SQS connection (default 500ms).
-    #[arg(
-        long = "sqs-connect-timeout",
-        env = "SQS_CONNECT_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub sqs_connect_timeout: Option<String>,
-    /// Timeout of one SQS attempt and of the whole operation (default 2s).
-    #[arg(
-        long = "sqs-operation-timeout",
-        env = "SQS_OPERATION_TIMEOUT",
-        hide_env_values = true
-    )]
-    pub sqs_operation_timeout: Option<String>,
-    /// SQS attempts per operation, 1 to 5 (default 1).
-    #[arg(
-        long = "sqs-max-attempts",
-        env = "SQS_MAX_ATTEMPTS",
-        hide_env_values = true
-    )]
-    pub sqs_max_attempts: Option<String>,
     /// Timeout of one health probe (default 3s).
     #[arg(
         long = "health-probe-timeout",
@@ -146,7 +101,7 @@ pub struct ServeArgs {
 /// Settings of the Kafka connection of the event stream.
 #[derive(Clone, Default, Args)]
 pub struct KafkaArgs {
-    /// Comma-separated `host:port` addresses of the brokers, 1 to 16 (default `localhost:9092`).
+    /// Comma-separated `host:port` addresses of the brokers, 1 to 16 (required).
     #[arg(
         long = "kafka-bootstrap-servers",
         env = "KAFKA_BOOTSTRAP_SERVERS",
@@ -223,38 +178,6 @@ pub struct KafkaArgs {
         hide_env_values = true
     )]
     pub retry_delay: Option<String>,
-}
-
-/// Every field as the derived `Debug` prints it, except the value of a set `AWS_SECRET_ACCESS_KEY`,
-/// which is printed as `<redacted>`.
-impl fmt::Debug for ServeArgs {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ServeArgs")
-            .field("app_env", &self.app_env)
-            .field("app_host", &self.app_host)
-            .field("app_port", &self.app_port)
-            .field("log_level", &self.log_level)
-            .field("aws_region", &self.aws_region)
-            .field("aws_endpoint_url_sqs", &self.aws_endpoint_url_sqs)
-            .field("aws_access_key_id", &self.aws_access_key_id)
-            .field(
-                "aws_secret_access_key",
-                &Redacted(self.aws_secret_access_key.as_deref()),
-            )
-            .field("sqs_connect_timeout", &self.sqs_connect_timeout)
-            .field("sqs_operation_timeout", &self.sqs_operation_timeout)
-            .field("sqs_max_attempts", &self.sqs_max_attempts)
-            .field("health_probe_timeout", &self.health_probe_timeout)
-            .field("http_request_timeout", &self.http_request_timeout)
-            .field("http_max_body_bytes", &self.http_max_body_bytes)
-            .field("shutdown_grace_period", &self.shutdown_grace_period)
-            .field("event_types", &self.event_types)
-            .field("kafka", &self.kafka)
-            .field("streams", &self.streams)
-            .field("cors_allowed_origins", &self.cors_allowed_origins)
-            .finish()
-    }
 }
 
 /// Every field as the derived `Debug` prints it, except the value of a set `KAFKA_SASL_PASSWORD`,

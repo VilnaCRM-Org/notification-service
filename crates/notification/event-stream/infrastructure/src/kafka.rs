@@ -433,7 +433,8 @@ fn batch(
             next = next.max(Cursor::new(offset).advanced_by(1));
             kept.push(TopicRecord {
                 offset: Offset::new(offset),
-                value: record.value.map(|value| value.to_vec()),
+                // Takes the allocation over when the record owns it alone, else copies it.
+                value: record.value.map(Vec::from),
             });
         }
     }

@@ -54,7 +54,7 @@ curl http://localhost:8081/ping
 curl -i http://localhost:8081/api/health
 ```
 
-`/ping` answers `pong` (liveness). `/api/health` answers 204 when the cache and the message broker respond and the event stream of the node is ready, and a 500 problem document that lists every failing dependency otherwise.
+`/ping` answers `pong` (liveness). `/api/health` answers 204 when the cache responds and the event stream of the node is ready, and a 500 problem document that lists every failing dependency otherwise.
 
 | URL | Content |
 | --- | --- |
@@ -68,7 +68,7 @@ The file [`requests.http`](requests.http) holds one ready-made request for every
 
 ## Native mode
 
-By default every target runs its tools directly on the host. The backing services (LocalStack and the Kafka broker) run in Docker; targets that need them start them through `ensure-deps`, which also runs `ensure-kafka`, and never stop a service that already runs. To work without the containerised service:
+By default every target runs its tools directly on the host. The backing service (the Kafka broker) runs in Docker; targets that need them start them through `ensure-deps`, which also runs `ensure-kafka`, and never stop a service that already runs. To work without the containerised service:
 
 ```bash
 make start-deps
@@ -106,10 +106,10 @@ Two things carry the name.
 | Command | Effect |
 | --- | --- |
 | `make stop` | stops the development environment and keeps its containers |
-| `make down` | removes the containers and the network; the volumes (LocalStack and Kafka data, build caches) are kept |
+| `make down` | removes the containers and the network; the volumes (Kafka data, build caches) are kept |
 | `make purge` | removes generated reports and load-test results; `make clean` is an alias |
 
-`make down` is the safe way to free the ports. To remove the data volumes as well, use Docker Compose directly, for example `docker compose down --volumes`; the target never does it, so a restart keeps the data of LocalStack and Kafka and the build caches.
+`make down` is the safe way to free the ports. To remove the data volumes as well, use Docker Compose directly, for example `docker compose down --volumes`; the target never does it, so a restart keeps the data of Kafka and the build caches.
 
 ## Next steps
 

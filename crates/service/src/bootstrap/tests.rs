@@ -51,7 +51,10 @@ impl Answer {
 fn config(app_env: &str) -> Config {
     let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         ..ServeArgs::default()
     };
     Config::from_args(args).unwrap()
@@ -274,10 +277,7 @@ async fn every_handler_and_probe_is_registered() {
 async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
     let (recorder, _guard) = LogRecorder::install();
     let mut adapters = adapters();
-    adapters.probes = vec![
-        Arc::new(StubProbe::failing(Dependency::Cache)),
-        Arc::new(StubProbe::failing(Dependency::MessageBroker)),
-    ];
+    adapters.probes = vec![Arc::new(StubProbe::failing(Dependency::Cache))];
 
     let answer = send(&app(adapters), get("/api/health")).await;
 
@@ -286,18 +286,14 @@ async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
         answer.json()["failures"],
         serde_json::json!([
             {"dependency": "cache", "message": "Cache is not working"},
-            {"dependency": "message_broker", "message": "Message broker is not available"},
             {"dependency": "event_stream", "message": "Event stream is not ready"}
         ])
     );
     let failed = probe_failures(&recorder);
     let dependencies: Vec<_> = failed.iter().map(|line| line.field("dependency")).collect();
+    assert_eq!(dependencies, [Some("cache"), Some("event_stream")]);
     assert_eq!(
-        dependencies,
-        [Some("cache"), Some("message_broker"), Some("event_stream")]
-    );
-    assert_eq!(
-        failed[2].field("cause"),
+        failed[1].field("cause"),
         Some("probe failed: the node is starting")
     );
 }
@@ -305,8 +301,8 @@ async fn the_probe_of_the_event_stream_follows_the_probes_of_the_adapters() {
 #[tokio::test]
 async fn the_configured_retry_delay_reaches_the_background() {
     let args = ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
         kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
             retry_delay: Some("2500ms".to_owned()),
             ..crate::cli::KafkaArgs::default()
         },
@@ -553,13 +549,15 @@ async fn the_window_keeps_the_newest_events_that_fit_its_byte_bound() {
 
 #[tokio::test]
 async fn a_replaced_probe_decides_the_health_answer() {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::failing(Dependency::MessageBroker)));
+    let mut adapters = adapters();
+    adapters.probes = vec![Arc::new(StubProbe::failing(Dependency::Cache))];
+    let adapters = adapters.with_probe(Arc::new(StubProbe::healthy(Dependency::Cache)));
 
     let answer = send(&app(adapters), get("/api/health")).await;
 
     assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
-        answer.body.contains("Message broker is not available"),
+        answer.body.contains("Event stream is not ready"),
         "{}",
         answer.body
     );
@@ -583,23 +581,23 @@ async fn a_failing_cache_behind_the_cache_probe_is_reported() {
         "{}",
         answer.body
     );
-    assert!(
-        !answer.body.contains("Message broker is not available"),
-        "{}",
-        answer.body
-    );
 }
 
 #[tokio::test]
 async fn with_probe_keeps_the_order_and_the_other_probes() {
-    let adapters = adapters().with_probe(Arc::new(StubProbe::failing(Dependency::Cache)));
+    let mut adapters = adapters();
+    adapters.probes = vec![
+        Arc::new(StubProbe::healthy(Dependency::Cache)),
+        Arc::new(StubProbe::healthy(Dependency::EventStream)),
+    ];
+    let adapters = adapters.with_probe(Arc::new(StubProbe::failing(Dependency::Cache)));
 
     let dependencies: Vec<_> = adapters
         .probes
         .iter()
         .map(|probe| probe.dependency())
         .collect();
-    assert_eq!(dependencies, [Dependency::Cache, Dependency::MessageBroker]);
+    assert_eq!(dependencies, [Dependency::Cache, Dependency::EventStream]);
     let outcomes: Vec<_> = {
         let mut outcomes = Vec::new();
         for probe in &adapters.probes {
@@ -630,7 +628,10 @@ fn a_second_event_type_handler_is_a_duplicate_that_names_the_message() {
 #[tokio::test]
 async fn the_event_catalog_of_the_configuration_is_served() {
     let args = ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         event_types: Some("user.created,order.paid,order.paid".to_owned()),
         ..ServeArgs::default()
     };
@@ -682,7 +683,10 @@ async fn the_status_of_a_node_without_a_tail_is_starting_and_catching_up() {
 #[tokio::test]
 async fn the_graphql_schema_carries_the_event_stream_state() {
     let args = ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         event_types: Some("user.created,order.paid,user.deleted".to_owned()),
         ..ServeArgs::default()
     };

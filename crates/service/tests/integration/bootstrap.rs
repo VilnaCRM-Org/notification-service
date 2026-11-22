@@ -19,14 +19,12 @@ use crate::support::silent_listener;
 
 /// The configuration as the binary reads it from the environment, with long budgets for what must
 /// succeed: the tests prove the wiring, not how fast a loaded machine opens the first connection.
-/// The order the configuration requires holds (request > probe >= operation).
+/// The order the configuration requires holds (request > probe).
 fn config() -> Config {
     let Command::Serve(args) = Cli::parse_from(["service", "serve"]).command else {
         panic!("`serve` arguments expected");
     };
     let mut config = Config::from_args(args).unwrap();
-    config.sqs.connect_timeout = Duration::from_secs(10);
-    config.sqs.operation_timeout = Duration::from_secs(30);
     config.health_probe_timeout = Duration::from_secs(40);
     config.request_timeout = Duration::from_secs(60);
     config
@@ -113,7 +111,6 @@ async fn connect_makes_no_network_access_and_orders_the_probes() {
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut config = config();
-    config.sqs.endpoint_url = Some(format!("http://127.0.0.1:{port}"));
     config.kafka.bootstrap_servers = format!("127.0.0.1:{port}");
 
     let adapters = Adapters::connect(&config).await;
@@ -137,7 +134,7 @@ async fn connect_makes_no_network_access_and_orders_the_probes() {
         .iter()
         .map(|probe| probe.dependency())
         .collect();
-    assert_eq!(dependencies, [Dependency::Cache, Dependency::MessageBroker]);
+    assert_eq!(dependencies, [Dependency::Cache]);
     let accepted = listener.accept();
     assert_eq!(accepted.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }

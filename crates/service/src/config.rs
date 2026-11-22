@@ -11,13 +11,12 @@ use std::ops::RangeInclusive;
 use std::str::FromStr;
 use std::time::Duration;
 
+use axum::http::HeaderValue;
 use axum::http::uri::Authority;
-use axum::http::{HeaderValue, Uri};
 use event_stream_application::EventCatalog;
 use event_stream_domain::EventType;
 use event_stream_infrastructure::{KafkaSecurity, KafkaSettings, SaslCredentials, SaslMechanism};
 use jiff::fmt::friendly::SpanParser;
-use shared_infrastructure::messaging::SqsSettings;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{KafkaArgs, ServeArgs, StreamArgs};
@@ -67,8 +66,6 @@ pub struct Config {
     pub port: u16,
     /// `tracing` filter directives.
     pub log_level: String,
-    /// SQS client settings.
-    pub sqs: SqsSettings,
     /// Timeout of one health probe.
     pub health_probe_timeout: Duration,
     /// Budget of one HTTP request.
@@ -150,20 +147,17 @@ impl Config {
     pub fn from_args(args: ServeArgs) -> Result<Self, ConfigErrors> {
         let mut collector = Collector::default();
         let server = server(&mut collector, &args);
-        let sqs = sqs(&mut collector, &args);
         let limits = limits(&mut collector, &args);
         let kafka = kafka_fields(&mut collector, &args.kafka);
         let streams = stream_settings(&mut collector, &args);
         let allowed_origins = allowed_origins(&mut collector, &args);
         collector.cross_field_rules(
-            sqs.as_ref().map(|settings| settings.operation_timeout),
             limits.as_ref().map(|limits| limits.health_probe_timeout),
             limits.as_ref().map(|limits| limits.request_timeout),
         );
         let parts = Parts {
             kafka: kafka_settings(&mut collector, &args.kafka, kafka),
             server,
-            sqs,
             limits,
             streams,
             allowed_origins,
@@ -178,7 +172,6 @@ impl Config {
 /// The groups of a configuration, each `None` when one of its variables is invalid.
 struct Parts {
     server: Option<Server>,
-    sqs: Option<SqsSettings>,
     limits: Option<Limits>,
     kafka: Option<KafkaSettings>,
     streams: Option<StreamConfig>,
@@ -194,7 +187,6 @@ impl Parts {
             host: server.host,
             port: server.port,
             log_level: server.log_level,
-            sqs: self.sqs?,
             health_probe_timeout: limits.health_probe_timeout,
             request_timeout: limits.request_timeout,
             max_body_bytes: limits.max_body_bytes,
@@ -235,32 +227,7 @@ impl Collector {
             .ok()
     }
 
-    fn credentials(&mut self, key_id: Option<&str>, secret: Option<&str>) {
-        let problem = match (key_id.is_some(), secret.is_some()) {
-            (true, false) => Some(("AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID")),
-            (false, true) => Some(("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")),
-            (true, true) | (false, false) => None,
-        };
-        if let Some((missing, present)) = problem {
-            self.problems.push(ConfigProblem {
-                variable: missing,
-                reason: format!("is required when {present} is set"),
-            });
-        }
-    }
-
-    fn cross_field_rules(
-        &mut self,
-        operation: Option<Duration>,
-        probe: Option<Duration>,
-        request: Option<Duration>,
-    ) {
-        self.at_least(
-            "HEALTH_PROBE_TIMEOUT",
-            probe,
-            "SQS_OPERATION_TIMEOUT",
-            operation,
-        );
+    fn cross_field_rules(&mut self, probe: Option<Duration>, request: Option<Duration>) {
         self.longer_than(
             "HTTP_REQUEST_TIMEOUT",
             request,
@@ -307,23 +274,6 @@ impl Collector {
         }
     }
 
-    fn at_least(
-        &mut self,
-        variable: &'static str,
-        value: Option<Duration>,
-        other_name: &str,
-        other: Option<Duration>,
-    ) {
-        if let (Some(value), Some(other)) = (value, other)
-            && value < other
-        {
-            self.problems.push(ConfigProblem {
-                variable,
-                reason: format!("must not be shorter than {other_name}"),
-            });
-        }
-    }
-
     fn longer_than(
         &mut self,
         variable: &'static str,
@@ -352,43 +302,6 @@ fn server(collector: &mut Collector, args: &ServeArgs) -> Option<Server> {
         host: host?,
         port: port?,
         log_level: log_level?,
-    })
-}
-
-fn sqs(collector: &mut Collector, args: &ServeArgs) -> Option<SqsSettings> {
-    let region = collector.collect("AWS_REGION", required(args.aws_region.as_deref()));
-    let endpoint = collector.collect(
-        "AWS_ENDPOINT_URL_SQS",
-        endpoint(args.aws_endpoint_url_sqs.as_deref()),
-    );
-    collector.credentials(
-        args.aws_access_key_id.as_deref(),
-        args.aws_secret_access_key.as_deref(),
-    );
-    let connect = collector.collect(
-        "SQS_CONNECT_TIMEOUT",
-        duration(
-            args.sqs_connect_timeout.as_deref(),
-            Duration::from_millis(500),
-        ),
-    );
-    let operation = collector.collect(
-        "SQS_OPERATION_TIMEOUT",
-        duration(
-            args.sqs_operation_timeout.as_deref(),
-            Duration::from_secs(2),
-        ),
-    );
-    let attempts = collector.collect(
-        "SQS_MAX_ATTEMPTS",
-        bounded(args.sqs_max_attempts.as_deref(), 1, 1..=5),
-    );
-    Some(SqsSettings {
-        region: region?,
-        endpoint_url: endpoint?,
-        connect_timeout: connect?,
-        operation_timeout: operation?,
-        max_attempts: attempts?,
     })
 }
 
@@ -749,9 +662,11 @@ fn ranged_duration(raw: Option<&str>, rule: &DurationRule) -> Parsed<Duration> {
 /// The most entries of `KAFKA_BOOTSTRAP_SERVERS`.
 const MAX_BOOTSTRAP_SERVERS: usize = 16;
 
-/// `KAFKA_BOOTSTRAP_SERVERS`: 1 to 16 `host:port` entries separated by commas.
+/// `KAFKA_BOOTSTRAP_SERVERS` (required): 1 to 16 `host:port` entries separated by commas.
 fn bootstrap_servers(raw: Option<&str>) -> Parsed<String> {
-    let value = raw.unwrap_or("localhost:9092");
+    let Some(value) = raw else {
+        return Err("is required".to_owned());
+    };
     let entries: Vec<&str> = value.split(',').collect();
     if entries.len() <= MAX_BOOTSTRAP_SERVERS && entries.iter().all(|entry| is_host_port(entry)) {
         Ok(entries.join(","))
@@ -831,9 +746,9 @@ fn sasl_mechanism(raw: Option<&str>) -> Parsed<Option<SaslMechanism>> {
     }
 }
 
-/// An optional text that, when set, is not empty.
+/// An optional text that, when set, is not empty (whitespace alone counts as empty).
 fn not_empty(raw: Option<&str>) -> Parsed<Option<String>> {
-    raw.map(|value| required(Some(value))).transpose()
+    raw.map(non_blank).transpose()
 }
 
 /// The longest `KAFKA_CLIENT_ID`.
@@ -931,28 +846,16 @@ fn log_level(raw: Option<&str>) -> Parsed<String> {
         .map_err(|_error| "must be valid tracing filter directives, for example info".to_owned())
 }
 
-fn endpoint(raw: Option<&str>) -> Parsed<Option<String>> {
-    let Some(url) = raw else {
-        return Ok(None);
-    };
-    let is_http_url = Uri::from_str(url).is_ok_and(|uri| {
-        matches!(uri.scheme_str(), Some("http" | "https"))
-            && uri.authority().is_some_and(has_host_and_valid_port)
-    });
-    if is_http_url {
-        Ok(Some(url.to_owned()))
-    } else {
-        Err("must be an http:// or https:// URL".to_owned())
-    }
-}
-
-/// `http::Uri` checks the port only when it is read, so the authority (after the optional user
-/// information) must be the host alone, or the host followed by `:` and a port from 0 to 65535.
+/// `http::Uri` checks the port only when it is read, so the authority must be the host alone, or
+/// the host followed by `:` and a port from 0 to 65535. `origin` rejects user information before
+/// it calls this check, so the authority starts with the host.
 fn has_host_and_valid_port(authority: &Authority) -> bool {
-    let text = authority.as_str();
-    let address = text.rsplit_once('@').map_or(text, |(_, after)| after);
     let host = authority.host();
-    !host.is_empty() && address.strip_prefix(host).is_some_and(is_empty_or_port)
+    !host.is_empty()
+        && authority
+            .as_str()
+            .strip_prefix(host)
+            .is_some_and(is_empty_or_port)
 }
 
 /// The text after the host: nothing, or `:` followed by ASCII digits only (no sign) that fit a
@@ -964,11 +867,12 @@ fn is_empty_or_port(rest: &str) -> bool {
         })
 }
 
-fn required(raw: Option<&str>) -> Parsed<String> {
-    match raw {
-        None => Err("is required".to_owned()),
-        Some(value) if value.trim().is_empty() => Err("must not be empty".to_owned()),
-        Some(value) => Ok(value.to_owned()),
+/// A text that is not empty and not whitespace alone.
+fn non_blank(value: &str) -> Parsed<String> {
+    if value.trim().is_empty() {
+        Err("must not be empty".to_owned())
+    } else {
+        Ok(value.to_owned())
     }
 }
 

@@ -1,4 +1,6 @@
-# 0018. SQS stays
+# 0018. SQS stays (superseded by 0023)
+
+Superseded by [ADR 0023](0023-sqs-is-removed.md): SQS and LocalStack are removed. This record stays as history.
 
 Planning decisions: D11 (SQS and LocalStack stay) of the design input; FR-29 of the PRD in `specs/4-realtime-event-delivery-hub/prd.md`.
 

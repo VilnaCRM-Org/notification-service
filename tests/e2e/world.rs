@@ -57,9 +57,7 @@ const ANSWER_TIMEOUT: Duration = REQUEST_TIMEOUT.saturating_add(Duration::from_s
 
 /// The environment variables whose value [`config_with`], [`AppWorld::config`] or
 /// [`AppWorld::start_node`] replaces after parsing; a scenario cannot set them.
-const SUITE_VARIABLES: [&str; 6] = [
-    "SQS_CONNECT_TIMEOUT",
-    "SQS_OPERATION_TIMEOUT",
+const SUITE_VARIABLES: [&str; 4] = [
     "HEALTH_PROBE_TIMEOUT",
     "HTTP_REQUEST_TIMEOUT",
     "KAFKA_BOOTSTRAP_SERVERS",
@@ -489,22 +487,21 @@ fn config_with(flags: &[String]) -> Config {
         .into_iter()
         .chain(flags.iter().cloned());
     // A flag no argument takes fails the scenario that set it, not the whole run.
-    let Command::Serve(args) = Cli::try_parse_from(arguments)
+    let Command::Serve(mut args) = Cli::try_parse_from(arguments)
         .expect("the serve command takes the flags of the scenario")
         .command
     else {
         panic!("`serve` arguments expected");
     };
+    // The required brokers are those of the stack, whatever the environment of the run names.
+    args.kafka.bootstrap_servers = Some(stack_broker());
     let mut config = Config::from_args(args).expect("valid configuration");
     // The production defaults are a few seconds. A scenario must succeed however long the machine
     // needs to open the first connection, so the budgets are long and keep the order the
-    // configuration requires (request > probe >= operation). Every value replaced here is named
-    // in `SUITE_VARIABLES`.
-    config.sqs.connect_timeout = Duration::from_secs(10);
-    config.sqs.operation_timeout = Duration::from_secs(30);
+    // configuration requires (request > probe). Every value replaced here, and the brokers set
+    // above, is named in `SUITE_VARIABLES`.
     config.health_probe_timeout = Duration::from_secs(40);
     config.request_timeout = REQUEST_TIMEOUT;
-    config.kafka.bootstrap_servers = stack_broker();
     config.kafka.topic = STACK_TOPIC.to_owned();
     config
 }

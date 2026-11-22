@@ -58,18 +58,8 @@ crates = ["*-infrastructure"]
 directory = "infrastructure"
 depends_on = ["domain", "infrastructure"]
 dev_depends_on = ["test-support"]
-external = [
-    "async-trait",
-    "aws-config",
-    "aws-sdk-sqs",
-    "krafka",
-    "moka",
-    "thiserror",
-    "tokio",
-    "tracing",
-    "uuid",
-]
-dev_external = ["aws-smithy-mocks", "rstest", "tokio"]
+external = ["async-trait", "krafka", "moka", "thiserror", "tokio", "tracing", "uuid"]
+dev_external = ["rstest", "tokio"]
 forbidden_transitive = ["async-graphql", "axum", "utoipa"]
 
 [[layer]]

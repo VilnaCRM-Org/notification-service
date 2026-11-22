@@ -1,6 +1,6 @@
 [package]
 name = "shared-infrastructure"
-description = "Shared kernel, infrastructure layer: in-process buses, cache, clock, identifiers and messaging adapters"
+description = "Shared kernel, infrastructure layer: in-process buses, cache, clock and identifiers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,6 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-aws-config.workspace = true
-aws-sdk-sqs.workspace = true
 moka.workspace = true
 shared-domain.workspace = true
 thiserror.workspace = true

@@ -5,8 +5,6 @@
 pub enum Dependency {
     /// The cache.
     Cache,
-    /// The message broker.
-    MessageBroker,
     /// The tail of the event topic of this node (its readiness, not a broker read).
     EventStream,
 }
@@ -17,7 +15,6 @@ impl Dependency {
     pub const fn identifier(self) -> &'static str {
         match self {
             Self::Cache => "cache",
-            Self::MessageBroker => "message_broker",
             Self::EventStream => "event_stream",
         }
     }
@@ -27,7 +24,6 @@ impl Dependency {
     pub const fn failure_message(self) -> &'static str {
         match self {
             Self::Cache => "Cache is not working",
-            Self::MessageBroker => "Message broker is not available",
             Self::EventStream => "Event stream is not ready",
         }
     }

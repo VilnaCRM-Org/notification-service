@@ -236,6 +236,27 @@ impl Subscription {
         }
     }
 
+    /// The next frame that is ready without awaiting anything: from the rest of the last page, or,
+    /// once live, from the queue, under the same floor and type rules as [`Self::step`]. `None`
+    /// when no frame is ready: the page and the queue are empty, the queue ended or a page must be
+    /// read; the next [`Self::step`] then waits, re-arms or reads. A transport calls it after a
+    /// frame to write the frames that are already queued in the same write.
+    pub fn try_next(&mut self) -> Option<Arc<Frame>> {
+        loop {
+            let step = if let Some(event) = self.pending.pop_front() {
+                self.drain(event)
+            } else if self.target.is_some_and(|target| self.floor >= target) {
+                let frame = self.subscriber.try_recv()?;
+                self.take_frame(frame)
+            } else {
+                return None;
+            };
+            if let Step::Frame(frame) = step {
+                return Some(frame);
+            }
+        }
+    }
+
     /// True when the next step reads Kafka: a permit wait and one page read. When it is false the
     /// window may still evict past the floor before the next step reads it: the live step of the
     /// WebSocket pump then idles and leaves the read to a step taken after this answers true.
@@ -474,12 +495,12 @@ impl Subscription {
     }
 
     fn take_frame(&mut self, frame: Arc<Frame>) -> Step {
-        let id = Cursor::from(frame.sequence);
+        let id = Cursor::from(frame.sequence());
         if id <= self.floor {
             return Step::Idle;
         }
         self.floor = id;
-        if wanted(&self.types, &frame.event_type, frame.sequence) {
+        if wanted(&self.types, frame.event_type(), frame.sequence()) {
             Step::Frame(frame)
         } else {
             Step::Idle

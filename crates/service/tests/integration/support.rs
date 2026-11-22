@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// Every variable of a valid configuration that has no default: the region.
-pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 1] = [("AWS_REGION", "us-east-1")];
+/// Every variable of a valid configuration that has no default: the Kafka brokers.
+pub(crate) const VALID_ENVIRONMENT: [(&str, &str); 1] =
+    [("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")];
 
 static SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
@@ -47,7 +48,32 @@ impl Scratch {
     /// test process has it, so that coverage of the child is recorded.
     pub(crate) fn service(&self, arguments: &[&str], variables: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
-        command.args(arguments).env_clear().current_dir(&self.path);
+        command.args(arguments);
+        self.environment(command, variables)
+    }
+
+    /// The binary as [`Scratch::service`] gives it, started by `/bin/sh` once the shell has
+    /// lowered its soft open file limit to `soft`; the shell `exec`s the binary, so the process
+    /// keeps the id of the spawned child.
+    pub(crate) fn service_with_soft_file_limit(
+        &self,
+        soft: u64,
+        arguments: &[&str],
+        variables: &[(&str, &str)],
+    ) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(r#"ulimit -Sn {soft} && exec "$0" "$@""#))
+            .arg(env!("CARGO_BIN_EXE_service"))
+            .args(arguments);
+        self.environment(command, variables)
+    }
+
+    /// `command` with a cleared environment plus `variables` and `LLVM_PROFILE_FILE`, run in the
+    /// directory.
+    fn environment(&self, mut command: Command, variables: &[(&str, &str)]) -> Command {
+        command.env_clear().current_dir(&self.path);
         if let Some(profile) = from_environment("LLVM_PROFILE_FILE") {
             command.env("LLVM_PROFILE_FILE", profile);
         }
@@ -96,8 +122,8 @@ pub(crate) fn silent_listener() -> std::net::TcpListener {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap()
 }
 
-/// A variable of the test stack (`AWS_ENDPOINT_URL_SQS` and the like), taken from the environment
-/// of the test process.
+/// A variable of the test stack (`KAFKA_BOOTSTRAP_SERVERS` and the like), taken from the
+/// environment of the test process.
 pub(crate) fn stack_variable(name: &str) -> String {
     from_environment(name)
         .unwrap_or_else(|| panic!("{name} is not set; run the tests through `make`"))
@@ -105,28 +131,16 @@ pub(crate) fn stack_variable(name: &str) -> String {
         .unwrap()
 }
 
-/// The variables that let `serve` start against the compose services: the AWS ones and the Kafka
-/// broker of the test stack (its topic `notifications` is the default), with long budgets so that
-/// a request that must succeed does not depend on how fast a loaded machine opens its first
-/// connection (request > probe >= operation, as the configuration requires).
+/// The variables that let `serve` start against the compose services: the Kafka broker of the
+/// test stack (its topic `notifications` is the default), with long budgets so that a request that
+/// must succeed does not depend on how fast a loaded machine answers (request > probe, as the
+/// configuration requires).
 pub(crate) fn stack() -> Vec<(&'static str, String)> {
     vec![
-        ("AWS_REGION", stack_variable("AWS_REGION")),
         (
             "KAFKA_BOOTSTRAP_SERVERS",
             stack_variable("KAFKA_BOOTSTRAP_SERVERS"),
         ),
-        (
-            "AWS_ENDPOINT_URL_SQS",
-            stack_variable("AWS_ENDPOINT_URL_SQS"),
-        ),
-        ("AWS_ACCESS_KEY_ID", stack_variable("AWS_ACCESS_KEY_ID")),
-        (
-            "AWS_SECRET_ACCESS_KEY",
-            stack_variable("AWS_SECRET_ACCESS_KEY"),
-        ),
-        ("SQS_CONNECT_TIMEOUT", "10s".to_owned()),
-        ("SQS_OPERATION_TIMEOUT", "30s".to_owned()),
         ("HEALTH_PROBE_TIMEOUT", "40s".to_owned()),
         ("HTTP_REQUEST_TIMEOUT", "60s".to_owned()),
     ]
@@ -154,6 +168,18 @@ impl Answer {
     }
 }
 
+/// The messages of the start-up entry that reports the open file limit: raised, or kept where the
+/// machine does not allow raising it. The entry comes before `listening`, and its values depend on
+/// the machine, so the log of a process is read without it.
+const FILE_LIMIT_MESSAGES: [&str; 2] = ["open file limit", "open file limit not raised"];
+
+/// Whether `line` is the start-up entry of the open file limit.
+pub(crate) fn is_file_limit(line: &Value) -> bool {
+    line["message"]
+        .as_str()
+        .is_some_and(|message| FILE_LIMIT_MESSAGES.contains(&message))
+}
+
 /// The log lines with `message`.
 pub(crate) fn messages_of<'a>(lines: &'a [Value], message: &str) -> Vec<&'a Value> {
     lines
@@ -173,8 +199,10 @@ pub(crate) struct Server {
     stderr: ChildStderr,
     /// The bound port.
     pub(crate) port: u16,
-    /// Every log line read so far.
+    /// Every log line read so far but the entry of the open file limit.
     pub(crate) lines: Vec<Value>,
+    /// The entries of the open file limit read so far, kept out of `lines`.
+    pub(crate) file_limit: Vec<Value>,
 }
 
 /// How long a test waits for the next line of a service before it fails.
@@ -204,7 +232,7 @@ fn lines_of(stdout: BufReader<std::process::ChildStdout>) -> Receiver<String> {
 #[derive(Debug)]
 pub(crate) struct Finished {
     pub(crate) code: Option<i32>,
-    /// Every log line of the process, in order.
+    /// Every log line of the process but the entry of the open file limit, in order.
     pub(crate) lines: Vec<Value>,
     pub(crate) stderr: String,
 }
@@ -220,12 +248,33 @@ impl Finished {
 }
 
 /// Starts `service serve` on `127.0.0.1` with an ephemeral port and waits for its `listening`
-/// entry. `variables` complete the configuration (`AWS_REGION`, ..).
+/// entry. `variables` complete the configuration (`KAFKA_BOOTSTRAP_SERVERS`, ..).
 pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
+    let all = serve_variables(variables);
+    started(scratch.service(&["serve"], &all))
+}
+
+/// Starts `service serve` as [`serve`] does, with its soft open file limit lowered to `soft`
+/// before the binary runs.
+pub(crate) fn serve_with_soft_file_limit(
+    scratch: &Scratch,
+    soft: u64,
+    variables: &[(&str, &str)],
+) -> Server {
+    let all = serve_variables(variables);
+    started(scratch.service_with_soft_file_limit(soft, &["serve"], &all))
+}
+
+/// `variables` after the loopback host and the ephemeral port.
+fn serve_variables<'a>(variables: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
     let mut all = vec![("APP_PORT", "0"), ("APP_HOST", "127.0.0.1")];
     all.extend_from_slice(variables);
-    let mut child = scratch
-        .service(&["serve"], &all)
+    all
+}
+
+/// Spawns `command` (a `serve` process) and waits for its `listening` entry.
+fn started(mut command: Command) -> Server {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -238,6 +287,7 @@ pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
         stderr,
         port: 0,
         lines: Vec::new(),
+        file_limit: Vec::new(),
     };
     let listening = server.read_until("listening").pop().unwrap();
     server.port = listening["addr"]
@@ -263,6 +313,10 @@ impl Server {
                     panic!("{message} was not logged ({error}): {:?}", self.lines)
                 });
             let json: Value = serde_json::from_str(&line).unwrap();
+            if is_file_limit(&json) {
+                self.file_limit.push(json);
+                continue;
+            }
             let found = json["message"] == message;
             self.lines.push(json);
             if found {
@@ -327,6 +381,11 @@ impl Server {
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
     }
 
+    /// The process id of the service.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Sends a signal (`TERM` or `INT`) with `kill`.
     pub(crate) fn signal(&self, name: &str) {
         let status = Command::new("kill")
@@ -356,7 +415,10 @@ impl Server {
         let status = self.child.wait().unwrap();
         let mut lines = std::mem::take(&mut self.lines);
         while let Ok(line) = self.stdout.recv_timeout(LINE_TIMEOUT) {
-            lines.push(serde_json::from_str::<Value>(&line).unwrap());
+            let json = serde_json::from_str::<Value>(&line).unwrap();
+            if !is_file_limit(&json) {
+                lines.push(json);
+            }
         }
         let mut stderr = String::new();
         self.stderr.read_to_string(&mut stderr).unwrap();

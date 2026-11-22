@@ -7,8 +7,8 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 ## Classes and execution
 
 - **TOOL** targets run cargo, `xtask`, the `service` binary, `taplo`, `typos` or `zizmor`. They run natively in the current environment by default. With `RUN_IN_CONTAINER=1` (or `true`) they run as `docker compose exec` in the development container, so no toolchain is needed on the host; the environment must be up (`make start`). The opt-in is ignored, and the command runs natively, when `CI` is non-empty or when `IN_DEV_CONTAINER=1` (set in the `app` container, so also in a `make sh` shell).
-- **HOST** targets drive Docker themselves (lifecycle, image-based tools, load tests, Bats) or are plain host commands. They always run where Make runs and print nothing special in container mode. A HOST target that calls the container engine exits with status 2 and `This target needs a reachable container engine (docker).` when `docker info` fails.
-- **Needs** names the compose services that must be healthy: `localstack` is the SQS emulator, `kafka` is the Kafka broker, `app` is the development container. Targets that need services start them through their prerequisite `ensure-deps` with `docker compose up --no-recreate`, so a service that already runs is never stopped or altered; `ensure-deps` starts the broker through `ensure-kafka` (see [`make-targets-service.md`](make-targets-service.md)). "The isolated environment" means the target starts and removes the production-image environment of the load tests itself.
+- **HOST** targets drive Docker themselves (lifecycle, image-based tools, load tests, Bats) or are plain host commands. They always run where Make runs and print nothing special in container mode. A HOST target that calls the container engine exits with status 2 and `This target needs a reachable container engine (docker).` when `docker info` fails; `aws-load-tests` and `aws-load-tests-cleanup` skip that check in the dry run (`LOCAL_MODE_ENV=true`), which needs no Docker.
+- **Needs** names the compose services that must be healthy: `kafka` is the Kafka broker, `app` is the development container. Targets that need services start them through their prerequisite `ensure-deps` with `docker compose up --no-recreate`, so a service that already runs is never stopped or altered; `ensure-deps` starts the broker through `ensure-kafka` (see [`make-targets-service.md`](make-targets-service.md)). "The isolated environment" means the target starts and removes the production-image environment of the load tests itself.
 - **The test configuration.** The targets that run tests against the backing services (`integration-tests`, `e2e-tests`, the coverage and mutation targets) run behind `scripts/with-env.sh .env .env.test --`, so they read the values of `.env.test` on top of those of `.env`; a variable of the caller still wins over the two files. The service has no database, so no target prepares one.
 - **In `make ci`** says whether the aggregate runs the target; the gate in brackets is the gate it passes (G1 to G31; there is no G30 any more, because the gate of the query metadata went with the database).
 
@@ -20,8 +20,8 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 | `all-tests` | TOOL | none | no | Run unit, integration and end-to-end tests |
 | `architecture` | TOOL | none | yes (G4) | Check layer and bounded-context boundaries |
 | `average-load-tests` | HOST | the isolated environment (the target starts and removes it) | no | Run every load scenario with the average profile |
-| `aws-load-tests` | HOST | AWS credentials in the environment, or localstack in local mode | no | Run the load tests on a temporary AWS instance |
-| `aws-load-tests-cleanup` | HOST | none | no | Remove everything aws-load-tests created |
+| `aws-load-tests` | HOST | Docker and AWS credentials in the environment, or nothing in local mode (the stub AWS CLI answers) | no | Run the load tests on a temporary AWS instance |
+| `aws-load-tests-cleanup` | HOST | Docker and AWS credentials in the environment, or nothing in local mode (the stub AWS CLI answers) | no | Remove everything aws-load-tests created |
 | `bats` | HOST | Docker | yes (G16) | Run the Makefile tests |
 | `bmalph-claude` | HOST | none | no | Install and verify bmalph for Claude Code |
 | `bmalph-codex` | HOST | none | no | Install and verify bmalph for Codex |
@@ -48,14 +48,14 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 | `ci-tests` | TOOL + HOST | as the targets it runs | yes | Stage 3 of make ci: coverage, doc tests, end-to-end tests |
 | `clean` | HOST | none | no | Alias of purge |
 | `complexity` | TOOL | none | yes (G3) | Check the complexity limits of production code |
-| `coverage-html` | TOOL | localstack and kafka | no | Write the HTML coverage report to target/coverage/html |
-| `coverage-xml` | TOOL | localstack and kafka | no | Write target/coverage/coverage.xml (Cobertura) and lcov.info without enforcing the floor |
+| `coverage-html` | TOOL | kafka | no | Write the HTML coverage report to target/coverage/html |
+| `coverage-xml` | TOOL | kafka | no | Write target/coverage/coverage.xml (Cobertura) and lcov.info without enforcing the floor |
 | `doc-tests` | TOOL | none | yes (G11) | Run the documentation tests |
 | `docs-check` | TOOL + HOST | none | yes (G26) | Check that commands, paths and lists cited in the documentation exist |
 | `doctor` | HOST | none | yes, first step | Check host prerequisites and pinned tool versions |
 | `down` | HOST | none | no | Remove the development containers and network (volumes are kept) |
-| `e2e-tests` | TOOL | localstack and kafka | yes (G13) | Run the Gherkin end-to-end tests |
-| `ensure-deps` | HOST | none | via prerequisites | Start LocalStack and Kafka unless this shell is the development container |
+| `e2e-tests` | TOOL | kafka | yes (G13) | Run the Gherkin end-to-end tests |
+| `ensure-deps` | HOST | none | via prerequisites | Start the Kafka broker unless this shell is the development container |
 | `execute-load-tests-script` | HOST | the isolated environment (the target starts and removes it) | no | Run one load scenario, all four profiles unless switched off: scenario=\<name> runSmoke=false runAverage=false runStress=false runSpike=false |
 | `format` | TOOL | none | no | Format the Rust code |
 | `format-check` | TOOL | none | yes (G1) | Check the Rust formatting (changes nothing) |
@@ -67,7 +67,7 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 | `image-scan` | HOST | network | yes (G10) | Scan the production image for HIGH and CRITICAL vulnerabilities |
 | `install` | HOST | none | no | Install the pinned tools and Bats on this machine and fetch dependencies from the lock file |
 | `install-hooks` | HOST | none | no | Activate the git hooks of .githooks |
-| `integration-tests` | TOOL | localstack and kafka | via coverage (G12) | Run the integration tests against LocalStack and Kafka |
+| `integration-tests` | TOOL | kafka | via coverage (G12) | Run the integration tests against Kafka |
 | `lint-actions` | HOST + TOOL | none | via `lint-repo` | Lint the workflows (syntax and security) |
 | `lint-code` | TOOL | none | via `static-analysis` | Lint production code, then all targets with tests relaxed |
 | `lint-docker` | HOST | none | via `lint-repo` | Lint the Dockerfile |
@@ -82,8 +82,8 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 | `lint-yaml` | HOST | none | via `lint-repo` | Lint the YAML files |
 | `load-tests` | HOST | the isolated environment (the target starts and removes it) | no | Run every load scenario with all four profiles |
 | `logs` | HOST | none | no | Follow all logs |
-| `mutation-tests` | TOOL | localstack and kafka | no (main, schedule) | Run mutation testing over all production code (fails on a surviving or timed-out mutant) |
-| `mutation-tests-diff` | TOOL | localstack and kafka | yes (G15) | Run mutation testing over the code changed against base_ref |
+| `mutation-tests` | TOOL | kafka | no (main, schedule) | Run mutation testing over all production code (fails on a surviving or timed-out mutant) |
+| `mutation-tests-diff` | TOOL | kafka | yes (G15) | Run mutation testing over the code changed against base_ref |
 | `new-context` | TOOL | none | no | Create a bounded context: group=\<group> context=\<context> |
 | `new-logs` | HOST | none | no | Follow only new log lines |
 | `openapi-diff` | HOST | none | yes (G19) | Fail on a breaking OpenAPI change against base_ref |
@@ -103,7 +103,7 @@ The ordered list of gate targets is not repeated here. It lives in one place, th
 | `stop` | HOST | none | no | Stop the development environment |
 | `stress-load-tests` | HOST | the isolated environment (the target starts and removes it) | no | Run every load scenario with the stress profile |
 | `test` | TOOL | none | no | Alias of all-tests |
-| `tests-with-coverage` | TOOL | localstack and kafka | yes (G11, G12, G14) | Run the unit and integration tests with coverage and enforce 100% lines and functions |
+| `tests-with-coverage` | TOOL | kafka | yes (G11, G12, G14) | Run the unit and integration tests with coverage and enforce 100% lines and functions |
 | `unit-tests` | TOOL | none | via coverage and `doc-tests` (G11) | Run the unit tests and the documentation tests |
 | `unused-dependencies` | TOOL | none | yes (G8) | Fail on unused or misplaced dependencies |
 | `unused-dependencies-fix` | TOOL | none | no | Remove unused dependencies from the manifests |
@@ -217,7 +217,7 @@ A gate target has its negative test in the Bats suite and no second passing run 
 
 The suite tests the targets that are not gates and the surface behaviour; the passing run of a gate is not repeated (see above). These targets have no Bats test, each with its reason. A test of `make_execution_mode.bats` fails when a target of `make help` is neither invoked by a Bats test nor named in the gate table above or in this section.
 
-- `aws-load-tests` without local mode and `aws-load-tests-cleanup` against AWS: no credentials in CI. The LocalStack dry run is tested.
+- `aws-load-tests` without local mode and `aws-load-tests-cleanup` against AWS: no credentials in CI. The dry run with `LOCAL_MODE_ENV=true`, which calls the stub AWS CLI `tests/Load/stub-aws.sh`, is tested.
 - `average-load-tests`, `stress-load-tests`, `spike-load-tests` and `load-tests`: minutes of load. The shared runner path is tested through `smoke-load-tests` and `execute-load-tests-script`.
 - `mutation-tests`: up to an hour. It is the mutation command without the diff, and the same command line is tested through `mutation-tests-diff`.
 - `coverage-xml` and `coverage-html`: a second and a third instrumented run of the suites. Their report commands are part of the tested `tests-with-coverage` sequence or differ from it in the output format only.

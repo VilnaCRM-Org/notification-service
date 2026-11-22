@@ -6,18 +6,19 @@
 
 use std::collections::BTreeSet;
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::Json;
+use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::ws::rejection::{
     ConnectionNotUpgradable, InvalidConnectionHeader, WebSocketUpgradeRejection,
 };
-use axum::http::header::HeaderName;
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, HeaderName};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse as _, Response};
-use futures_util::stream;
+use futures_util::stream::{self, StreamExt as _};
 use shared_application::http::{Problem, ValidatedQuery};
 use shared_domain::InvalidPageRequest;
 
@@ -27,7 +28,9 @@ use super::dto::{
     EventStreamStatusResponse, EventTypeResponse, HandshakeHeaders, ListEventTypesParams, SseFrame,
     StreamParams, TypesError, WsParams, parse_cursor, parse_types, types_problem,
 };
+use super::frame::Frame;
 use super::hub::HubError;
+use super::keep_alive::with_keep_alive;
 use super::session::Session;
 use super::socket;
 use super::subscription::{Subscription, SubscriptionRequest, log_replay_failed};
@@ -43,6 +46,28 @@ pub(crate) const MAX_MESSAGE_BYTES: usize = 32_768;
 
 /// The read buffer of a WebSocket connection, in bytes (NFR-9).
 pub(crate) const READ_BUFFER_BYTES: usize = 4_096;
+
+/// The size above which a WebSocket connection writes its buffered frames to the socket, in bytes:
+/// that of a write batch of the pump ([`socket::MAX_BATCH_BYTES`]), so the frames of a batch
+/// reach the peer in one write.
+pub(crate) const WRITE_BUFFER_BYTES: usize = 16_384;
+
+/// The largest WebSocket frame the pump writes, in bytes: the text of an event at the upper bound
+/// of `EVENT_MAX_DATA_BYTES` (1 MiB), plus its id, its type of at most 128 characters, the wrapper
+/// and the frame header, which together stay well within 1 KiB. Pings and close frames are
+/// smaller.
+pub(crate) const MAX_FRAME_BYTES: usize = 1_048_576 + 1_024;
+
+/// The most a WebSocket connection buffers, in bytes: the write buffer and the frame that crosses
+/// it. Tungstenite writes the buffer out once it passes [`WRITE_BUFFER_BYTES`], and the next feed
+/// waits until it is written, so the buffer never holds more and no write the pump makes is
+/// refused for size; a peer that reads too slowly misses the write deadline instead (FR-24). What
+/// stays allocated after a burst is the write buffer plus the largest frame sent (NFR-9).
+pub(crate) const MAX_WRITE_BUFFER_BYTES: usize = WRITE_BUFFER_BYTES + MAX_FRAME_BYTES;
+
+/// The size up to which the SSE stream joins the frames that are ready into one chunk, in bytes;
+/// the frame that crosses it is the last of its chunk.
+pub(crate) const MAX_CHUNK_BYTES: usize = 32_768;
 
 /// The description of the event stream of the SSE route.
 const STREAM_OPENED: &str = "The event stream: one frame per event of the listed types, in \
@@ -211,11 +236,17 @@ pub async fn stream(
     let subscription = state
         .subscriptions
         .open(SubscriptionRequest { types, cursor })?;
-    let events = Sse::new(stream::unfold(subscription, next_event))
-        .keep_alive(KeepAlive::new().interval(state.settings.keep_alive));
+    let chunks = with_keep_alive(
+        stream::unfold(subscription, next_chunk),
+        state.settings.keep_alive,
+    );
     Ok((
-        [(X_ACCEL_BUFFERING, HeaderValue::from_static("no"))],
-        events,
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("text/event-stream")),
+            (CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+            (X_ACCEL_BUFFERING, HeaderValue::from_static("no")),
+        ],
+        Body::from_stream(chunks.map(Ok::<_, Infallible>)),
     )
         .into_response())
 }
@@ -282,6 +313,8 @@ pub async fn ws(
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
         .read_buffer_size(READ_BUFFER_BYTES)
+        .write_buffer_size(WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
         .on_upgrade(move |connection| {
             socket::serve(connection, Session::new(subscription), keep_alive)
         }))
@@ -299,19 +332,41 @@ fn starting_problem() -> Problem {
     Problem::new(StatusCode::SERVICE_UNAVAILABLE).with_detail(HubError::NotReady.to_string())
 }
 
-/// The next SSE event of the subscription; `None` ends the response without a final frame, at
-/// shutdown after the queued frames and when a replay cannot read Kafka, which writes
-/// `replay failed` with the chain of [`Subscription::failure`]; a closed hub ends silently.
-async fn next_event(
-    mut subscription: Subscription,
-) -> Option<(Result<Event, Infallible>, Subscription)> {
+/// The next chunk of the SSE stream: the next frame of the subscription and the frames that are
+/// ready after it (see [`coalesce`]). `None` ends the response without a final frame, at shutdown
+/// after the queued frames and when a replay cannot read Kafka, which writes `replay failed` with
+/// the chain of [`Subscription::failure`]; a closed hub ends silently.
+async fn next_chunk(mut subscription: Subscription) -> Option<(Bytes, Subscription)> {
     if let Some(frame) = subscription.next().await {
-        return Some((Ok(frame.sse.clone()), subscription));
+        let chunk = coalesce(&frame, &mut subscription);
+        return Some((chunk, subscription));
     }
     if let Some(error) = subscription.failure() {
         log_replay_failed("sse", error);
     }
     None
+}
+
+/// The SSE block of `first`, joined by the blocks of the frames that are ready without awaiting
+/// while the chunk is below [`MAX_CHUNK_BYTES`]. A lone block is the frame's shared bytes, not a
+/// copy.
+fn coalesce(first: &Arc<Frame>, subscription: &mut Subscription) -> Bytes {
+    let first = first.sse();
+    if first.len() >= MAX_CHUNK_BYTES {
+        return first.clone();
+    }
+    let Some(second) = subscription.try_next() else {
+        return first.clone();
+    };
+    let mut chunk = Vec::with_capacity(first.len().saturating_add(second.sse().len()));
+    chunk.extend_from_slice(first);
+    chunk.extend_from_slice(second.sse());
+    while chunk.len() < MAX_CHUNK_BYTES
+        && let Some(frame) = subscription.try_next()
+    {
+        chunk.extend_from_slice(frame.sse());
+    }
+    Bytes::from(chunk)
 }
 
 #[cfg(test)]

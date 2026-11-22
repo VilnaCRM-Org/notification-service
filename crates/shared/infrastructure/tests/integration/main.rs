@@ -1,5 +1,4 @@
-//! Integration tests of the in-process adapters that need real time, and of the SQS adapter that needs the
-//! test stack.
+//! Integration tests of the in-process adapters that need real time.
 
 #[cfg(test)]
 mod cache;
@@ -7,7 +6,3 @@ mod cache;
 mod clock;
 #[cfg(test)]
 mod id;
-#[cfg(test)]
-mod messaging;
-#[cfg(test)]
-mod support;

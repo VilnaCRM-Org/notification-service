@@ -8,6 +8,7 @@ pub mod dto;
 pub mod frame;
 pub mod handler;
 pub mod hub;
+pub mod keep_alive;
 mod session;
 mod socket;
 pub mod subscription;

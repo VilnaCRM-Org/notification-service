@@ -18,18 +18,15 @@ const OTHER: &str = "order.paid";
 /// The detail of the 503 problem of a node at its subscriber cap.
 const AT_CAPACITY: &str = "the node is at its subscriber capacity";
 
-/// The configuration of a served binary on `topic` through `bootstrap`: SQS on port 1, which no
-/// request of these tests needs, one event type, short pauses after a failed round and a keep-alive
-/// every second, which ends the read that shows that nothing follows the last expected block; then
-/// `extra`.
+/// The configuration of a served binary on `topic` through `bootstrap`: one event type, short
+/// pauses after a failed round and a keep-alive every second, which ends the read that shows that
+/// nothing follows the last expected block; then `extra`.
 fn variables<'a>(
     bootstrap: &'a str,
     topic: &'a str,
     extra: &[(&'a str, &'a str)],
 ) -> Vec<(&'a str, &'a str)> {
     let mut variables = vec![
-        ("AWS_REGION", "us-east-1"),
-        ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
         ("KAFKA_BOOTSTRAP_SERVERS", bootstrap),
         ("KAFKA_TOPIC", topic),
         ("EVENT_TYPES", TYPE),

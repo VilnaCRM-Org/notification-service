@@ -15,12 +15,9 @@ use test_support::static_topic::StaticTopic;
 
 use crate::bootstrap::{Adapters, event_bus};
 
-/// Healthy probes of the cache and the message broker, in that order.
+/// The healthy probe of the cache, the one probe of the adapters.
 fn healthy_probes() -> Vec<Arc<dyn HealthProbe>> {
-    vec![
-        Arc::new(StubProbe::healthy(Dependency::Cache)),
-        Arc::new(StubProbe::healthy(Dependency::MessageBroker)),
-    ]
+    vec![Arc::new(StubProbe::healthy(Dependency::Cache))]
 }
 
 /// The adapters of a node on `topic`, whose tail reads through `tail`: healthy probes, a clock at

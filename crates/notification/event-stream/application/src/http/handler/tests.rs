@@ -33,12 +33,13 @@ use tokio::time::timeout;
 use tower::ServiceExt as _;
 use tracing::Level;
 
+use super::MAX_CHUNK_BYTES;
 use crate::catalog::EventCatalog;
 use crate::http::dto::{
     Command, EXAMPLE_CURSOR, EXAMPLE_TYPE, TypesError, parse_cursor, parse_types, read_cursor,
     types_problem,
 };
-use crate::http::frame::{error_json, ws_json};
+use crate::http::frame::{Frame, error_json, ws_json};
 use crate::http::hub::{Hub, HubError, HubSettings};
 use crate::http::session::Session;
 use crate::http::subscription::{ReplaySettings, Subscription, Subscriptions};
@@ -571,6 +572,14 @@ fn event(id: u64, event_type: &str) -> StoredEvent {
     stored_event(id, event_type, &event_json(id, event_type))
 }
 
+/// The SSE frames of the events, joined, as one chunk writes them.
+fn frames(events: &[(u64, &str)]) -> String {
+    events
+        .iter()
+        .map(|(id, event_type)| frame(*id, event_type))
+        .collect()
+}
+
 /// The SSE frame of the event `id`.
 fn frame(id: u64, event_type: &str) -> String {
     format!(
@@ -721,8 +730,10 @@ async fn only_the_subscribed_type_arrives_as_one_frame_per_event_in_id_order() {
     node.pass(&event(1_002, "order.paid"));
     node.pass(&event(1_003, "user.created"));
 
-    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
-    assert_eq!(chunk(&mut body).await, Some(frame(1_003, "user.created")));
+    assert_eq!(
+        chunk(&mut body).await,
+        Some(frames(&[(1_001, "user.created"), (1_003, "user.created")]))
+    );
     assert!(silent(&mut body, WAIT).await);
 }
 
@@ -741,9 +752,14 @@ async fn every_listed_type_arrives_and_a_repeated_name_counts_once() {
     node.pass(&event(1_004, "user.created"));
 
     assert_eq!(head.status, StatusCode::OK);
-    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
-    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "order.paid")));
-    assert_eq!(chunk(&mut body).await, Some(frame(1_004, "user.created")));
+    assert_eq!(
+        chunk(&mut body).await,
+        Some(frames(&[
+            (1_001, "user.created"),
+            (1_002, "order.paid"),
+            (1_004, "user.created")
+        ]))
+    );
     assert!(silent(&mut body, WAIT).await);
 }
 
@@ -816,8 +832,10 @@ async fn the_header_cursor_wins_over_the_parameter_and_resumes_from_the_window()
     .await;
 
     assert_eq!(head.status, StatusCode::OK);
-    assert_eq!(chunk(&mut body).await, Some(frame(9, "user.created")));
-    assert_eq!(chunk(&mut body).await, Some(frame(10, "user.created")));
+    assert_eq!(
+        chunk(&mut body).await,
+        Some(frames(&[(9, "user.created"), (10, "user.created")]))
+    );
     assert!(silent(&mut body, WAIT).await);
 }
 
@@ -834,8 +852,10 @@ async fn the_parameter_cursor_resumes_when_no_header_is_sent() {
     )
     .await;
 
-    assert_eq!(chunk(&mut body).await, Some(frame(3, "user.created")));
-    assert_eq!(chunk(&mut body).await, Some(frame(4, "user.created")));
+    assert_eq!(
+        chunk(&mut body).await,
+        Some(frames(&[(3, "user.created"), (4, "user.created")]))
+    );
     assert!(silent(&mut body, WAIT).await);
 }
 
@@ -887,10 +907,106 @@ async fn at_shutdown_the_response_ends_after_the_queued_frames_without_a_log_ent
 
     node.hub.close();
 
-    assert_eq!(chunk(&mut body).await, Some(frame(1_001, "user.created")));
-    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "user.created")));
+    assert_eq!(
+        chunk(&mut body).await,
+        Some(frames(&[(1_001, "user.created"), (1_002, "user.created")]))
+    );
     assert_eq!(chunk(&mut body).await, None);
     assert_eq!(lines_of(&recorder, "replay failed"), Vec::<LogLine>::new());
+}
+
+/// The event `id` (of four digits) whose SSE block takes exactly `block_bytes`.
+fn sized_event(id: u64, block_bytes: usize) -> StoredEvent {
+    let wrapper = "id: 1001\nevent: user.created\ndata: {\"pad\":\"\"}\n\n".len();
+    let json = format!(
+        r#"{{"pad":"{}"}}"#,
+        "x".repeat(block_bytes.saturating_sub(wrapper))
+    );
+    stored_event(id, "user.created", &json)
+}
+
+/// The event `id` whose SSE block takes exactly 8 KiB.
+fn eighth_chunk_event(id: u64) -> StoredEvent {
+    sized_event(id, MAX_CHUNK_BYTES / 4)
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_ready_frames_are_joined_into_chunks_up_to_32_kib() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+    for id in 1_001..=1_006 {
+        node.pass(&eighth_chunk_event(id));
+    }
+
+    let first = chunk(&mut body).await.unwrap();
+    let second = chunk(&mut body).await.unwrap();
+
+    assert_eq!(MAX_CHUNK_BYTES, 32_768);
+    assert_eq!(first.len(), MAX_CHUNK_BYTES);
+    assert_eq!(second.len(), MAX_CHUNK_BYTES / 2);
+    let blocks: String = (1_001..=1_006)
+        .map(|id| String::from_utf8(Frame::encode(&eighth_chunk_event(id)).sse().to_vec()).unwrap())
+        .collect();
+    assert_eq!(format!("{first}{second}"), blocks);
+    assert!(silent(&mut body, WAIT).await);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_frame_of_32_kib_or_more_is_a_chunk_of_its_own() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+    let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(MAX_CHUNK_BYTES));
+    node.pass(&stored_event(1_001, "user.created", &big));
+    node.pass(&event(1_002, "user.created"));
+
+    let first = chunk(&mut body).await.unwrap();
+
+    assert!(first.ends_with(&format!("data: {big}\n\n")), "{first}");
+    assert!(first.starts_with("id: 1001\n"), "{first}");
+    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "user.created")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_frame_of_exactly_32_kib_is_a_chunk_of_its_own() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+    let exact = sized_event(1_001, MAX_CHUNK_BYTES);
+    node.pass(&exact);
+    node.pass(&event(1_002, "user.created"));
+
+    let first = chunk(&mut body).await.unwrap();
+
+    assert_eq!(first.len(), MAX_CHUNK_BYTES);
+    assert_eq!(
+        first,
+        String::from_utf8(Frame::encode(&exact).sse().to_vec()).unwrap()
+    );
+    assert_eq!(chunk(&mut body).await, Some(frame(1_002, "user.created")));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_frame_just_below_32_kib_is_joined_by_the_next_ready_frame() {
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+    let below = sized_event(1_001, MAX_CHUNK_BYTES.saturating_sub(1));
+    node.pass(&below);
+    node.pass(&event(1_002, "user.created"));
+
+    let first = chunk(&mut body).await.unwrap();
+
+    assert_eq!(
+        first,
+        format!(
+            "{}{}",
+            String::from_utf8(Frame::encode(&below).sse().to_vec()).unwrap(),
+            frame(1_002, "user.created")
+        )
+    );
+    assert!(silent(&mut body, WAIT).await);
 }
 
 #[rstest]
@@ -1249,6 +1365,8 @@ fn the_upgrade_headers_are_the_four_of_a_handshake() {
 fn the_websocket_limits_are_those_of_fr_11_and_nfr_9() {
     assert_eq!(super::MAX_MESSAGE_BYTES, 32_768);
     assert_eq!(super::READ_BUFFER_BYTES, 4_096);
+    assert_eq!(super::WRITE_BUFFER_BYTES, 16_384);
+    assert_eq!(super::MAX_WRITE_BUFFER_BYTES, 16_384 + 1_049_600);
 }
 
 /// Tungstenite keeps its buffers to itself, so the upgrade is checked to apply each limit.
@@ -1259,6 +1377,8 @@ fn the_upgrade_applies_the_message_frame_and_read_buffer_limits() {
     assert!(source.contains(".max_message_size(MAX_MESSAGE_BYTES)"));
     assert!(source.contains(".max_frame_size(MAX_MESSAGE_BYTES)"));
     assert!(source.contains(".read_buffer_size(READ_BUFFER_BYTES)"));
+    assert!(source.contains(".write_buffer_size(WRITE_BUFFER_BYTES)"));
+    assert!(source.contains(".max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)"));
 }
 
 #[rstest]

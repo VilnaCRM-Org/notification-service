@@ -11,7 +11,6 @@ use tokio::time::{Instant, sleep, timeout};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{WebSocketStream, client_async};
 
-use crate::cli::ServeArgs;
 use crate::config::Config;
 
 /// The limit of every awaited call; the sockets are real, so the clock is too.
@@ -27,13 +26,13 @@ pub(super) type Client = WebSocketStream<TcpStream>;
 pub(super) fn config(flags: &[&str]) -> Config {
     use clap::Parser as _;
     let arguments = ["service", "serve"].iter().chain(flags);
-    let crate::cli::Command::Serve(args) = crate::cli::Cli::parse_from(arguments).command else {
+    let crate::cli::Command::Serve(mut args) = crate::cli::Cli::parse_from(arguments).command
+    else {
         panic!("`serve` arguments expected");
     };
-    let args = ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
-        ..args
-    };
+    args.kafka
+        .bootstrap_servers
+        .get_or_insert_with(|| "localhost:9092".to_owned());
     Config::from_args(args).unwrap()
 }
 

@@ -33,15 +33,15 @@ The first `make start` builds the development image and compiles the workspace i
 
 ## Port clashes
 
-The environment publishes three ports on `127.0.0.1`: the service on `APP_PORT` (8081), LocalStack on `LOCALSTACK_PORT` (4566) and the Structurizr viewer on `STRUCTURIZR_PORT` (8080). When one of them is taken, `make start` or `make start-deps` fails with Docker's "port is already allocated" message.
+The environment publishes two ports on `127.0.0.1`: the service on `APP_PORT` (8081) and the Structurizr viewer on `STRUCTURIZR_PORT` (8080). When one of them is taken, `make start` fails with Docker's "port is already allocated" message.
 
-Pick another port for the run, for example:
+Pick another port for the run, other than `LOAD_TEST_APP_PORT` (18081), which the isolated load-test stack publishes, for example:
 
 ```bash
-LOCALSTACK_PORT=14566 make start-deps
+APP_PORT=28081 make start
 ```
 
-`.env` builds `AWS_ENDPOINT_URL_SQS` from `LOCALSTACK_PORT`, so the service and the tests follow the new port. To run a second environment next to the first, also give it its own project name (`PROJECT_NAME=other`), so the containers and volumes do not collide. Each project name gets its own containers, network and volumes.
+To run a second environment next to the first, also give it its own project name (`PROJECT_NAME=other`), so the containers and volumes do not collide. Each project name gets its own containers, network and volumes.
 
 `make ensure-kafka`, which the targets that need the broker run, also publishes the broker's host listener on `127.0.0.1:9095`. That port is fixed (see [`make-targets-service.md`](make-targets-service.md)), also for a second project, so free it when `make ensure-kafka` reports it as allocated.
 

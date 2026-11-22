@@ -1,6 +1,6 @@
 //! The `.env` of the repository against FR-29: a line with the default of every variable of the
-//! table that has one, the local broker in `KAFKA_BOOTSTRAP_SERVERS`, and no line for the variables
-//! without a default.
+//! table that has one, the local broker in the required `KAFKA_BOOTSTRAP_SERVERS`, and no line for
+//! the variables without a default.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -19,7 +19,7 @@ const COMPOSE_FILE: &str = include_str!("../../../../../docker-compose.yml");
 /// The address of the local broker: the `EXTERNAL` listener of the compose stack.
 const LOCAL_BROKER: &str = "localhost:9095";
 
-/// The FR-29 variables that have a default.
+/// The FR-29 variables that have a default, and the required `KAFKA_BOOTSTRAP_SERVERS`.
 const DEFAULTED: [&str; 18] = [
     "KAFKA_BOOTSTRAP_SERVERS",
     "KAFKA_TOPIC",
@@ -57,8 +57,9 @@ fn env_file_variables(contents: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The arguments of `serve` when only `variable` and the required `AWS_REGION` are set: the value
-/// reaches the field that clap binds to the variable, and the process environment is not read.
+/// The arguments of `serve` when only `variable` and the required `KAFKA_BOOTSTRAP_SERVERS` (the
+/// local broker, unless `variable` is that one) are set: the value reaches the field that clap binds
+/// to the variable, and the process environment is not read.
 fn serve_args_with(variable: &str, value: &str) -> ServeArgs {
     let command = ServeArgs::augment_args(Command::new("serve"));
     let flag = command
@@ -68,21 +69,24 @@ fn serve_args_with(variable: &str, value: &str) -> ServeArgs {
         .unwrap()
         .to_owned();
     let assignment = format!("--{flag}={value}");
+    let broker = format!("--kafka-bootstrap-servers={LOCAL_BROKER}");
+    let required = (variable != "KAFKA_BOOTSTRAP_SERVERS").then_some(broker.as_str());
+    let arguments = std::iter::once("serve")
+        .chain(required)
+        .chain(std::iter::once(assignment.as_str()));
     let matches = command
         .mut_args(|argument| argument.env(None::<&'static str>))
-        .try_get_matches_from(["serve", "--aws-region=us-east-1", assignment.as_str()])
+        .try_get_matches_from(arguments)
         .unwrap();
     ServeArgs::from_arg_matches(&matches).unwrap()
 }
 
 /// Whether the line `variable=value` alone leaves the Kafka and stream settings at their defaults,
-/// with the local broker in place of the default one for `KAFKA_BOOTSTRAP_SERVERS`.
+/// with the local broker in `KAFKA_BOOTSTRAP_SERVERS`.
 fn holds_its_default(variable: &str, value: &str) -> bool {
     let defaults = Config::from_args(valid()).unwrap();
     let mut kafka = defaults.kafka;
-    if variable == "KAFKA_BOOTSTRAP_SERVERS" {
-        LOCAL_BROKER.clone_into(&mut kafka.bootstrap_servers);
-    }
+    LOCAL_BROKER.clone_into(&mut kafka.bootstrap_servers);
     Config::from_args(serve_args_with(variable, value))
         .is_ok_and(|config| config.kafka == kafka && config.streams == defaults.streams)
 }

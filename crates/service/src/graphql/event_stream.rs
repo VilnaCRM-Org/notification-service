@@ -11,11 +11,11 @@
 //! FR-19). A subscription body also writes the comment whenever `STREAM_KEEP_ALIVE` passes without
 //! a block, the interval of the other streaming routes, read from the `EventStreamState` in the
 //! schema data (FR-17). The blocks are written as bytes, because `axum::response::sse` cannot write
-//! the bare `data:` line of `complete`.
+//! the bare `data:` line of `complete`; the results that are ready together are written as one
+//! chunk.
 
-use std::borrow::Cow;
 use std::convert::Infallible;
-use std::pin::Pin;
+use std::io::Write as _;
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
@@ -24,17 +24,17 @@ use axum::http::{HeaderName, HeaderValue};
 use axum::response::{IntoResponse as _, Response};
 use event_stream_application::graphql::{StreamLink, StreamPhase};
 use event_stream_application::http::EventStreamState;
+use event_stream_application::http::keep_alive::{COMMENT, with_keep_alive};
 use event_stream_domain::Sequence;
-use futures_util::future;
-use futures_util::stream::{self, BoxStream, Stream, StreamExt as _};
+use futures_util::future::{self, FutureExt as _};
+use futures_util::stream::{self, BoxStream, Fuse, Stream, StreamExt as _};
 use shared_application::http::Problem;
-use tokio::time::{Sleep, sleep};
 
 use crate::graphql::schema::ApiSchema;
 use crate::graphql::single_root;
 
 /// The comment block: the first block of every event stream (FR-17).
-const KEEP_ALIVE: &str = ":\n\n";
+const KEEP_ALIVE: &str = COMMENT;
 
 /// The block that follows a single result, with the bare `data:` line of the protocol.
 const COMPLETE: &str = "event: complete\ndata:\n\n";
@@ -44,7 +44,14 @@ const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering
 
 /// The result written if a result could not be encoded, which `serde_json` never refuses for an
 /// execution result.
-const UNENCODABLE: &str = r#"{"data":null,"errors":[{"message":"Internal server error"}]}"#;
+const UNENCODABLE: &[u8] = br#"{"data":null,"errors":[{"message":"Internal server error"}]}"#;
+
+/// The first capacity of the buffer of a chunk, in bytes.
+const BLOCK_CAPACITY: usize = 512;
+
+/// The size up to which a chunk takes another ready result, in bytes; the block that crosses it
+/// is the last of its chunk.
+const MAX_CHUNK_BYTES: usize = 32_768;
 
 /// The execution results of one operation.
 type Responses = BoxStream<'static, async_graphql::Response>;
@@ -112,50 +119,45 @@ fn single_result(result: Option<async_graphql::Response>) -> impl Stream<Item = 
 
 /// The body of a subscription: the comment, then one `next` block per result with the event id
 /// the field handed to the link, and the comment whenever `keep_alive` passes without a block, also
-/// while a replay waits (FR-17, NFR-2). It ends with the results, without `complete`.
+/// while a replay waits (FR-17, NFR-2); the keep-alive is the lazy one of the SSE route, which
+/// touches no timer per chunk. It ends with the results, without `complete`.
 fn subscription(
     responses: Responses,
     link: StreamLink,
     keep_alive: Duration,
-) -> impl Stream<Item = Bytes> {
-    let body = SubscriptionBody {
-        responses,
+) -> impl Stream<Item = Bytes> + Send {
+    let results = Results {
+        responses: responses.fuse(),
         link,
-        keep_alive,
-        timer: Box::pin(sleep(keep_alive)),
     };
-    stream::once(future::ready(Bytes::from(KEEP_ALIVE))).chain(stream::unfold(body, next_chunk))
+    let blocks = stream::once(future::ready(Bytes::from(KEEP_ALIVE)))
+        .chain(stream::unfold(results, next_chunk));
+    with_keep_alive(blocks, keep_alive)
 }
 
 /// What a subscription body keeps between two chunks.
-struct SubscriptionBody {
-    /// The execution results of the subscription.
-    responses: Responses,
+struct Results {
+    /// The execution results of the subscription; fused, because a chunk may find their end
+    /// before the next chunk asks for it.
+    responses: Fuse<Responses>,
     /// The link that hands over the event id of each result.
     link: StreamLink,
-    /// The longest time without a block (`STREAM_KEEP_ALIVE`).
-    keep_alive: Duration,
-    /// Expires `keep_alive` after the last chunk.
-    timer: Pin<Box<Sleep>>,
 }
 
-/// The next chunk of a subscription body: the `next` block of the next result, or the comment when
-/// the timer expires first; `None` once the results end. Every chunk restarts the timer, in place,
-/// with the deadline `keep_alive` from now (tokio time, which tests can pause; `sleep` adds it
-/// without overflow).
-///
-/// The results are polled first, so a result that is ready is never held back by the comment.
-/// Dropping the `next` future when the timer wins loses nothing: the stream keeps its state.
-async fn next_chunk(mut body: SubscriptionBody) -> Option<(Bytes, SubscriptionBody)> {
-    let chunk = tokio::select! {
-        biased;
-        result = body.responses.next() => {
-            Bytes::from(next_block(&result?, body.link.take_delivered()))
-        }
-        () = &mut body.timer => Bytes::from(KEEP_ALIVE),
-    };
-    body.timer.set(sleep(body.keep_alive));
-    Some((chunk, body))
+/// The next chunk of a subscription body: the `next` block of the next result, joined by the
+/// blocks of the results that are ready without awaiting while the chunk is below
+/// [`MAX_CHUNK_BYTES`]; `None` once the results end. A result that is not ready is not lost when
+/// its poll is dropped: the stream keeps its state.
+async fn next_chunk(mut results: Results) -> Option<(Bytes, Results)> {
+    let first = results.responses.next().await?;
+    let mut chunk = Vec::with_capacity(BLOCK_CAPACITY);
+    push_next_block(&mut chunk, &first, results.link.take_delivered());
+    while chunk.len() < MAX_CHUNK_BYTES
+        && let Some(Some(result)) = results.responses.next().now_or_never()
+    {
+        push_next_block(&mut chunk, &result, results.link.take_delivered());
+    }
+    Some((Bytes::from(chunk), results))
 }
 
 /// The head of every event stream (FR-7) over the blocks of `body`.
@@ -172,14 +174,27 @@ fn stream_answer(body: impl Stream<Item = Bytes> + Send + 'static) -> Response {
         .into_response()
 }
 
-/// The `next` block of `result`: `event: next`, the `id:` line of a subscription result, then the
-/// result as compact JSON on one `data:` line, every line break inside a string escaped.
-fn next_block(result: &async_graphql::Response, id: Option<Sequence>) -> String {
-    let data = serde_json::to_string(result).map_or(Cow::Borrowed(UNENCODABLE), Cow::Owned);
-    id.map_or_else(
-        || format!("event: next\ndata: {data}\n\n"),
-        |id| format!("event: next\nid: {id}\ndata: {data}\n\n"),
-    )
+/// The `next` block of `result` in a buffer of its own (see [`push_next_block`]).
+fn next_block(result: &async_graphql::Response, id: Option<Sequence>) -> Vec<u8> {
+    let mut block = Vec::with_capacity(BLOCK_CAPACITY);
+    push_next_block(&mut block, result, id);
+    block
+}
+
+/// Appends the `next` block of `result`: `event: next`, the `id:` line of a subscription result,
+/// then the result as compact JSON on one `data:` line, every line break inside a string escaped.
+/// The result is encoded straight into the buffer; writing into a `Vec` never fails.
+fn push_next_block(buffer: &mut Vec<u8>, result: &async_graphql::Response, id: Option<Sequence>) {
+    buffer.extend_from_slice(b"event: next\n");
+    if let Some(id) = id {
+        writeln!(buffer, "id: {id}").unwrap_or_default();
+    }
+    buffer.extend_from_slice(b"data: ");
+    let start = buffer.len();
+    let unencodable = serde_json::to_writer(&mut *buffer, result).is_err();
+    buffer.truncate(if unencodable { start } else { buffer.len() });
+    buffer.extend_from_slice(if unencodable { UNENCODABLE } else { &[] });
+    buffer.extend_from_slice(b"\n\n");
 }
 
 #[cfg(test)]

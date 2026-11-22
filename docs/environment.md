@@ -14,19 +14,12 @@ A service that adds variables for its own adapters adds their rows here. The syn
 | `APP_HOST` | IP address | `0.0.0.0` | no | `service serve`; `service healthcheck` (probes this address, or the loopback address when this one is `0.0.0.0` or `::`) | none (Caddy) |
 | `APP_PORT` | integer 0 to 65535 (0 = any free port, for tests) | `8081` | no | `service serve`, `service healthcheck`; compose | listener `:8081` in the Caddyfile |
 | `LOG_LEVEL` | `tracing` filter directives | `info` | no | `service serve` (the other commands write plain text) | none |
-| `AWS_REGION` | string | none | yes for `serve`, `check-config` | `service` | `AWS_SQS_REGION` |
-| `AWS_ENDPOINT_URL_SQS` | `http://` or `https://` URL | unset (regional AWS endpoint) | no | `service` | `AWS_SQS_ENDPOINT_BASE` + `LOCALSTACK_PORT` |
-| `AWS_ACCESS_KEY_ID` | string | unset (the provider's default credential chain: role credentials) | no; both keys set or both unset | validated as a pair by `service serve` and `check-config`; the AWS SDK credential chain reads the value | `AWS_SQS_KEY` |
-| `AWS_SECRET_ACCESS_KEY` | string | unset (the provider's default credential chain: role credentials) | no; both keys set or both unset | validated as a pair by `service serve` and `check-config`; the AWS SDK credential chain reads the value | `AWS_SQS_SECRET` |
-| `SQS_CONNECT_TIMEOUT` | duration | `500ms` | no | `service` | none |
-| `SQS_OPERATION_TIMEOUT` | duration | `2s` | no | `service` (attempt and operation timeout) | none |
-| `SQS_MAX_ATTEMPTS` | integer 1 to 5 | `1` | no | `service` | none |
 | `HEALTH_PROBE_TIMEOUT` | duration | `3s` | no | `service` | none |
 | `HTTP_REQUEST_TIMEOUT` | duration | `10s` | no | `service` | none |
 | `HTTP_MAX_BODY_BYTES` | integer 1 024 to 10 485 760 | `65536` | no | `service` | none |
 | `SHUTDOWN_GRACE_PERIOD` | duration | `10s` | no | `service` | none |
 | `EVENT_TYPES` | comma-separated event type names, 1 to 1 000 distinct names, each 1 to 128 characters matching `^[a-z][a-z0-9]*([._-][a-z0-9]+)*$`; no empty value or entry; a repeated name counts once | unset (an empty catalog) | no | `service` (the catalog of `GET /api/event-types`) | none |
-| `KAFKA_BOOTSTRAP_SERVERS` | comma-separated `host:port`, 1 to 16 entries; host a DNS name, an IPv4 address or a bracketed IPv6 address; port 1 to 65 535; no empty entry | `localhost:9092` | no | `service`; compose (`docker-compose.yml` sets `kafka:9092` in the `app` container, `docker-compose.prod.yml` defaults to `kafka:9092`); `.env` holds `localhost:9095`, the host listener of the local broker that `make ensure-kafka` publishes | none |
+| `KAFKA_BOOTSTRAP_SERVERS` | comma-separated `host:port`, 1 to 16 entries; host a DNS name, an IPv4 address or a bracketed IPv6 address; port 1 to 65 535; no empty entry | none | yes for `serve`, `check-config` | `service`; compose (`docker-compose.yml` sets `kafka:9092` in the `app` container, `docker-compose.prod.yml` requires it from the environment); `.env` holds `localhost:9095`, the host listener of the local broker that `make ensure-kafka` publishes | none |
 | `KAFKA_TOPIC` | Kafka topic name: 1 to 249 characters of `A-Z a-z 0-9 . _ -`, not `.` or `..` | `notifications` | no | `service` (the topic of the events) | none |
 | `KAFKA_SECURITY_PROTOCOL` | `plaintext`, `ssl`, `sasl_plaintext` or `sasl_ssl` | `plaintext` | no | `service`; TLS verifies the broker against the public root certificates the client ships | none |
 | `KAFKA_SASL_MECHANISM` | `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512` | unset | yes with `sasl_plaintext` or `sasl_ssl`; must be unset otherwise | `service` | none |
@@ -38,9 +31,9 @@ A service that adds variables for its own adapters adds their rows here. The syn
 | `KAFKA_FETCH_MAX_WAIT` | duration, `50ms` to `5s` | `500ms` | no | `service` (the long-poll wait of the tail) | none |
 | `KAFKA_RETRY_DELAY` | duration, `100ms` to `1m` | `1s` | no | `service` (the pause after a failed round of the tail) | none |
 | `EVENT_MAX_DATA_BYTES` | integer 1 to 1 048 576 | `65536` | no | `service` (the size limit of a record value) | none |
-| `EVENT_WINDOW_MAX_EVENTS` | integer 1 to 10 000 000 | `100000` | no | `service` (events in the memory window) | none |
-| `EVENT_WINDOW_MAX_BYTES` | integer 2 097 152 to 17 179 869 184 | `67108864` (64 MiB) | no | `service` (bytes in the memory window) | none |
-| `EVENT_WINDOW_START_EVENTS` | integer 0 to 10 000 000 | `100000` | no | `service` (offsets below the end of the topic read at start) | none |
+| `EVENT_WINDOW_MAX_EVENTS` | integer 1 to 10 000 000 | `100000` (the production reference `docker-compose.prod.yml` defaults to `20000`) | no | `service` (events in the memory window); compose | none |
+| `EVENT_WINDOW_MAX_BYTES` | integer 2 097 152 to 17 179 869 184 | `67108864` (64 MiB; the production reference `docker-compose.prod.yml` defaults to `16777216`, 16 MiB, so the window stays small against its 256M memory limit) | no | `service` (bytes in the memory window); compose | none |
+| `EVENT_WINDOW_START_EVENTS` | integer 0 to 10 000 000 | `100000` (the production reference `docker-compose.prod.yml` defaults to `20000`) | no | `service` (offsets below the end of the topic read at start); compose | none |
 | `EVENT_REPLAY_MAX_EVENTS` | integer 1 to 100 000 000 | `1000000` | no | `service` (offsets below the tail a replay may reach) | none |
 | `EVENT_REPLAY_PERMITS` | integer 1 to 64 | `4` | no | `service` (concurrent replay reads and Kafka replay connections of a node) | none |
 | `EVENT_TAIL_STALE_AFTER` | duration, `1s` to `5m` | `10s` | no | `service` (the age at which the readiness probe of the event stream fails) | none |
@@ -49,14 +42,12 @@ A service that adds variables for its own adapters adds their rows here. The syn
 | `STREAM_KEEP_ALIVE` | duration, `1s` to `5m` | `15s` | no | `service` (keep-alive, WebSocket ping, send bound and write deadline of the streams) | none |
 | `CORS_ALLOWED_ORIGINS` | exactly `*`, or comma-separated origins as a browser sends them: scheme `http` or `https`, a host, an optional port, lower case, nothing else; `*` inside a list and an empty entry are invalid | unset (no other origin: no CORS header, and a WebSocket handshake with an `Origin` header is refused) | no | `service` (the CORS layer of the HTTP routes and the origin check of the WebSocket handshake) | none |
 
-Cross-field rules checked at start-up: `HEALTH_PROBE_TIMEOUT >= SQS_OPERATION_TIMEOUT`; `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT`; the two AWS key variables are both set or both unset (the error names the missing one). `KAFKA_CONNECT_TIMEOUT` is not longer than `KAFKA_REQUEST_TIMEOUT`; the three `KAFKA_SASL_*` variables are each required when `KAFKA_SECURITY_PROTOCOL` is `sasl_plaintext` or `sasl_ssl` and must be unset otherwise. The rules between variables are reported after the problems of single variables. A configuration problem never prints the value of a variable.
+Cross-field rules checked at start-up: `HTTP_REQUEST_TIMEOUT > HEALTH_PROBE_TIMEOUT`. `KAFKA_CONNECT_TIMEOUT` is not longer than `KAFKA_REQUEST_TIMEOUT`; the three `KAFKA_SASL_*` variables are each required when `KAFKA_SECURITY_PROTOCOL` is `sasl_plaintext` or `sasl_ssl` and must be unset otherwise. The rules between variables are reported after the problems of single variables. A configuration problem never prints the value of a variable.
 
 ## Compose and local stack
 
 | Name | Type | Default | Required | Consumer | PHP name |
 | --- | --- | --- | --- | --- | --- |
-| `LOCALSTACK_HOST` | host name | `localhost` | no | `.env` interpolation; compose sets `localstack` inside containers | `AWS_SQS_ENDPOINT_BASE` |
-| `LOCALSTACK_PORT` | integer | `4566` | no | compose (the host port of `localstack`); `.env` interpolation; compose sets `4566`, the port inside the compose network, in the `app` container | `LOCALSTACK_PORT` |
 | `STRUCTURIZR_PORT` | integer | `8080` | no | compose | `STRUCTURIZR_PORT` |
 | `GITHUB_TOKEN` | token | unset | no | compose: the source of the build secret `github_token` of the development image; raises the rate limit of the tool downloads | none |
 
@@ -89,7 +80,7 @@ Every variable a caller may set, except `PROJECT_NAME` (see below the table), is
 | `APP_IMAGE` | `$(PROJECT_NAME)-app:prod` | exported; image name used by the compose files | none |
 | `DEV_IMAGE` | `$(PROJECT_NAME)-app:dev` | exported; image name used by the compose files | none |
 | `BUILD_IMAGE` | `1` | exported; `0`: `start`, `build-prod-image` and the isolated-environment wrapper use images that are already built and pass `--no-build` | none |
-| `DEPS` | `localstack` | compose services that `start-deps` starts | none |
+| `DEPS` | `kafka` | compose services that `start-deps` starts | none |
 | `base_ref` | `origin/main` | base of `validate-configuration`, `openapi-diff`, `graphql-diff` and `mutation-tests-diff` | `base_ref` |
 | `CONFIG_CHANGE_APPROVED` | empty | `true` waives the approval of a protected-configuration change (set by CI from the label) | none |
 | `BREAKING_CHANGE_APPROVED` | empty | `true` waives the approval of a breaking API change (set by CI from the label) | none |
@@ -101,7 +92,7 @@ Every variable a caller may set, except `PROJECT_NAME` (see below the table), is
 | `runAverage` | `true` | parameter of `execute-load-tests-script` | `runAverage` |
 | `runStress` | `true` | parameter of `execute-load-tests-script` | `runStress` |
 | `runSpike` | `true` | parameter of `execute-load-tests-script` | `runSpike` |
-| `LOCAL_MODE_ENV` | `false` | `true`: the AWS load scripts talk to LocalStack | none |
+| `LOCAL_MODE_ENV` | `false` | `true`: a dry run; the AWS load scripts call the stub AWS CLI `tests/Load/stub-aws.sh` instead of AWS | none |
 | `region` | empty (the script default applies) | `aws-load-tests`, passed as `-r` | none |
 | `ami` | empty (the script default applies) | `aws-load-tests`, passed as `-a` | none |
 | `instance_type` | empty (the script default applies) | `aws-load-tests`, passed as `-t` | none |
@@ -132,12 +123,9 @@ Four names that the `Makefile` computes are not rows of the table, because the d
 
 | PHP name | Rust name | Note |
 | --- | --- | --- |
-| `AWS_SQS_REGION` | `AWS_REGION` | the standard AWS name |
-| `AWS_SQS_KEY`, `AWS_SQS_SECRET` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | the standard AWS names; both or neither |
-| `AWS_SQS_ENDPOINT_BASE` and `LOCALSTACK_PORT` | `AWS_ENDPOINT_URL_SQS` | one URL; in `.env` it is built from `LOCALSTACK_HOST` and `LOCALSTACK_PORT` |
-| `APP_ENV`, `LOCALSTACK_PORT`, `STRUCTURIZR_PORT` | same names | kept |
+| `APP_ENV`, `STRUCTURIZR_PORT` | same names | kept |
 
-PHP variables that are not carried over: `DB_URL`, `DB_VERSION`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `APP_SECRET`, `AWS_SQS_VERSION`, `EMAIL_QUEUE_NAME`, `MESSENGER_TRANSPORT_DSN`, `CADDY_MERCURE_JWT_SECRET`, `SERVER_NAME`, `APP_RUNTIME_HTTP_ENV`, `XDEBUG_MODE`, `KERNEL_CLASS`, `PANTHER_*`, `SYMFONY_DEPRECATIONS_HELPER`, `LOAD_TEST_CONFIG`, `HTTP_PORT`, `HTTPS_PORT` and `HTTP3_PORT`. The service has no database ([ADR 0020](adr/0020-postgresql-is-removed.md)), and the framework, the mail queue, Mercure, the Caddy server and the PHP debugger have no counterpart in the Rust service.
+PHP variables that are not carried over: `DB_URL`, `DB_VERSION`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `APP_SECRET`, `AWS_SQS_VERSION`, `EMAIL_QUEUE_NAME`, `MESSENGER_TRANSPORT_DSN`, `CADDY_MERCURE_JWT_SECRET`, `SERVER_NAME`, `APP_RUNTIME_HTTP_ENV`, `XDEBUG_MODE`, `KERNEL_CLASS`, `PANTHER_*`, `SYMFONY_DEPRECATIONS_HELPER`, `LOAD_TEST_CONFIG`, `HTTP_PORT`, `HTTPS_PORT`, `HTTP3_PORT`, `AWS_SQS_REGION`, `AWS_SQS_KEY`, `AWS_SQS_SECRET`, `AWS_SQS_ENDPOINT_BASE` and `LOCALSTACK_PORT`. The service has no database ([ADR 0020](adr/0020-postgresql-is-removed.md)) and no message queue ([ADR 0023](adr/0023-sqs-is-removed.md)), and the framework, the mail queue, Mercure, the Caddy server and the PHP debugger have no counterpart in the Rust service.
 
 ## Committed environment files
 
@@ -145,8 +133,8 @@ PHP variables that are not carried over: `DB_URL`, `DB_VERSION`, `DB_PORT`, `DB_
 
 - `.env` holds the development defaults, for the compose stack and for `cargo run -p service -- serve`.
 - `.env.test` holds only the values that differ from `.env` (`APP_ENV=test` and `LOG_LEVEL=warn`), so each value is defined in one place. It is always read after `.env`.
-- `${NAME}` references are resolved by the service (`dotenvy`), by Docker Compose and by `scripts/with-env.sh`, and in all three a value already present in the process environment wins. That is how the same file works on a host (`localhost`) and inside a container, where compose sets `LOCALSTACK_HOST=localstack` and the in-network port `LOCALSTACK_PORT=4566`, so a host port changed in `.env` changes only what compose publishes.
+- `${NAME}` references are resolved by the service (`dotenvy`), by Docker Compose and by `scripts/with-env.sh`, and in all three a value already present in the process environment wins. That is how the same file works on a host and inside a container: `.env` names the host listener of the broker (`localhost:9095`), and compose sets `KAFKA_BOOTSTRAP_SERVERS=kafka:9092`, the in-network listener, in the `app` container.
 - The test targets run with the variables of `.env` and then of `.env.test` exported (`scripts/with-env.sh .env .env.test --`); a variable the caller has already set overrides both. The `Makefile` includes neither file.
 - `scripts/with-env.sh` reads a value like the service and Compose do, for the forms the three read the same way: `NAME=value`, a value in double quotes (`\"`, `\\` and `\n` are unescaped) or in single quotes (literal), and an inline comment after whitespace (`NAME=value # comment`). It refuses with status 2 the forms they read differently: an unquoted value that holds whitespace, a quote or a backslash, a `$` that does not start `${NAME}`, an unknown escape, a quote that does not close on its line, and a comment right after the `=`. Write such a value in quotes.
 - Sourcing a file in a shell (`set -a; . ./.env`) overrides the caller's values and must not be used.
-- The production image contains no env file. Supply every required variable at run time: `AWS_REGION` has no default.
+- The production image contains no env file. Supply every required variable at run time: `KAFKA_BOOTSTRAP_SERVERS` has no default.

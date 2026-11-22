@@ -6,17 +6,13 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::time::Instant;
 
-use crate::support::{READINESS, Scratch, Server, VALID_ENVIRONMENT, messages_of, serve, stack};
+use crate::support::{READINESS, Scratch, Server, is_file_limit, messages_of, serve, stack};
 
 const REQUEST_ID: &str = "serve-test-1";
 
-/// The configuration of a service that starts but whose dependencies do not answer: SQS and the
-/// Kafka broker on port 1, where nothing listens.
-const DEAD_DEPENDENCIES: [(&str, &str); 3] = [
-    ("AWS_REGION", "us-east-1"),
-    ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
-    ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
-];
+/// The configuration of a service that starts but whose broker does not answer: the Kafka broker on
+/// port 1, where nothing listens.
+const DEAD_DEPENDENCIES: [(&str, &str); 1] = [("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1")];
 
 /// Messages written outside a request. `event record rejected` is written by the tail task: at
 /// start-up it reads the last records of the topic of the stack (`EVENT_WINDOW_START_EVENTS`),
@@ -133,6 +129,51 @@ fn the_start_up_entry_names_the_mode() {
         assert_eq!(finished.lines[0]["env"], mode);
         assert_eq!(finished.code, Some(0));
     }
+}
+
+/// The soft open file limit a service is started with to see `serve` raise it.
+#[cfg(target_os = "linux")]
+const LOWERED_FILE_LIMIT: u64 = 512;
+
+/// The soft and hard `Max open files` of the process `pid`, read from `/proc/<pid>/limits`.
+#[cfg(target_os = "linux")]
+fn open_file_limits(pid: u32) -> (u64, u64) {
+    let limits = std::fs::read_to_string(format!("/proc/{pid}/limits")).unwrap();
+    let line = limits
+        .lines()
+        .find(|line| line.starts_with("Max open files"))
+        .unwrap_or_else(|| panic!("no open file limit in {limits}"));
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .collect();
+    assert_eq!(values.len(), 2, "{line}");
+    (values[0], values[1])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_raises_a_lowered_soft_open_file_limit_to_the_hard_limit_at_start_up() {
+    let scratch = Scratch::new();
+    let server = crate::support::serve_with_soft_file_limit(
+        &scratch,
+        LOWERED_FILE_LIMIT,
+        &DEAD_DEPENDENCIES,
+    );
+
+    let (soft, hard) = open_file_limits(server.pid());
+    let entries = server.file_limit.clone();
+    let finished = server.terminate();
+
+    assert!(hard > LOWERED_FILE_LIMIT, "hard limit {hard}");
+    assert_eq!(soft, hard, "the soft limit was not raised");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["message"], "open file limit", "{entries:?}");
+    assert_eq!(entries[0]["level"], "INFO");
+    assert_eq!(entries[0]["before"], LOWERED_FILE_LIMIT);
+    assert_eq!(entries[0]["after"], hard);
+    assert_eq!(finished.code, Some(0));
+    assert_eq!(finished.stderr, "");
 }
 
 /// Returns when the service has accepted the connection opened by `begin` and handed it to its
@@ -278,6 +319,7 @@ fn a_port_in_use_is_one_serve_failed_entry_and_exit_status_1() {
     let lines: Vec<Value> = stdout
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line| !is_file_limit(line))
         .collect();
     assert_eq!(lines.len(), 1, "{stdout}");
     assert_eq!(lines[0]["message"], "serve failed");
@@ -295,7 +337,7 @@ fn an_invalid_variable_is_one_json_entry_per_problem_and_exit_status_2() {
     let scratch = Scratch::new();
     let variables = [
         ("APP_PORT", "eighty"),
-        ("AWS_ENDPOINT_URL_SQS", "ftp://root:hunter2@sqs/queue"),
+        ("CORS_ALLOWED_ORIGINS", "ftp://root:hunter2@h/queue"),
     ];
 
     let output = scratch.run(&["serve"], &variables);
@@ -311,7 +353,14 @@ fn an_invalid_variable_is_one_json_entry_per_problem_and_exit_status_2() {
         .iter()
         .map(|line| line["variable"].as_str().unwrap())
         .collect();
-    assert_eq!(named, ["APP_PORT", "AWS_REGION", "AWS_ENDPOINT_URL_SQS"]);
+    assert_eq!(
+        named,
+        [
+            "APP_PORT",
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "CORS_ALLOWED_ORIGINS"
+        ]
+    );
     for line in &lines {
         assert_eq!(line["message"], "invalid configuration");
         assert_eq!(line["level"], "ERROR");
@@ -341,7 +390,6 @@ fn unreachable_dependencies_do_not_stop_ping_and_health_names_them() {
     assert!(ping_after < Duration::from_secs(5), "{ping_after:?}");
     assert_eq!(health.status, 500);
     assert!(probe_took < Duration::from_secs(4), "{probe_took:?}");
-    assert!(health.body.contains("Message broker"), "{}", health.body);
     assert!(
         health.body.contains("Event stream is not ready"),
         "{}",
@@ -354,17 +402,13 @@ fn unreachable_dependencies_do_not_stop_ping_and_health_names_them() {
 #[test]
 fn the_credentials_are_never_logged() {
     let scratch = Scratch::new();
-    let mut variables = VALID_ENVIRONMENT.to_vec();
-    variables.extend([
-        ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
-        ("AWS_ACCESS_KEY_ID", "reader"),
-        ("AWS_SECRET_ACCESS_KEY", "s3cret-pass"),
+    let variables = [
         ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:1"),
         ("KAFKA_SECURITY_PROTOCOL", "sasl_plaintext"),
         ("KAFKA_SASL_MECHANISM", "PLAIN"),
         ("KAFKA_SASL_USERNAME", "reader"),
         ("KAFKA_SASL_PASSWORD", "s3cret-kafka"),
-    ]);
+    ];
     let mut server = serve(&scratch, &variables);
     server.read_until("event topic unreachable");
     let _answer = server.get("/api/health");
@@ -372,12 +416,13 @@ fn the_credentials_are_never_logged() {
     let finished = server.terminate();
 
     let text = serde_json::to_string(&finished.lines).unwrap();
-    assert!(!text.contains("s3cret-pass"), "{text}");
     assert!(!text.contains("s3cret-kafka"), "{text}");
 }
 
+/// An entry of a nested span inside a request is shown in process by
+/// `panic::an_entry_of_a_nested_span_inside_a_request_carries_the_request_span`.
 #[tokio::test]
-async fn entries_inside_nested_spans_carry_the_request_id() {
+async fn every_entry_of_a_request_carries_the_request_id() {
     let scratch = Scratch::new();
     let mut owned = stack();
     owned.push(("LOG_LEVEL", "debug".to_owned()));
@@ -390,8 +435,7 @@ async fn entries_inside_nested_spans_carry_the_request_id() {
     assert_eq!(health.status, 204, "{}", health.body);
     assert_eq!(finished.code, Some(0));
     // The one request is the only work between the start-up marker and the signal besides the
-    // tail, whose entries are outside requests; entries of start-up (the AWS configuration is read
-    // in spans of its own) come before the marker.
+    // tail, whose entries are outside requests; entries of start-up come before the marker.
     let listening = finished
         .lines
         .iter()
@@ -409,12 +453,7 @@ async fn entries_inside_nested_spans_carry_the_request_id() {
         })
         .filter(|line| !waits_for_readiness(line))
         .collect();
-    assert!(
-        inside
-            .iter()
-            .any(|line| line["span"]["name"] != "http.request"),
-        "no entry was written inside a nested span: {inside:?}"
-    );
+    assert!(!inside.is_empty(), "the request wrote no entry");
     for line in &inside {
         assert_eq!(line["spans"][0]["name"], "http.request", "{line}");
         assert_eq!(line["spans"][0]["request_id"], REQUEST_ID, "{line}");

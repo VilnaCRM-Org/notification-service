@@ -20,7 +20,7 @@ Runbooks for operating the service and for maintaining the repository that hosts
 
 `GET /ping` is the liveness check. It touches no dependency, so a dependency outage never restarts a healthy process. Use `/ping` for container and process liveness and `/api/health` for readiness behind a load balancer.
 
-All probes run concurrently and each has a deadline of `HEALTH_PROBE_TIMEOUT` (default 3 seconds). A probe that hangs counts as failed, and its `cause` is `timed out after 3s`. The SQS adapter has shorter limits of its own (operation 2 seconds, connection 500 milliseconds), so a refused connection reports its real cause and the outer deadline only catches a dependency that hangs.
+All probes run concurrently and each has a deadline of `HEALTH_PROBE_TIMEOUT` (default 3 seconds). A probe that hangs counts as failed, and its `cause` is `timed out after 3s`. No probe does network I/O: the cache probe works in memory and the event-stream probe reads the state the tail already keeps, so a health request costs no call to a backing service ([ADR 0023](adr/0023-sqs-is-removed.md)).
 
 To see the cause, filter the log for the probe line:
 
@@ -41,27 +41,9 @@ Checks:
 
 1. Read the `cause` of the `health probe failed` line with `dependency` equal to `cache`.
 2. For an external cache, connect to it from the service's network with its own client and run a write and a read.
-3. Check that the adapter's connection and operation timeouts are below `HEALTH_PROBE_TIMEOUT`; configuration validation enforces this for the shipped settings, and a new adapter must keep the rule.
+3. Check that the adapter's connection and operation timeouts are below `HEALTH_PROBE_TIMEOUT`; the shipped in-process cache has none, and a new adapter must keep the rule.
 
 No response of the service depends on cache content, so this failure reports a degraded dependency but loses no data.
-
-### `Message broker is not available`
-
-Wire identifier: `dependency` is `message_broker`. The probe calls `ListQueues` with a result limit of one on the SQS endpoint. The call reads account state and creates nothing; it needs only the permission `sqs:ListQueues`.
-
-Likely causes:
-
-- `AWS_ENDPOINT_URL_SQS` points to an endpoint that is down (in development: the `localstack` container is still starting or stopped) or is blank where the regional endpoint is meant;
-- `AWS_REGION` is wrong;
-- the credentials are missing, expired or lack `sqs:ListQueues` (in AWS the default credential chain supplies role credentials; locally `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` come from the environment, both set or both unset);
-- the network blocks the endpoint, or the call exceeds `SQS_OPERATION_TIMEOUT` (default 2 seconds) or `SQS_CONNECT_TIMEOUT` (default 500 milliseconds).
-
-Checks:
-
-1. Read the `cause` of the `health probe failed` line with `dependency` equal to `message_broker`; it holds the SDK error chain.
-2. In development run `docker compose ps` and check that `localstack` is healthy; LocalStack needs 3 to 6 seconds after a cold start.
-3. From the service's network run the AWS CLI against the same endpoint, for example `aws sqs list-queues --max-items 1 --endpoint-url "$AWS_ENDPOINT_URL_SQS"`.
-4. In AWS check the role policy for `sqs:ListQueues`.
 
 ### `Event stream is not ready`
 
@@ -78,11 +60,11 @@ A started node whose probe fails still accepts subscriptions. Check `GET /api/ev
 
 ### Several failures at once
 
-When more than one probe fails, `detail` lists all messages in registration order (cache, message broker, event stream) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
+When more than one probe fails, `detail` lists all messages in registration order (cache, event stream) and `failures` holds one entry for each. Work through each section above independently. A body that contains the message of a healthy dependency is a defect; report it.
 
 ### Starting without dependencies
 
-`serve` does not wait for dependencies. With the SQS endpoint and the Kafka broker down, `/ping` answers at once and `/api/health` answers with the problem document within about 2 seconds, naming the message broker and the event stream, and the log shows `event topic unreachable` once. This is the intended behaviour, not a failure of the service.
+`serve` does not wait for dependencies. With the Kafka broker down, `/ping` answers at once and `/api/health` answers with the problem document naming the event stream, and the log shows `event topic unreachable` once. This is the intended behaviour, not a failure of the service.
 
 ## Logs and request ids
 
@@ -95,7 +77,7 @@ When more than one probe fails, `detail` lists all messages in registration orde
 | `message` | always | fixed text from the list below |
 | `target` | always | Rust module path |
 | event fields | per message | flattened into the top level |
-| `span` | inside a request | the innermost open span: `{"name":"http.request","http.request.method":…,"http.route":…,"url.path":…,"request_id":…}`, or a span opened inside the request (an SQS call opens its own) |
+| `span` | inside a request | the innermost open span: `{"name":"http.request","http.request.method":…,"http.route":…,"url.path":…,"request_id":…}`, or a span opened inside the request |
 | `spans` | inside a request | every open span, outermost first; the first element is always the `http.request` span with the `request_id` |
 
 Fixed messages:
@@ -103,6 +85,8 @@ Fixed messages:
 | Message | Level | Fields | Meaning |
 | --- | --- | --- | --- |
 | `invalid configuration` | ERROR | `variable`, `reason` | one entry per problem; `serve` then exits with status 2 |
+| `open file limit` | INFO | `before`, `after` | at start, the soft limit of open files before and after `serve` raised it to the hard limit (see [Open files, sockets, allocator and build](#open-files-sockets-allocator-and-build)) |
+| `open file limit not raised` | WARN | `error` | at start, the kernel refused to raise the soft limit of open files; `serve` runs with the limit it has, and streams may end with `EMFILE` under load |
 | `listening` | INFO | `addr`, `env`, `version` | start-up marker |
 | `request completed` | INFO | `http.response.status_code`, `duration_ms` | the access log, exactly one per request that reaches the router, `/ping`, 404 and 405 included; a request that the HTTP server refuses itself writes none: on an HTTP/1.1 connection, a request-target over 65 534 bytes gets its bare 414 (maintainer decision M6), a malformed request head its bare 400 and a head of more than 100 header fields its bare 431 (see [Answers before a stream opens](streaming-protocol.md#answers-before-a-stream-opens)) |
 | `request failed` | ERROR | `error` | the error chain behind a 5xx problem |
@@ -126,13 +110,13 @@ Fixed messages:
 | `stopped` | INFO | none | `serve` then exits with status 0 |
 | `serve failed` | ERROR | `error` | bind or runtime failure; `serve` then exits with status 1 |
 
-Lines written outside a request (start-up, shutdown) carry no request span; the AWS SDK writes a few start-up entries at `debug` level inside spans of its own.
+Lines written outside a request (start-up, shutdown) carry no request span.
 
-The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,event_stream_application=debug`. The directive `krafka=error` is always added: the Kafka client writes errors only, and the entries of the event tail report its states. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and the values of the secret variables (`AWS_SECRET_ACCESS_KEY`, `KAFKA_SASL_PASSWORD`) are never logged.
+The level filter is `LOG_LEVEL`. It takes `tracing_subscriber::EnvFilter` directives: a level such as `debug`, or per-target levels such as `info,event_stream_application=debug`. The directive `krafka=error` is always added: the Kafka client writes errors only, and the entries of the event tail report its states. An invalid directive is a configuration error. Request and response bodies, request headers other than the request id, and the value of the secret variable `KAFKA_SASL_PASSWORD` are never logged.
 
 ### Request ids
 
-The header is `x-request-id`. An inbound value is accepted when it matches `^[A-Za-z0-9._-]{1,128}$`; any other value is dropped and a UUID is generated. The id is echoed on every response of the router, including 404, 405, panic and timeout responses. A request that the HTTP server refuses before the router, such as a request-target over 65 534 bytes on an HTTP/1.1 connection, gets no `x-request-id` and is not logged, so a client's complaint about a bare 414 has no log entry to look for (see [Answers before a stream opens](streaming-protocol.md#answers-before-a-stream-opens)). The id is the field `request_id` of the first element of `spans` of every log line of the request, also of the lines written inside a span the request opened (at `debug` level the SQS client writes such lines). To follow one request:
+The header is `x-request-id`. An inbound value is accepted when it matches `^[A-Za-z0-9._-]{1,128}$`; any other value is dropped and a UUID is generated. The id is echoed on every response of the router, including 404, 405, panic and timeout responses. A request that the HTTP server refuses before the router, such as a request-target over 65 534 bytes on an HTTP/1.1 connection, gets no `x-request-id` and is not logged, so a client's complaint about a bare 414 has no log entry to look for (see [Answers before a stream opens](streaming-protocol.md#answers-before-a-stream-opens)). The id is the field `request_id` of the first element of `spans` of every log line of the request, also of the lines written inside a span the request opened. To follow one request:
 
 ```sh
 docker compose logs --no-log-prefix app | jq -c 'select(any(.spans[]?; .request_id == "<id>"))'
@@ -240,13 +224,13 @@ curl -s http://localhost:8081/api/events/status | jq
 
 ### The send bound and HTTP/2
 
-The service sets the socket option `TCP_USER_TIMEOUT` to `STREAM_KEEP_ALIVE` on every connection it accepts. The kernel then ends a connection whose peer leaves sent data unacknowledged, or announces a zero window, for longer than that, and the stream's slot and buffers are freed. A client that reads slowly or idles is not affected: the bound counts only while the kernel waits for the peer. WebSocket writes have a deadline of the same length. This is the only case in which the service ends a connection because of its client, and it writes no log entry for the kernel's part.
+The service sets the socket option `TCP_USER_TIMEOUT` to `STREAM_KEEP_ALIVE` on every connection it accepts. The kernel then ends a connection whose peer leaves sent data unacknowledged, or announces a zero window, for longer than that, and the stream's slot and buffers are freed. A client that reads slowly or idles is not affected: the bound counts only while the kernel waits for the peer. WebSocket writes have a deadline of the same length. Each frame of a write batch, and the batch's flush, has its own deadline, so a client that takes some data in every period is never evicted. This is the only case in which the service ends a connection because of its client, and it writes no log entry for the kernel's part.
 
 The send bound works on Linux, for HTTP/1.1 connections. It does not end an SSE stream, or a GraphQL subscription stream, on an HTTP/2 connection that is stalled by its own flow control while the connection stays alive: such a stream keeps its slot and its buffers until its client leaves. Behind a proxy the bound acts on the proxy's connection to the service, not on the client's connection to the proxy (see [The edge proxy](#the-edge-proxy)).
 
 ### Sizing a node
 
-The memory of a node is bounded by its variables. Size them by this rule: `MAX_SUBSCRIBERS` times the cost of an idle connection, plus `EVENT_WINDOW_MAX_BYTES`, plus `EVENT_REPLAY_PERMITS` replay pages, stays below half the memory limit of the container. The other half is left to what the rule does not count: the runtime and the allocator's own overhead, the HTTP server's write buffers, the frames queued for slow subscribers (at most `SUBSCRIBER_BUFFER` shared frames each), the operating system's socket buffers, and the Kafka client.
+The memory of a node is bounded by its variables. Size them by this rule: `MAX_SUBSCRIBERS` times the cost of an idle connection, plus `EVENT_WINDOW_MAX_BYTES`, plus `EVENT_REPLAY_PERMITS` replay pages, stays below half the memory limit of the container. The other half is left to what the rule does not count: the runtime and the allocator's own overhead, the HTTP server's write buffers, the frames queued for slow subscribers (at most `SUBSCRIBER_BUFFER` shared frames each), the operating system's socket buffers, and the Kafka client. A WebSocket's write buffer holds at most one batch (16 frames, 16 KiB) plus the largest event; when an event reaches every WebSocket subscriber at once, 5 000 of them hold up to about 78 MiB plus 5 000 times the largest event in those buffers, which the other half must cover. What stays allocated after a burst is that buffer: 16 KiB plus the largest frame sent on the connection.
 
 | Part | Cost to count |
 | --- | --- |
@@ -259,7 +243,16 @@ A GraphQL subscription holds what an SSE stream holds, plus the one execution re
 
 `EVENT_WINDOW_MAX_EVENTS` needs no memory budget of its own. The window charges each event its object, its type name and 128 bytes against `EVENT_WINDOW_MAX_BYTES`, so that bound caps the window's memory whatever the count bound is; raising `EVENT_WINDOW_MAX_EVENTS` (default 100 000, at most 10 000 000) adds no memory beyond it. The count bound only shortens the window further: it decides first when `EVENT_WINDOW_MAX_EVENTS` × (128 bytes + the average size of an event's object and type name) is below `EVENT_WINDOW_MAX_BYTES`.
 
-Worked example, with the estimates above: the production reference `docker-compose.prod.yml` gives the service a memory limit of 256 MiB and sets `MAX_SUBSCRIBERS` to 5 000, so the rule leaves 128 MiB. With WebSocket clients only: 5 000 × 6 KiB (about 29 MiB) + 64 MiB + 4 × 1 MiB is about 97 MiB, within the rule. With SSE clients only: 5 000 × 20 KiB (about 98 MiB) + 64 MiB + 4 MiB is about 166 MiB, above it; such a deployment lowers `EVENT_WINDOW_MAX_BYTES` to 16 MiB (`16777216`, about 118 MiB in all) or `MAX_SUBSCRIBERS` to 3 000 (about 127 MiB), or raises the memory limit.
+Worked example, with the estimates above: the production reference `docker-compose.prod.yml` gives the service a memory limit of 256 MiB, sets `MAX_SUBSCRIBERS` to 5 000 and `EVENT_WINDOW_MAX_BYTES` to 16 MiB (`16777216`, with `EVENT_WINDOW_MAX_EVENTS` and `EVENT_WINDOW_START_EVENTS` at 20 000), so the rule leaves 128 MiB. With WebSocket clients only: 5 000 × 6 KiB (about 29 MiB) + 16 MiB + 4 × 1 MiB is about 49 MiB, within the rule. With SSE clients only: 5 000 × 20 KiB (about 98 MiB) + 16 MiB + 4 MiB is about 118 MiB, within it too. With the default window of 64 MiB the SSE case would be about 166 MiB, above the rule; a deployment that needs the larger window lowers `MAX_SUBSCRIBERS` or raises the memory limit.
+
+### Open files, sockets, allocator and build
+
+Every connection holds one file descriptor, so the open-file limit caps the connections of a node before `MAX_SUBSCRIBERS` does. Docker starts a container with a soft limit of 1 024 unless told otherwise, which ends streams with `EMFILE` (`os error 24`) under load. Two settings keep the limit high:
+
+- at start `serve` raises its soft limit of open files (`RLIMIT_NOFILE`) to the hard limit and logs `open file limit` with the fields `before` and `after`; when the kernel refuses, it logs `open file limit not raised` at `WARN` and serves with the limit it has;
+- the compose files give the `app` container `ulimits.nofile` with soft and hard limit 1 048 576, so the raise starts from a high hard limit. Outside compose, set the same limit in the orchestrator (for Kubernetes, on the node's container runtime) and keep `MAX_SUBSCRIBERS` well below it: the Kafka client, the listener and the replays use descriptors too.
+
+Every accepted connection has Nagle's algorithm off (`TCP_NODELAY`), so a small frame written right after another leaves at once instead of waiting for the acknowledgement of the first. The binary keeps the allocator of glibc: measured against mimalloc on a 1-vCPU container, glibc delivered the same fan-out with about 25% less CPU, about a fifth less memory per connection and a p99 several times lower. The release profile builds it with thin link-time optimisation and one code-generation unit (`[profile.release]` of `Cargo.toml`). Panics still unwind, so a panicking handler answers 500 and the process lives on.
 
 How many subscribers one node can serve at what latency has not been measured. The design target of the service is 10 000 subscribers on a node of 4 vCPU and 8 GiB, with a fan-out below 100 ms (99th percentile) at 100 events per second; it is a target, not a measured figure, and the K6 scenario measures a different interval. Plan capacity by the memory rule, watch `subscribers` and the node's CPU, and add nodes for more subscribers. Adding nodes does not raise the event rate the system can carry: every node reads and validates every event of the one partition.
 
@@ -379,7 +372,7 @@ The six Bats groups run one after the other inside stage 7, files in alphabetica
 
 The sum is two seconds above the stage because the first Bats line is counted from the start of the command.
 
-Mutation run of Story 9.3 on commit `3650cd4`, on the same machine with its own backing services of the time (the database, removed since, and LocalStack), the shards run one after the other with the mutation slot of the machine: 665 mutants in 8 shards of 84 (the last one 77), all of them tested, none missed, none timed out. The duration of a shard from its start to its exit, which includes waiting for a free slot and the unmutated baseline build of the shard itself (339 s for the first shard, falling to 11 s for the last as the build directory warmed):
+Mutation run of Story 9.3 on commit `3650cd4`, on the same machine with its own backing services of the time (the database and LocalStack, both removed since), the shards run one after the other with the mutation slot of the machine: 665 mutants in 8 shards of 84 (the last one 77), all of them tested, none missed, none timed out. The duration of a shard from its start to its exit, which includes waiting for a free slot and the unmutated baseline build of the shard itself (339 s for the first shard, falling to 11 s for the last as the build directory warmed):
 
 | Shard | Mutants | Caught | Unviable | Duration |
 | --- | --- | --- | --- | --- |
@@ -460,7 +453,7 @@ Since that run the job `devcontainer-build` also starts the container and checks
 1. `npx --yes @devcontainers/cli@0.90.0 up --workspace-folder .` starts the container with the docker-in-docker entry point and runs its `postCreateCommand`, `make install-hooks && make doctor`; the doctor requires `docker info` to answer.
 2. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . docker info` reaches the inner container engine.
 3. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make format-check` runs a toolchain target with the pinned toolchain.
-4. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make start-deps` starts the services of `DEPS` through compose on the inner engine: LocalStack, and the database as well until its removal (the run below started both).
+4. `npx --yes @devcontainers/cli@0.90.0 exec --workspace-folder . make start-deps` starts the services of `DEPS` through compose on the inner engine: the Kafka broker since [ADR 0023](adr/0023-sqs-is-removed.md); the run below, before it, started LocalStack and the database, both removed since.
 
 The CLI version of every step equals `DEVCONTAINER_CLI_VERSION` of `make/tool-versions.mk` (G31 rule (b)). Run 43119953189 had only the build step. Run 43151995703 (dispatch on commit `da5ea9c`, 2026-11-12, runner label `ubuntu-24.04`), job `Development container build` (job 130963101979), passed every step:
 

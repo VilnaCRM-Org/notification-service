@@ -15,7 +15,6 @@ unmaintained = "all"
 ignore = [
     # { id = "RUSTSEC-0000-0000", reason = "why this is acceptable, and until when" },
     { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, not vulnerable, and has no safe upgrade; it remains only through cucumber 0.23.0 (the newest release), a dev-dependency of the end-to-end tests. Remove when cucumber drops it." },
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable, and has no safe upgrade; it enters only through the test-util feature of aws-smithy-http-client, enabled by the dev-dependency aws-smithy-mocks, so the production binary never compiles it. Remove with SQS." },
 ]
 
 [licenses]

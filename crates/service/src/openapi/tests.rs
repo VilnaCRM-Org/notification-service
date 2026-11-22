@@ -100,7 +100,7 @@ fn json_document() -> Value {
     "get",
     "api_health_get",
     "HealthCheck",
-    ("Checks the health of the service.", "Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
+    ("Checks the health of the service.", "Returns 204 when the cache responds and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
 )]
 #[case(
     "/api/event-types",
@@ -149,7 +149,7 @@ fn json_document() -> Value {
     "get",
     "ping_get",
     "HealthCheck",
-    ("Checks that the process is alive.", "Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.", "200 default")
+    ("Checks that the process is alive.", "Answers `pong` without touching any dependency, so it keeps answering while the cache or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.", "200 default")
 )]
 #[case(
     "/api/docs",
@@ -615,7 +615,10 @@ fn the_route_oracle_skips_the_test_sources() {
 fn config(app_env: &str) -> Config {
     let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         ..ServeArgs::default()
     };
     Config::from_args(args).unwrap()
@@ -712,53 +715,7 @@ async fn the_served_document_is_the_exported_one() {
     assert_eq!(content_type, "application/json");
     let served: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(served, serde_json::to_value(document()).unwrap());
-    let exported = yaml().unwrap();
-    if preserves_member_order() {
-        assert_eq!(member_lines(&exported), member_lines(SNAPSHOT));
-    } else {
-        assert_eq!(exported, SNAPSHOT);
-    }
-}
-
-/// Whether this build keeps the members of a JSON object in the order they were written:
-/// `serde_json`'s `preserve_order`, which a dev-dependency enables in the test build of the whole
-/// workspace, while `make generate-openapi-spec` builds the exporter without it and so writes the
-/// members of every example sorted. `make validate-contract-snapshots` compares the bytes of that
-/// build.
-fn preserves_member_order() -> bool {
-    json!({"b": 1, "a": 2})
-        .as_object()
-        .unwrap()
-        .keys()
-        .next()
-        .is_some_and(|key| key == "b")
-}
-
-/// The lines of a YAML text, the dash of a sequence item read as indentation, sorted: equal for
-/// two texts that differ only in the order of the members of their maps.
-fn member_lines(text: &str) -> Vec<String> {
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(|line| {
-            let content = line.trim_start();
-            let indent = " ".repeat(line.len().saturating_sub(content.len()));
-            content
-                .strip_prefix("- ")
-                .map_or_else(|| line.to_owned(), |item| format!("{indent}  {item}"))
-        })
-        .collect();
-    lines.sort_unstable();
-    lines
-}
-
-#[test]
-fn the_member_lines_ignore_only_the_order_of_the_members() {
-    let sorted = "a:\n  b: 1\n  c:\n  - d: 2\n    e: 3\n";
-    let written = "a:\n  c:\n  - e: 3\n    d: 2\n  b: 1\n";
-    let changed = "a:\n  c:\n  - e: 3\n    d: 4\n  b: 1\n";
-
-    assert_eq!(member_lines(sorted), member_lines(written));
-    assert_ne!(member_lines(sorted), member_lines(changed));
+    assert_eq!(yaml().unwrap(), SNAPSHOT);
 }
 
 /// The values of every `href` and `src` attribute of `page`.

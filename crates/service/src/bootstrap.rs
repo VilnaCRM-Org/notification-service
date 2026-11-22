@@ -18,13 +18,12 @@ use event_stream_infrastructure::KafkaTopic;
 use health_check_application::HealthCheckState;
 use health_check_application::HealthService;
 use health_check_domain::HealthProbe;
-use health_check_infrastructure::{CacheProbe, SqsProbe};
+use health_check_infrastructure::CacheProbe;
 use shared_domain::{Clock, EventBus, QueryBus, UuidGenerator};
 use shared_infrastructure::bus::{DuplicateHandler, InMemoryEventBus, InMemoryQueryBus};
 use shared_infrastructure::cache::MokaCache;
 use shared_infrastructure::clock::SystemClock;
 use shared_infrastructure::id::UuidV7Generator;
-use shared_infrastructure::messaging::sqs_client;
 use tokio::sync::watch;
 
 use crate::background::Background;
@@ -38,8 +37,7 @@ use crate::http::router::assemble;
 /// Every driven port of the application.
 #[derive(Debug)]
 pub struct Adapters {
-    /// Health probes in the order cache, message broker; [`application`] appends the probe of the
-    /// event stream.
+    /// Health probes, the cache first; [`application`] appends the probe of the event stream.
     pub probes: Vec<Arc<dyn HealthProbe>>,
     /// Bus of the domain events, built by [`event_bus`]; no handler publishes to it yet, so it
     /// waits for the first context that registers one.
@@ -65,27 +63,24 @@ pub enum BootstrapError {
 }
 
 impl Adapters {
-    /// The production wiring: an in-process cache behind the cache probe, the SQS client, the
-    /// in-process event bus and the three readers of the event topic.
+    /// The production wiring: an in-process cache behind the cache probe, the in-process event
+    /// bus and the three readers of the event topic.
     ///
-    /// Nothing here touches the network; the SQS client connects on its first call, and each
-    /// reader of the topic connects when it is first called.
-    pub async fn connect(config: &Config) -> Self {
-        let sqs = sqs_client(&config.sqs).await;
+    /// Nothing here touches the network, so the future is ready at once; each reader of the topic
+    /// connects when it is first called. The start-up path awaits it, so an adapter that must
+    /// connect first needs no caller change.
+    pub fn connect(config: &Config) -> impl Future<Output = Self> + use<> {
         let cache = Arc::new(MokaCache::new());
         let topic = KafkaTopic::new(config.kafka.clone());
-        Self {
-            probes: vec![
-                Arc::new(CacheProbe::new(cache)),
-                Arc::new(SqsProbe::new(sqs)),
-            ],
+        std::future::ready(Self {
+            probes: vec![Arc::new(CacheProbe::new(cache))],
             event_bus: event_bus(),
             clock: Arc::new(SystemClock),
             uuid_generator: Arc::new(UuidV7Generator),
             topic_probe: Arc::new(topic.probe()),
             topic_tail: Box::new(topic.tail()),
             topic_replay: Arc::new(topic.replay()),
-        }
+        })
     }
 
     /// Replaces the probe of the same dependency; the order and the other probes are kept.

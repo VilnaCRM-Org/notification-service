@@ -6,11 +6,13 @@
 //! [`EventPublisher`] and `replay_capped` the method of [`SubscriberCount`], so that each name
 //! has one definition.
 //!
-//! Every method is one synchronous section under the registry mutex; no lock is held across an
-//! await, and a poisoned mutex is taken over.
+//! Every method that reads or changes the registry is one synchronous section under the registry
+//! mutex; no lock is held across an await, and a poisoned mutex is taken over. The count of
+//! subscribers and whether the hub closed are also published outside the mutex, so the status
+//! reads and the steps of a subscription never wait for it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use axum::http::StatusCode;
@@ -142,6 +144,8 @@ pub struct Hub {
     settings: HubSettings,
     registry: Mutex<Registry>,
     count: watch::Sender<usize>,
+    /// Set with [`Registry::closed`], under the mutex; read without it.
+    closed: AtomicBool,
     replay_capped: AtomicU64,
 }
 
@@ -153,6 +157,7 @@ impl Hub {
             settings,
             registry: Mutex::new(Registry::default()),
             count: watch::Sender::new(0),
+            closed: AtomicBool::new(false),
             replay_capped: AtomicU64::new(0),
         })
     }
@@ -224,6 +229,7 @@ impl Hub {
     pub fn close(&self) {
         let mut registry = self.lock();
         registry.closed = true;
+        self.closed.store(true, Ordering::Release);
         registry.by_type.clear();
         for entry in registry.subscribers.values_mut() {
             entry.sender = None;
@@ -231,16 +237,17 @@ impl Hub {
         drop(registry);
     }
 
-    /// True once [`Hub::close`] ran.
+    /// True once [`Hub::close`] ran; read without the registry mutex.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.lock().closed
+        self.closed.load(Ordering::Acquire)
     }
 
-    /// The number of connections registered.
+    /// The number of connections registered, as last published under the registry mutex; read
+    /// without it.
     #[must_use]
     pub fn subscriber_count(&self) -> usize {
-        self.lock().subscribers.len()
+        *self.count.borrow()
     }
 
     /// The number of event types with at least one armed subscriber.
@@ -319,6 +326,12 @@ impl Subscriber {
     /// the hub closed.
     pub async fn recv(&mut self) -> Option<Arc<Frame>> {
         self.receiver.recv().await
+    }
+
+    /// The next queued frame without waiting; `None` when the queue is empty or ended, which
+    /// [`Subscriber::recv`] then tells apart.
+    pub fn try_recv(&mut self) -> Option<Arc<Frame>> {
+        self.receiver.try_recv().ok()
     }
 
     /// A new, empty queue after [`Subscriber::recv`] returned `None`, indexed under the current

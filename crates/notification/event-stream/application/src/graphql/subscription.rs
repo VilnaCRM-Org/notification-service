@@ -1,20 +1,25 @@
 //! The GraphQL subscription of the event stream: the per-request link between a subscription
-//! transport and the `events` field, the `Event` object, built in the subscriber's task from the
-//! frame that the hub shares (NFR-1), and the subscription root.
+//! transport and the `events` field, the `Event` object, which resolves from the frame that the
+//! hub shares (NFR-1), so the event object is read once per event and not once per subscriber,
+//! and the subscription root.
 //!
 //! The field checks its arguments, registers one hub subscriber and reports through the link
 //! whether the hub took or refused it. Its stream takes no step until the transport releases the
 //! link, so nothing reads the window or the broker before the head (FR-9, NFR-2); then it yields
 //! one `Event` per frame and hands each event id to the link (FR-10).
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_graphql::{Context, Json, SimpleObject};
+use async_graphql::parser::types::Field;
+use async_graphql::registry::Registry;
+use async_graphql::{
+    Context, ContextSelectionSet, Json, Object, OutputType, Positioned, ServerResult,
+};
 use axum::http::HeaderValue;
 use event_stream_domain::Sequence;
 use futures_util::stream::{self, Stream, StreamExt as _};
-use serde::Deserialize;
 use shared_application::graphql::problem_to_error;
 use shared_application::http::Problem;
 use tokio::sync::watch;
@@ -139,42 +144,62 @@ impl StreamLink {
     }
 }
 
-/// An event of a subscribed type: the same object as a WebSocket frame.
-#[derive(Debug, Clone, PartialEq, Eq, SimpleObject)]
-#[graphql(name = "Event")]
+/// An event of a subscribed type: the same object as a WebSocket frame. It holds the frame the hub
+/// shares, so its fields are read from the frame and not built per subscriber.
+#[derive(Debug, Clone)]
 pub struct EventObject {
+    frame: Arc<Frame>,
+}
+
+impl From<Arc<Frame>> for EventObject {
+    fn from(frame: Arc<Frame>) -> Self {
+        Self { frame }
+    }
+}
+
+/// An event of a subscribed type: the same object as a WebSocket frame.
+#[Object(name = "Event")]
+impl EventObject {
     /// Event id: the Kafka offset of the event plus one, in decimal; the cursor of a resume.
-    pub id: String,
+    async fn id(&self) -> &str {
+        self.frame.id()
+    }
+
     /// Event type name.
     #[graphql(name = "type")]
-    pub event_type: String,
+    async fn event_type(&self) -> &str {
+        self.frame.event_type().as_str()
+    }
+
     /// The event object the producer wrote: envelope id, type, occurredAt and data.
     // More than half of the complexity limit 1 000: a document selects `data` at most once (FR-1).
     #[graphql(complexity = 501)]
-    pub data: Json<async_graphql::Value>,
+    async fn data(&self) -> EventData<'_> {
+        EventData(self.frame.graphql_data())
+    }
 }
 
-/// The member `data` of a frame's WebSocket text; serde skips its members `id` and `type`.
-#[derive(Debug, Deserialize)]
-struct FrameData {
-    /// The event object, its members in the producer's order whatever the features of
-    /// `serde_json`.
-    data: async_graphql::Value,
-}
+/// The event object of a frame as the `JSON` scalar: the type of `Json<async_graphql::Value>`,
+/// resolved by a clone of the value the frame read once, where `Json` would encode its value
+/// again for every subscriber.
+#[derive(Debug)]
+struct EventData<'frame>(&'frame async_graphql::Value);
 
-impl From<&Frame> for EventObject {
-    /// `id` from the sequence, `type` from the event type and `data` from the member `data` of the
-    /// WebSocket text. A text that cannot be read gives a `null` `data`; `Frame::encode` never
-    /// writes one, because it wraps the stored event's JSON.
-    fn from(frame: &Frame) -> Self {
-        Self {
-            id: frame.sequence.to_string(),
-            event_type: frame.event_type.as_str().to_owned(),
-            data: Json(
-                serde_json::from_str::<FrameData>(frame.json.as_str())
-                    .map_or(async_graphql::Value::Null, |read| read.data),
-            ),
-        }
+impl OutputType for EventData<'_> {
+    fn type_name() -> Cow<'static, str> {
+        <Json<async_graphql::Value> as OutputType>::type_name()
+    }
+
+    fn create_type_info(registry: &mut Registry) -> String {
+        <Json<async_graphql::Value> as OutputType>::create_type_info(registry)
+    }
+
+    fn resolve(
+        &self,
+        _ctx: &ContextSelectionSet<'_>,
+        _field: &Positioned<Field>,
+    ) -> impl Future<Output = ServerResult<async_graphql::Value>> + Send {
+        std::future::ready(Ok(self.0.clone()))
     }
 }
 
@@ -246,8 +271,8 @@ fn events(subscription: Subscription, link: StreamLink) -> impl Stream<Item = Ev
 /// could not read Kafka (FR-19 (c)), and nothing when the hub closed.
 async fn next_event((mut subscription, link): Live) -> Option<(EventObject, Live)> {
     if let Some(frame) = subscription.next().await {
-        link.delivered(frame.sequence);
-        return Some((EventObject::from(&*frame), (subscription, link)));
+        link.delivered(frame.sequence());
+        return Some((EventObject::from(frame), (subscription, link)));
     }
     if let Some(error) = subscription.failure() {
         log_replay_failed(TRANSPORT, error);

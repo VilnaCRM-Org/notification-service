@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Run the load tests on a temporary EC2 instance (make aws-load-tests), or against LocalStack with
-# LOCAL_MODE_ENV=true. The host needs Docker and git only. Options and environment: see config.sh.
+# Run the load tests on a temporary EC2 instance (make aws-load-tests), or a dry run against the stub AWS CLI
+# stub-aws.sh with LOCAL_MODE_ENV=true. The host needs Docker and git only (the dry run: git only). Options and environment: see config.sh.
 #
 # The names of every resource carry a run id and are written to tests/Load/aws-run.env before the first
 # resource is created; cleanup.sh (make aws-load-tests-cleanup) reads that file.
 # Set wait=false to launch the instance without waiting for the results.
-# Exit status: 0 success (also the LocalStack dry run); 1 a previous run was not cleaned up, there is
+# Exit status: 0 success (also the dry run); 1 a previous run was not cleaned up, there is
 # no default VPC, the bucket policy or the instance launch failed after its retries, or the run
 # failed or timed out; any other failed AWS CLI call passes its own status through (255); 2 the
 # configuration is unusable.
@@ -76,11 +76,7 @@ echo "Repository branch: ${BRANCH_NAME}"
 echo "Resource names are recorded in ${RUN_FILE#"${REPO_ROOT}/"}"
 
 if [[ -z ${AMI_ID} ]]; then
-  if [[ ${LOCAL_MODE} == true ]]; then
-    AMI_ID=${LOCAL_AMI_ID}
-  else
-    AMI_ID="$(AWS_CLI ssm get-parameter --name "${AMI_PARAMETER}" --query Parameter.Value --output text)"
-  fi
+  AMI_ID="$(AWS_CLI ssm get-parameter --name "${AMI_PARAMETER}" --query Parameter.Value --output text)"
 fi
 echo "Instance type: ${INSTANCE_TYPE}, AMI: ${AMI_ID}"
 
@@ -167,7 +163,7 @@ echo "Launched instance: ${INSTANCE_ID}"
 echo "You can access the S3 bucket here: https://${REGION}.console.aws.amazon.com/s3/buckets/${BUCKET_NAME}?region=${REGION}&bucketType=general"
 
 if [[ ${LOCAL_MODE} == true ]]; then
-  echo "Local mode: the emulator does not execute user data, so the wait for results is skipped."
+  echo "Local mode: the stub AWS CLI starts no instance, so the wait for results is skipped."
   exit 0
 fi
 if [[ ${wait:-true} == false ]]; then
