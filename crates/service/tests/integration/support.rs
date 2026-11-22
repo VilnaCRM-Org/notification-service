@@ -48,7 +48,32 @@ impl Scratch {
     /// test process has it, so that coverage of the child is recorded.
     pub(crate) fn service(&self, arguments: &[&str], variables: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
-        command.args(arguments).env_clear().current_dir(&self.path);
+        command.args(arguments);
+        self.environment(command, variables)
+    }
+
+    /// The binary as [`Scratch::service`] gives it, started by `/bin/sh` once the shell has
+    /// lowered its soft open file limit to `soft`; the shell `exec`s the binary, so the process
+    /// keeps the id of the spawned child.
+    pub(crate) fn service_with_soft_file_limit(
+        &self,
+        soft: u64,
+        arguments: &[&str],
+        variables: &[(&str, &str)],
+    ) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!(r#"ulimit -Sn {soft} && exec "$0" "$@""#))
+            .arg(env!("CARGO_BIN_EXE_service"))
+            .args(arguments);
+        self.environment(command, variables)
+    }
+
+    /// `command` with a cleared environment plus `variables` and `LLVM_PROFILE_FILE`, run in the
+    /// directory.
+    fn environment(&self, mut command: Command, variables: &[(&str, &str)]) -> Command {
+        command.env_clear().current_dir(&self.path);
         if let Some(profile) = from_environment("LLVM_PROFILE_FILE") {
             command.env("LLVM_PROFILE_FILE", profile);
         }
@@ -176,6 +201,8 @@ pub(crate) struct Server {
     pub(crate) port: u16,
     /// Every log line read so far but the entry of the open file limit.
     pub(crate) lines: Vec<Value>,
+    /// The entries of the open file limit read so far, kept out of `lines`.
+    pub(crate) file_limit: Vec<Value>,
 }
 
 /// How long a test waits for the next line of a service before it fails.
@@ -223,10 +250,31 @@ impl Finished {
 /// Starts `service serve` on `127.0.0.1` with an ephemeral port and waits for its `listening`
 /// entry. `variables` complete the configuration (`KAFKA_BOOTSTRAP_SERVERS`, ..).
 pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
+    let all = serve_variables(variables);
+    started(scratch.service(&["serve"], &all))
+}
+
+/// Starts `service serve` as [`serve`] does, with its soft open file limit lowered to `soft`
+/// before the binary runs.
+pub(crate) fn serve_with_soft_file_limit(
+    scratch: &Scratch,
+    soft: u64,
+    variables: &[(&str, &str)],
+) -> Server {
+    let all = serve_variables(variables);
+    started(scratch.service_with_soft_file_limit(soft, &["serve"], &all))
+}
+
+/// `variables` after the loopback host and the ephemeral port.
+fn serve_variables<'a>(variables: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
     let mut all = vec![("APP_PORT", "0"), ("APP_HOST", "127.0.0.1")];
     all.extend_from_slice(variables);
-    let mut child = scratch
-        .service(&["serve"], &all)
+    all
+}
+
+/// Spawns `command` (a `serve` process) and waits for its `listening` entry.
+fn started(mut command: Command) -> Server {
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -239,6 +287,7 @@ pub(crate) fn serve(scratch: &Scratch, variables: &[(&str, &str)]) -> Server {
         stderr,
         port: 0,
         lines: Vec::new(),
+        file_limit: Vec::new(),
     };
     let listening = server.read_until("listening").pop().unwrap();
     server.port = listening["addr"]
@@ -265,6 +314,7 @@ impl Server {
                 });
             let json: Value = serde_json::from_str(&line).unwrap();
             if is_file_limit(&json) {
+                self.file_limit.push(json);
                 continue;
             }
             let found = json["message"] == message;
@@ -329,6 +379,11 @@ impl Server {
     pub(crate) fn refuses_connections(&self) -> bool {
         TcpStream::connect(("127.0.0.1", self.port))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    }
+
+    /// The process id of the service.
+    pub(crate) fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Sends a signal (`TERM` or `INT`) with `kill`.

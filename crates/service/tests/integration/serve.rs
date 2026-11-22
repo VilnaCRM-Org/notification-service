@@ -131,6 +131,51 @@ fn the_start_up_entry_names_the_mode() {
     }
 }
 
+/// The soft open file limit a service is started with to see `serve` raise it.
+#[cfg(target_os = "linux")]
+const LOWERED_FILE_LIMIT: u64 = 512;
+
+/// The soft and hard `Max open files` of the process `pid`, read from `/proc/<pid>/limits`.
+#[cfg(target_os = "linux")]
+fn open_file_limits(pid: u32) -> (u64, u64) {
+    let limits = std::fs::read_to_string(format!("/proc/{pid}/limits")).unwrap();
+    let line = limits
+        .lines()
+        .find(|line| line.starts_with("Max open files"))
+        .unwrap_or_else(|| panic!("no open file limit in {limits}"));
+    let values: Vec<u64> = line
+        .split_whitespace()
+        .filter_map(|word| word.parse().ok())
+        .collect();
+    assert_eq!(values.len(), 2, "{line}");
+    (values[0], values[1])
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_raises_a_lowered_soft_open_file_limit_to_the_hard_limit_at_start_up() {
+    let scratch = Scratch::new();
+    let server = crate::support::serve_with_soft_file_limit(
+        &scratch,
+        LOWERED_FILE_LIMIT,
+        &DEAD_DEPENDENCIES,
+    );
+
+    let (soft, hard) = open_file_limits(server.pid());
+    let entries = server.file_limit.clone();
+    let finished = server.terminate();
+
+    assert!(hard > LOWERED_FILE_LIMIT, "hard limit {hard}");
+    assert_eq!(soft, hard, "the soft limit was not raised");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0]["message"], "open file limit", "{entries:?}");
+    assert_eq!(entries[0]["level"], "INFO");
+    assert_eq!(entries[0]["before"], LOWERED_FILE_LIMIT);
+    assert_eq!(entries[0]["after"], hard);
+    assert_eq!(finished.code, Some(0));
+    assert_eq!(finished.stderr, "");
+}
+
 /// Returns when the service has accepted the connection opened by `begin` and handed it to its
 /// task. A service accepts connections in the order they were made, so an answered request on a
 /// later connection proves that the earlier one was accepted. It does not prove that the task of
