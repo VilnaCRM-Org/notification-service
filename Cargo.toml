@@ -52,7 +52,7 @@ jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 krafka = { version = "=0.32.0", default-features = false, features = ["rustls-aws-lc-rs"] }
 moka = { version = "0.12.16", features = ["future"] }
 # Raises the soft limit of open files of `serve` to the hard limit without unsafe code.
-rlimit = "0.10.2"
+rlimit = "0.11.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
@@ -81,7 +81,7 @@ http-body-util = "0.1.5"
 proptest = "1.12.0"
 rand = "0.10.3"
 rstest = "0.28.0"
-tokio-tungstenite = "0.29.0"
+tokio-tungstenite = "0.30.0"
 
 # Tooling (xtask)
 cargo_metadata = "0.23.1"
