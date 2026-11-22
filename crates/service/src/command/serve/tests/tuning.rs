@@ -13,7 +13,7 @@ use test_support::log::LogRecorder;
 use tokio::net::TcpStream;
 use tracing::Level;
 
-use super::{
+use crate::command::serve::{
     LISTEN_BACKLOG, THREAD_NAME, listen_on, log_file_limit, prepare_connection, raise_file_limit,
     serving_runtime, socket_for,
 };

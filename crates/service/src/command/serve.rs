@@ -292,7 +292,3 @@ pub fn reject(errors: &ConfigErrors) -> ExitCode {
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-#[path = "serve/tests/tuning.rs"]
-mod tuning_tests;
