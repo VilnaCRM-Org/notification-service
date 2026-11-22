@@ -131,6 +131,22 @@ One row per measurement. Add a row for every new measurement; do not overwrite o
 | `subscriptions` | `average` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 1.20, 1.08, 7.54; delivery 6, 6, 42 | catalog 50 (3 x 7.54 = 22.62, rounded up to 30, floor 50), delivery 130 (3 x 42 = 126, rounded up to 130) | catalog 50, delivery 130 |
 | `subscriptions` | `stress` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 9.08, 77.35, 48.49; delivery 26, 102, 89 | catalog 240 (3 x 77.35 = 232.05, rounded up to 240), delivery 310 (3 x 102 = 306, rounded up to 310) | catalog 240, delivery 310 |
 | `subscriptions` | `spike` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 213.98, 8.45, 6.40; delivery 275, 36, 27 | catalog 650 (3 x 213.98 = 641.94, rounded up to 650), delivery 830 (3 x 275 = 825, rounded up to 830) | catalog 650, delivery 830 |
+| `health` | `smoke` | 4-vCPU GitHub-hosted runner, job `Smoke load tests` of pull request #11 (commit `b3406b5`), every check passed | 2026-11-22 | 1.05 | 50 (3 x 1.05 = 3.15, rounded up to 10, floor 50) | 50 |
+| `subscriptions` | `smoke` | 4-vCPU GitHub-hosted runner, job `Smoke load tests` of pull request #11 (commit `b3406b5`), every check passed | 2026-11-22 | catalog 3.32; delivery 12 | catalog 50 (3 x 3.32 = 9.96, rounded up to 10, floor 50), delivery 50 (3 x 12 = 36, rounded up to 40, floor 50) | catalog 50, delivery 50 |
+
+### Capacity on one vCPU
+
+On 2026-11-22 the production image was also measured outside the k6 profiles, with the service container limited to one vCPU on the same laptop, against the image of `main` before this change. These are capacity figures, not budgets, and no budget derives from them.
+
+| Measurement | Before | After |
+| --- | --- | --- |
+| Health requests per second | collapsed at about 350 | 8000 at a p99 of 34 ms |
+| Catalog requests per second | not measured | about 16000 |
+| Fan-out p99 at 9000 messages per second | 92 ms | 43 ms |
+| Fan-out p99 at 18000 messages per second | 203 ms | 86 ms |
+| Fan-out p99 at 27000 messages per second | 17554 ms | 165 ms |
+| CPU at 18000 messages per second | 42.5% | 32% |
+| Resident memory with 3000 SSE subscribers | 148 MiB | 145 MiB |
 
 ## Running the tests
 

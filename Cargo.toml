@@ -50,7 +50,6 @@ dotenvy = "0.15.7"
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc", "sink"] }
 jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 krafka = { version = "=0.32.0", default-features = false, features = ["rustls-aws-lc-rs"] }
-# The global allocator of the service binary: per-thread heaps instead of glibc arenas sized by host cores.
 moka = { version = "0.12.16", features = ["future"] }
 # Raises the soft limit of open files of `serve` to the hard limit without unsafe code.
 rlimit = "0.10.2"

@@ -252,7 +252,7 @@ With a list or `*` the service answers every `OPTIONS` request itself, also for 
 
 The reasons not given above use the existing texts (`must be one of ...`, `must be an integer from <a> to <b>`, `must be a duration from <a> to <b>`, `must not be empty`, `is required when KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`, `must not be set unless KAFKA_SECURITY_PROTOCOL is sasl_plaintext or sasl_ssl`). `.env` holds a line for each variable that has a default, written with that default, except `KAFKA_BOOTSTRAP_SERVERS`, whose line holds the address of the local broker. `EVENT_TYPES`, the three `KAFKA_SASL_*` variables and `CORS_ALLOWED_ORIGINS` have no line in `.env`. TLS (`ssl`, `sasl_ssl`) verifies the broker against the public root certificates the client ships; no custom root and no client certificate is configured.
 
-Gone with the first plan, and never read: `NODE_ID`, `CLUSTER_LEASE_TTL`, `CLUSTER_RENEW_INTERVAL`, `EVENT_QUEUE_URL`, `EVENT_RETENTION`, `EVENT_RELAY_POLL_INTERVAL`, `LOAD_TEST_LOCALSTACK_PORT`. Gone with PostgreSQL (FR-31): `DATABASE_URL`, `DATABASE_MAX_CONNECTIONS`, `DATABASE_ACQUIRE_TIMEOUT`, `DATABASE_STATEMENT_TIMEOUT`, `DATABASE_WAIT_TIMEOUT`, `DB_VERSION`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `SQLX_OFFLINE`, and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`. The template's other variables (`APP_ENV`, `HTTP_*`, `HEALTH_PROBE_TIMEOUT`, `SHUTDOWN_GRACE_PERIOD`, `AWS_*`, `SQS_*` and the rest) keep their meaning; `AWS_REGION` stays required because the template's SQS parts stay (design decision D11).
+Gone with the first plan, and never read: `NODE_ID`, `CLUSTER_LEASE_TTL`, `CLUSTER_RENEW_INTERVAL`, `EVENT_QUEUE_URL`, `EVENT_RETENTION`, `EVENT_RELAY_POLL_INTERVAL`, `LOAD_TEST_LOCALSTACK_PORT`. Gone with PostgreSQL (FR-31): `DATABASE_URL`, `DATABASE_MAX_CONNECTIONS`, `DATABASE_ACQUIRE_TIMEOUT`, `DATABASE_STATEMENT_TIMEOUT`, `DATABASE_WAIT_TIMEOUT`, `DB_VERSION`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `SQLX_OFFLINE`, and the rule `HEALTH_PROBE_TIMEOUT >= DATABASE_ACQUIRE_TIMEOUT`. The template's other variables (`APP_ENV`, `HTTP_*`, `HEALTH_PROBE_TIMEOUT`, `SHUTDOWN_GRACE_PERIOD`, `AWS_*`, `SQS_*` and the rest) keep their meaning; `AWS_REGION` stays required because the template's SQS parts stay (design decision D11). Superseded on 2026-11-22: [ADR 0023](../../docs/adr/0023-sqs-is-removed.md) removed SQS, the `AWS_*` and `SQS_*` variables and LocalStack, and made `KAFKA_BOOTSTRAP_SERVERS` required.
 
 Constants and not variables, because no deployment has to tune them: the watermark period of 1 s (FR-21); the replay page of 500 records and 1 MiB and the replay poll wait of 100 ms (FR-14); the window scan bound of 10 000 entries per read (FR-13); the WebSocket limits (FR-11); the 2 s of the shutdown wait (FR-27); the preflight age of 600 s (FR-28).
 
@@ -272,7 +272,7 @@ Constants and not variables, because no deployment has to tune them: the waterma
 
 - no crate depends on `sqlx`, and `Cargo.toml`, `Cargo.lock` and every manifest name no `sqlx` and no `some-module-*` crate;
 - `service` has no `migrate` command; `service --help`, `service serve --help` and `service check-config --help` name no `DATABASE_*` variable;
-- the composition root builds no pool, the health report has no database probe and `Dependency::Database` does not exist; `GET /api/health` reports the cache, the message broker (SQS, template) and the event stream (FR-20);
+- the composition root builds no pool, the health report has no database probe and `Dependency::Database` does not exist; `GET /api/health` reports the cache, the message broker (SQS, template) and the event stream (FR-20); since ADR 0023 of 2026-11-22 it reports the cache and the event stream only;
 - `migrations/` and `.sqlx/` do not exist, and no file refers to them, except `.templatesyncignore`, which keeps both out of the template sync (FR-32) so that a sync never brings them back, and the documents that record their removal;
 - `service serve` and `service check-config` succeed with no database variable set.
 
@@ -432,7 +432,7 @@ A healthy node writes `event tail ready` once and is otherwise silent while it w
 | Several partitions or several topics | A later issue; the growth path is a short list of offsets as the cursor. |
 | The schema repository (payload validation, catalog descriptions) | A later issue; it replaces `EVENT_TYPES`. |
 | Removal of duplicates in the service | Not planned; clients deduplicate by the envelope `id`. |
-| Removing SQS and LocalStack from the repository | Only if the owner asks; they stay as the template ships them and the notification code does not use them. |
+| Removing SQS and LocalStack from the repository | Done on 2026-11-22 at the owner's request ([ADR 0023](../../docs/adr/0023-sqs-is-removed.md)). |
 | A routing tier or any coordination between nodes | Not planned. |
 | TLS client certificates, a custom root, SASL OAUTHBEARER and AWS MSK IAM | A later issue. |
 | Limits per client (connections per address, command rate) | The edge proxy limits connections per address; limits in the service come with authorization. |

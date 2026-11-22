@@ -954,7 +954,7 @@ The `dto.rs` tests cover `CursorFault::violation` and `read_cursor`. The existin
 - the URL follows the existing `` `${baseUrl}/events/stream` ``: the helper's `baseUrl` already ends in `/api` (Verified Library Facts 6), so `/api/graphql` is reached without a second `/api`;
 - checked to have received an `event: next` whose data holds `load.test`; the SSE route's probe already showed that the pinned K6 returns the body received before its own timeout.
 
-The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unchanged, and `make.smoke_load_tests` passes. `docs/load-testing.md` describes the GraphQL subscriber.
+The `endpoints.subscriptions` budgets of `tests/Load/config.json.dist` stay unchanged in this feature (decision M7 of 2026-11-22 in `prd.md` later lowered them), and `make.smoke_load_tests` passes. `docs/load-testing.md` describes the GraphQL subscriber.
 
 ## Documentation
 
