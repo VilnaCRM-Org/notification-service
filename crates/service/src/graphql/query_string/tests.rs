@@ -127,8 +127,7 @@ fn a_query_alone_is_the_one_member() {
 }
 
 /// The members do not depend on the order of the parameters. Their order in the map is not
-/// compared: it follows the `preserve_order` feature of `serde_json`, which only the workspace
-/// build unifies on, and `to_request` reads the members by name.
+/// compared: `to_request` reads the members by name.
 #[test]
 fn each_parameter_reaches_its_own_member_whatever_the_order_of_the_parameters() {
     let map =
