@@ -170,7 +170,7 @@ jobs:
           cache-save-if: false
 
       - name: Install cargo-mutants
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-mutants@27.1.0
           fallback: none
@@ -226,7 +226,7 @@ jobs:
           cache-save-if: ${{ github.ref == 'refs/heads/main' && matrix.index == 1 }}
 
       - name: Install the cargo tools
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.151
           fallback: none
@@ -334,7 +334,7 @@ jobs:
           cache: false
 
       - name: Install cargo-deny
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-deny@0.20.2
           fallback: none
@@ -454,7 +454,7 @@ jobs:
 
       - name: Install clippy-sarif
         if: ${{ steps.publish.outputs.publish == 'true' && matrix.language == 'rust' }}
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: clippy-sarif@0.8.0
           fallback: cargo-binstall
