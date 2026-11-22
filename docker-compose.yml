@@ -38,7 +38,7 @@ services:
     stop_grace_period: 15s
 
   kafka:
-    image: apache/kafka:4.1.1@sha256:0bc1bb2478f45b6cea78864df86acdc11e8df2c5172477819a4d12942cbe5d40
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
     environment:
       # One KRaft node that is broker and controller. PLAINTEXT serves the compose network (the app), INTERNAL
       # the broker's own tools and health check, EXTERNAL the host through docker-compose.kafka-host.yml.
