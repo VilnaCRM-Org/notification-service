@@ -14,8 +14,8 @@ use tokio::net::TcpStream;
 use tracing::Level;
 
 use super::{
-    THREAD_NAME, listen_on, log_file_limit, prepare_connection, raise_file_limit, serving_runtime,
-    socket_for,
+    LISTEN_BACKLOG, THREAD_NAME, listen_on, log_file_limit, prepare_connection, raise_file_limit,
+    serving_runtime, socket_for,
 };
 
 /// The limit of every awaited call; the sockets are real, so the clock is too.
@@ -23,6 +23,23 @@ const LIMIT: Duration = Duration::from_secs(10);
 
 /// The soft limit the tests of the open file limit start from.
 const LOWERED: u64 = 256;
+
+/// The backlog `tokio::net::TcpListener::bind` gives its socket; Linux queues one connection more.
+const DEFAULT_BACKLOG: usize = 1024;
+
+/// The connects the backlog test opens at once without accepting: well beyond [`DEFAULT_BACKLOG`].
+const BURST: usize = 1500;
+
+/// The limit of the burst. A connect queued by the kernel completes at once on the loopback; one
+/// whose SYN is dropped by a full queue is retried after a second and again two seconds later, so
+/// it never completes within this limit while nothing is accepted.
+const BURST_LIMIT: Duration = Duration::from_secs(2);
+
+/// The cap Linux puts on any listen backlog.
+const SOMAXCONN: &str = "/proc/sys/net/core/somaxconn";
+
+/// The workspace manifest, whose release profile builds the served binary.
+const WORKSPACE_MANIFEST: &str = include_str!("../../../../../../Cargo.toml");
 
 fn loopback() -> SocketAddr {
     SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
@@ -41,6 +58,98 @@ async fn bounded<F: Future>(future: F) -> F::Output {
 )]
 async fn dial(address: SocketAddr) -> TcpStream {
     bounded(TcpStream::connect(address)).await.unwrap()
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests are clients of the listening socket"
+)]
+async fn dial_unbounded(address: SocketAddr) -> io::Result<TcpStream> {
+    TcpStream::connect(address).await
+}
+
+/// The connects of the backlog test: [`BURST`], capped by the kernel limit of a backlog.
+fn burst_size() -> usize {
+    let somaxconn: usize = std::fs::read_to_string(SOMAXCONN)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let size = BURST.min(somaxconn);
+    assert!(
+        size > DEFAULT_BACKLOG + 1,
+        "net.core.somaxconn = {somaxconn} caps every backlog at the default one, so the backlog \
+         cannot be told apart"
+    );
+    size
+}
+
+/// The `key = value` lines of the `[profile.release]` section of the workspace manifest, up to
+/// the next section header, so another profile cannot stand in for it.
+fn release_profile() -> Vec<(&'static str, &'static str)> {
+    let (_before, rest) = WORKSPACE_MANIFEST
+        .split_once("\n[profile.release]\n")
+        .expect("the workspace manifest must have a release profile");
+    rest.lines()
+        .map(str::trim)
+        .take_while(|line| !line.starts_with('['))
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (key, value) = line.split_once('=').expect("a key = value line");
+            (key.trim(), value.trim())
+        })
+        .collect()
+}
+
+#[test]
+fn the_listen_backlog_is_4096() {
+    assert_eq!(LISTEN_BACKLOG, 4096);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_listening_socket_queues_a_burst_beyond_the_default_backlog_without_accepting() {
+    raise_file_limit().unwrap();
+    let size = burst_size();
+    let listener = listen_on(loopback()).unwrap();
+    let address = listener.local_addr().unwrap();
+
+    let mut connects = tokio::task::JoinSet::new();
+    for _ in 0..size {
+        connects.spawn(dial_unbounded(address));
+    }
+    let clients = tokio::time::timeout(BURST_LIMIT, connects.join_all())
+        .await
+        .expect("every connect of the burst must be queued while nothing is accepted");
+
+    assert_eq!(clients.len(), size);
+    assert!(clients.iter().all(Result::is_ok), "a connect failed");
+    for _ in 0..size {
+        tokio::time::timeout(BURST_LIMIT, listener.accept())
+            .await
+            .expect("every queued connection must be accepted")
+            .unwrap();
+    }
+}
+
+#[test]
+fn the_release_profile_optimises_fully_and_keeps_unwinding() {
+    let profile = release_profile();
+
+    for (key, expected) in [
+        ("opt-level", "3"),
+        ("lto", "\"thin\""),
+        ("codegen-units", "1"),
+        ("strip", "\"symbols\""),
+        ("panic", "\"unwind\""),
+    ] {
+        let values: Vec<&str> = profile
+            .iter()
+            .filter(|(name, _value)| *name == key)
+            .map(|(_name, value)| *value)
+            .collect();
+        assert_eq!(values, [expected], "{key} of the release profile");
+    }
 }
 
 #[test]
