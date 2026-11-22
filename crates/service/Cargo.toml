@@ -22,6 +22,7 @@ health-check-application.workspace = true
 health-check-domain.workspace = true
 health-check-infrastructure.workspace = true
 jiff.workspace = true
+rlimit.workspace = true
 serde_json.workspace = true
 shared-application.workspace = true
 shared-domain.workspace = true

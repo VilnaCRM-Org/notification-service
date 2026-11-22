@@ -70,7 +70,7 @@ async fn step(session: &mut Session) -> Step {
 async fn next_id(session: &mut Session) -> u64 {
     for _ in 0..8 {
         match step(session).await {
-            Step::Frame(frame) => return frame.sequence.value(),
+            Step::Frame(frame) => return frame.sequence().value(),
             Step::Idle => {}
             Step::End(reason) => panic!("the session ended: {reason:?}"),
         }

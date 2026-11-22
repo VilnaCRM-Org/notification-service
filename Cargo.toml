@@ -44,21 +44,16 @@ test-support = { path = "tests/support" }
 # Runtime
 async-graphql = { version = "7.2.1", default-features = false, features = ["uuid"] }
 async-trait = "0.1.92"
-aws-config = { version = "1.13.1", default-features = false, features = [
-    "rt-tokio",
-    "default-https-client",
-] }
-aws-sdk-sqs = { version = "1.120.0", default-features = false, features = [
-    "rt-tokio",
-    "default-https-client",
-] }
 axum = { version = "0.8.9", features = ["macros", "ws"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dotenvy = "0.15.7"
-futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc", "sink"] }
 jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 krafka = { version = "=0.32.0", default-features = false, features = ["rustls-aws-lc-rs"] }
+# The global allocator of the service binary: per-thread heaps instead of glibc arenas sized by host cores.
 moka = { version = "0.12.16", features = ["future"] }
+# Raises the soft limit of open files of `serve` to the hard limit without unsafe code.
+rlimit = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
@@ -82,7 +77,6 @@ uuid = { version = "1.29.2", default-features = false, features = ["std"] }
 validator = { version = "0.21.0", features = ["derive"] }
 
 # Tests
-aws-smithy-mocks = "0.3.0"
 cucumber = "0.23.0"
 http-body-util = "0.1.5"
 proptest = "1.12.0"
@@ -96,7 +90,14 @@ toml = "1.2.1"
 toml_edit = "0.25.19"
 
 [profile.release]
+opt-level = 3
+# Thin LTO keeps most of the cross-crate inlining of fat LTO at a fraction of its link time, which the
+# cargo-chef cook, the image builds and the mutation loop on a 4-core machine pay on every run.
+lto = "thin"
+codegen-units = 1
 strip = "symbols"
+# Unwinding stays (the default): `CatchPanicLayer` answers a panicking handler with 500 and the process lives on.
+panic = "unwind"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

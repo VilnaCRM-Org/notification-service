@@ -13,11 +13,7 @@ use super::HealthService;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-const ALL: [Dependency; 3] = [
-    Dependency::Cache,
-    Dependency::MessageBroker,
-    Dependency::EventStream,
-];
+const ALL: [Dependency; 2] = [Dependency::Cache, Dependency::EventStream];
 
 fn service(probes: Vec<StubProbe>) -> HealthService {
     let probes = probes
@@ -62,12 +58,8 @@ async fn a_service_without_probes_is_healthy() {
 
 #[rstest]
 #[case::cache(&[Dependency::Cache])]
-#[case::message_broker(&[Dependency::MessageBroker])]
 #[case::event_stream(&[Dependency::EventStream])]
-#[case::cache_and_message_broker(&[Dependency::Cache, Dependency::MessageBroker])]
-#[case::cache_and_event_stream(&[Dependency::Cache, Dependency::EventStream])]
-#[case::message_broker_and_event_stream(&[Dependency::MessageBroker, Dependency::EventStream])]
-#[case::all(&[Dependency::Cache, Dependency::MessageBroker, Dependency::EventStream])]
+#[case::all(&[Dependency::Cache, Dependency::EventStream])]
 #[tokio::test]
 async fn the_report_holds_exactly_the_failing_dependencies_in_registration_order(
     #[case] failing: &[Dependency],
@@ -82,7 +74,6 @@ async fn the_report_holds_exactly_the_failing_dependencies_in_registration_order
 async fn failures_follow_the_registration_order_not_the_dependency_order() {
     let report = service(vec![
         StubProbe::failing(Dependency::EventStream),
-        StubProbe::healthy(Dependency::MessageBroker),
         StubProbe::failing(Dependency::Cache),
     ])
     .check()
@@ -110,7 +101,6 @@ async fn a_hanging_probe_times_out_and_counts_as_failed() {
     let report = service(vec![
         StubProbe::healthy(Dependency::EventStream),
         StubProbe::hanging(Dependency::Cache),
-        StubProbe::healthy(Dependency::MessageBroker),
     ])
     .check()
     .await;
@@ -129,7 +119,6 @@ async fn probes_run_concurrently() {
 
     let report = service(vec![
         StubProbe::hanging(Dependency::Cache),
-        StubProbe::hanging(Dependency::MessageBroker),
         StubProbe::hanging(Dependency::EventStream),
     ])
     .check()
@@ -145,8 +134,7 @@ async fn each_failure_is_logged_once_at_warn_with_its_dependency_and_cause() {
 
     let _report = service(vec![
         StubProbe::failing(Dependency::EventStream),
-        StubProbe::healthy(Dependency::Cache),
-        StubProbe::hanging(Dependency::MessageBroker),
+        StubProbe::hanging(Dependency::Cache),
     ])
     .check()
     .await;
@@ -163,7 +151,7 @@ async fn each_failure_is_logged_once_at_warn_with_its_dependency_and_cause() {
     );
     assert_eq!(lines[1].level, Level::WARN);
     assert_eq!(lines[1].message, "health probe failed");
-    assert_eq!(lines[1].field("dependency"), Some("message_broker"));
+    assert_eq!(lines[1].field("dependency"), Some("cache"));
     assert_eq!(lines[1].field("cause"), Some("probe timed out after 3s"));
 }
 
@@ -200,7 +188,7 @@ struct LayeredProbe;
 #[async_trait::async_trait]
 impl HealthProbe for LayeredProbe {
     fn dependency(&self) -> Dependency {
-        Dependency::MessageBroker
+        Dependency::EventStream
     }
 
     async fn check(&self) -> Result<(), BoxError> {

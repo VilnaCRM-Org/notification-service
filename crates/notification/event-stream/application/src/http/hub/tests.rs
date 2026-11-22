@@ -200,9 +200,9 @@ async fn an_event_reaches_only_the_subscribers_of_its_type_as_one_shared_frame()
     let first = next(&mut first_of_a).await.unwrap();
     let second = next(&mut second_of_a).await.unwrap();
     assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(first.sequence, sequence(5));
+    assert_eq!(first.sequence(), sequence(5));
     assert_eq!(
-        first.json.as_str(),
+        first.json().as_str(),
         r#"{"id":"5","type":"a","data":{"n":1}}"#
     );
     assert!(stays_silent(&mut of_b).await);
@@ -249,9 +249,9 @@ async fn a_full_queue_makes_the_subscriber_fall_behind_and_resume_rearms_it() {
         behind: 0,
     });
     assert_eq!(hub.deliver(&event(1, "a")), one);
-    assert_eq!(next(&mut other).await.unwrap().sequence, sequence(1));
+    assert_eq!(next(&mut other).await.unwrap().sequence(), sequence(1));
     assert_eq!(hub.deliver(&event(2, "a")), one);
-    assert_eq!(next(&mut other).await.unwrap().sequence, sequence(2));
+    assert_eq!(next(&mut other).await.unwrap().sequence(), sequence(2));
     assert_eq!(
         hub.deliver(&event(3, "a")),
         Some(Delivery {
@@ -267,10 +267,10 @@ async fn a_full_queue_makes_the_subscriber_fall_behind_and_resume_rearms_it() {
         hub.lock().by_type[&types(&["a"]).pop_first().unwrap()].len(),
         1
     );
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(1));
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(2));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(1));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(2));
     assert!(next(&mut slow).await.is_none());
-    assert_eq!(next(&mut other).await.unwrap().sequence, sequence(3));
+    assert_eq!(next(&mut other).await.unwrap().sequence(), sequence(3));
 
     hub.advance(Cursor::new(7));
     assert_eq!(slow.resume(), Ok(Cursor::new(7)));
@@ -282,7 +282,7 @@ async fn a_full_queue_makes_the_subscriber_fall_behind_and_resume_rearms_it() {
 
     for id in 8..=9 {
         hub.deliver(&event(id, "a"));
-        assert_eq!(next(&mut other).await.unwrap().sequence, sequence(id));
+        assert_eq!(next(&mut other).await.unwrap().sequence(), sequence(id));
     }
     assert_eq!(
         hub.deliver(&event(10, "a")),
@@ -291,8 +291,8 @@ async fn a_full_queue_makes_the_subscriber_fall_behind_and_resume_rearms_it() {
             behind: 1
         })
     );
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(8));
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(9));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(8));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(9));
     assert!(next(&mut slow).await.is_none());
 }
 
@@ -316,7 +316,7 @@ async fn a_subscriber_behind_changes_only_its_types_until_resume_indexes_exactly
     assert_eq!(since, Cursor::new(2));
     assert_eq!(hub.type_count(), 0);
     assert_eq!(hub.lock().subscribers[&slow.id].types, types(&["a", "c"]));
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(1));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(1));
     assert!(next(&mut slow).await.is_none());
 
     assert_eq!(slow.resume(), Ok(Cursor::new(2)));
@@ -324,7 +324,7 @@ async fn a_subscriber_behind_changes_only_its_types_until_resume_indexes_exactly
     assert_eq!(hub.type_count(), 2);
     assert_eq!(hub.deliver(&event(3, "b")), None);
     assert_eq!(hub.deliver(&event(4, "c")).unwrap().delivered, 1);
-    assert_eq!(next(&mut slow).await.unwrap().sequence, sequence(4));
+    assert_eq!(next(&mut slow).await.unwrap().sequence(), sequence(4));
 }
 
 #[tokio::test(start_paused = true)]
@@ -341,7 +341,7 @@ async fn a_buffer_of_zero_is_used_as_one() {
     assert_eq!(hub.deliver(&event(1, "a")).unwrap().behind, 0);
     assert_eq!(hub.deliver(&event(2, "a")).unwrap().behind, 1);
 
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(1));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(1));
     assert!(next(&mut subscriber).await.is_none());
 }
 
@@ -363,8 +363,8 @@ async fn subscribe_returns_the_hub_position_and_adds_the_types_and_unsubscribe_r
     assert_eq!(hub.type_count(), 2);
     assert_eq!(hub.deliver(&event(7, "a")).unwrap().delivered, 1);
     assert_eq!(hub.deliver(&event(8, "b")).unwrap().delivered, 2);
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(7));
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(8));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(7));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(8));
 
     subscriber.unsubscribe(&types(&["a", "b"]));
 
@@ -442,7 +442,7 @@ async fn a_dropped_subscriber_frees_its_slot_and_drained_completes_at_zero() {
     assert!(!hub.lock().subscribers.contains_key(&0));
     assert!(timeout(WAIT, hub.drained()).await.is_err());
     assert_eq!(hub.deliver(&event(1, "a")).unwrap().delivered, 1);
-    assert_eq!(next(&mut second).await.unwrap().sequence, sequence(1));
+    assert_eq!(next(&mut second).await.unwrap().sequence(), sequence(1));
     let third = register(&hub, &["a"]);
 
     drop(second);
@@ -459,6 +459,40 @@ async fn drained_completes_at_once_without_subscriber() {
     let hub = Hub::new(SETTINGS);
 
     assert!(timeout(WAIT, hub.drained()).await.is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_recv_takes_the_queued_frames_in_order_without_waiting_and_answers_none_when_empty() {
+    let hub = started(SETTINGS, 0);
+    let mut subscriber = register(&hub, &["a"]);
+    assert!(subscriber.try_recv().is_none());
+
+    hub.deliver(&event(1, "a"));
+    hub.deliver(&event(2, "a"));
+
+    assert_eq!(subscriber.try_recv().unwrap().sequence(), sequence(1));
+    assert_eq!(subscriber.try_recv().unwrap().sequence(), sequence(2));
+    assert!(subscriber.try_recv().is_none());
+    hub.close();
+    assert!(subscriber.try_recv().is_none());
+    assert!(next(&mut subscriber).await.is_none());
+}
+
+#[test]
+fn the_count_and_the_closed_flag_are_read_while_another_thread_holds_the_registry() {
+    let hub = started(SETTINGS, 0);
+    let _subscriber = register(&hub, &["a"]);
+    let registry = hub.lock();
+
+    let (count, closed) = std::thread::scope(|scope| {
+        scope
+            .spawn(|| (hub.subscriber_count(), hub.is_closed()))
+            .join()
+            .unwrap()
+    });
+
+    drop(registry);
+    assert_eq!((count, closed), (1, false));
 }
 
 // ----- close -----------------------------------------------------------------------------------
@@ -479,8 +513,8 @@ async fn close_ends_every_queue_after_its_frames_and_keeps_the_count_until_the_d
     assert_eq!(hub.type_count(), 0);
     assert_eq!(hub.subscriber_count(), 1);
     assert_eq!(published_count(&hub), 1);
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(1));
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(2));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(1));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(2));
     assert!(next(&mut subscriber).await.is_none());
     assert_eq!(subscriber.resume(), Err(HubError::Closed));
     assert_eq!(subscriber.position(), Cursor::START);
@@ -528,7 +562,7 @@ async fn the_publisher_maps_started_publish_and_advance_to_the_hub() {
     assert_eq!(publisher.publish(&event(5, "b")), 0);
     assert_eq!(publisher.publish(&event(6, "a")), 0);
     assert_eq!(publisher.publish(&event(7, "a")), 2);
-    assert_eq!(next(&mut first).await.unwrap().sequence, sequence(6));
+    assert_eq!(next(&mut first).await.unwrap().sequence(), sequence(6));
 
     publisher.advance(Cursor::new(3));
     assert_eq!(position_of(&hub), Ok(Cursor::new(7)));
@@ -608,7 +642,7 @@ async fn a_poisoned_registry_is_taken_over() {
     hub.advance(Cursor::new(2));
     assert_eq!(subscriber.subscribe(&types(&["b"])), Cursor::new(2));
     assert_eq!(hub.deliver(&event(3, "b")).unwrap().delivered, 1);
-    assert_eq!(next(&mut subscriber).await.unwrap().sequence, sequence(3));
+    assert_eq!(next(&mut subscriber).await.unwrap().sequence(), sequence(3));
     assert_eq!(hub.type_count(), 2);
     assert_eq!(hub.subscriber_count(), 1);
     hub.close();

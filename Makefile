@@ -44,7 +44,7 @@ TEST_ENV = scripts/with-env.sh .env .env.test --
 RUN_IN_CONTAINER ?=
 CI ?=
 IN_DEV_CONTAINER ?=
-DEPS ?= localstack
+DEPS ?= kafka
 base_ref ?= origin/main
 SCHEMATHESIS_URL ?= http://localhost:$(LOAD_TEST_APP_PORT)
 scenario ?=
@@ -77,6 +77,8 @@ BMALPH_DRY_RUN ?= false
 
 # Helpers of the recipes.
 REQUIRE_DOCKER = @$(DOCKER) info >/dev/null 2>&1 || { echo 'This target needs a reachable container engine (docker).' >&2; exit 2; }
+# The AWS load-test targets call the AWS CLI image, except in the dry run (LOCAL_MODE_ENV=true), which calls the stub.
+REQUIRE_DOCKER_UNLESS_LOCAL_MODE = $(if $(filter true,$(LOCAL_MODE_ENV)),,$(REQUIRE_DOCKER))
 NODE_RUN = $(DOCKER_RUN) -e HOME=/tmp -e COREPACK_HOME=/tmp/corepack -v "$(CURDIR):/repo" -w /repo/tests/Load $(NODE_IMAGE)
 BATS = $(if $(wildcard .tools/bats/core/bin/bats),.tools/bats/core/bin/bats,bats)
 SCHEMATHESIS_RUN = $(DOCKER) run --rm --network host -v "$(CURDIR)/.github/openapi-spec:/data:ro" $(SCHEMATHESIS_IMAGE) run /data/spec.yaml --url $(SCHEMATHESIS_URL) $(SCHEMATHESIS_FLAGS)
@@ -139,7 +141,7 @@ start-deps: ## Start the backing services named in DEPS if they are not running 
 	$(REQUIRE_DOCKER)
 	$(DOCKER_COMPOSE) up --detach --wait --no-recreate $(DEPS)
 
-ensure-deps: ## Start LocalStack and Kafka unless this shell is the development container
+ensure-deps: ## Start the Kafka broker unless this shell is the development container
 	@[ "$(IN_DEV_CONTAINER)" = 1 ] || $(MAKE) --no-print-directory start-deps
 
 build: ## Rebuild the development images from scratch
@@ -258,7 +260,7 @@ unit-tests: ## Run the unit tests and the documentation tests
 doc-tests: ## Run the documentation tests
 	$(EXEC) $(DOCTEST_CMD)
 
-integration-tests: ensure-deps ## Run the integration tests against LocalStack and Kafka
+integration-tests: ensure-deps ## Run the integration tests against Kafka
 	$(EXEC) $(TEST_ENV) $(INTEGRATION_CMD)
 
 e2e-tests: ensure-deps ## Run the Gherkin end-to-end tests
@@ -369,11 +371,11 @@ execute-load-tests-script: ## Run one load scenario, all four profiles unless sw
 	scripts/with-load-test-stack.sh -- tests/Load/execute-load-test.sh "$(scenario)" $(runSmoke) $(runAverage) $(runStress) $(runSpike)
 
 aws-load-tests: ## Run the load tests on a temporary AWS instance
-	$(REQUIRE_DOCKER)
+	$(REQUIRE_DOCKER_UNLESS_LOCAL_MODE)
 	LOCAL_MODE_ENV=$(LOCAL_MODE_ENV) tests/Load/aws-execute-load-tests.sh $(AWS_OPTIONS)
 
 aws-load-tests-cleanup: ## Remove everything aws-load-tests created
-	$(REQUIRE_DOCKER)
+	$(REQUIRE_DOCKER_UNLESS_LOCAL_MODE)
 	LOCAL_MODE_ENV=$(LOCAL_MODE_ENV) tests/Load/cleanup.sh $(AWS_OPTIONS)
 
 lint-load-tests: ## Lint and format-check the load-test JavaScript

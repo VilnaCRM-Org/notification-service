@@ -29,11 +29,7 @@ fn app(probes: Vec<StubProbe>) -> Router {
 }
 
 /// Every dependency the service probes, in registration order.
-const DEPENDENCIES: [Dependency; 3] = [
-    Dependency::Cache,
-    Dependency::MessageBroker,
-    Dependency::EventStream,
-];
+const DEPENDENCIES: [Dependency; 2] = [Dependency::Cache, Dependency::EventStream];
 
 fn probes(failing: &[Dependency]) -> Vec<StubProbe> {
     DEPENDENCIES
@@ -77,11 +73,7 @@ async fn healthy_probes_answer_204_with_an_empty_body() {
 
 #[tokio::test]
 async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
-    let response = get_health(app(probes(&[
-        Dependency::MessageBroker,
-        Dependency::EventStream,
-    ])))
-    .await;
+    let response = get_health(app(probes(&[Dependency::Cache, Dependency::EventStream]))).await;
 
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
@@ -90,7 +82,6 @@ async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
     );
     let bytes = body_bytes(response).await;
     let text = String::from_utf8(bytes.clone()).unwrap();
-    assert!(!text.contains("Cache is not working"));
     assert!(!text.contains("stub probe failure"));
     assert!(!text.contains("probe failed"));
     assert_eq!(
@@ -99,9 +90,9 @@ async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
             "type": "/problems/dependency-unavailable",
             "title": "Internal Server Error",
             "status": 500,
-            "detail": "Message broker is not available; Event stream is not ready",
+            "detail": "Cache is not working; Event stream is not ready",
             "failures": [
-                {"dependency": "message_broker", "message": "Message broker is not available"},
+                {"dependency": "cache", "message": "Cache is not working"},
                 {"dependency": "event_stream", "message": "Event stream is not ready"},
             ],
         })
@@ -110,11 +101,7 @@ async fn failing_probes_answer_the_500_problem_that_names_each_failure() {
 
 #[rstest]
 #[case::cache(&[Dependency::Cache])]
-#[case::message_broker(&[Dependency::MessageBroker])]
 #[case::event_stream(&[Dependency::EventStream])]
-#[case::cache_and_message_broker(&[Dependency::Cache, Dependency::MessageBroker])]
-#[case::cache_and_event_stream(&[Dependency::Cache, Dependency::EventStream])]
-#[case::message_broker_and_event_stream(&[Dependency::MessageBroker, Dependency::EventStream])]
 #[case::every_dependency(&DEPENDENCIES)]
 #[tokio::test]
 async fn the_500_body_holds_exactly_the_messages_of_the_failing_dependencies(
@@ -167,7 +154,6 @@ async fn a_hanging_probe_answers_the_problem_without_the_timeout() {
     let probes = vec![
         StubProbe::healthy(Dependency::EventStream),
         StubProbe::hanging(Dependency::Cache),
-        StubProbe::healthy(Dependency::MessageBroker),
     ];
 
     let response = get_health(app(probes)).await;
@@ -189,7 +175,7 @@ fn the_route_documents_the_health_operation() {
     assert_eq!(operation["summary"], "Checks the health of the service.");
     assert_eq!(
         operation["description"],
-        "Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise."
+        "Returns 204 when the cache responds and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise."
     );
     let responses = operation["responses"].as_object().unwrap();
     assert_eq!(responses.len(), 3);

@@ -1,4 +1,3 @@
-//! The two probes: the cache and the SQS broker connection.
+//! The probes: the cache.
 
 pub mod cache;
-pub mod sqs;

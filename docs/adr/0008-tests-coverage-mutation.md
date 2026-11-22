@@ -4,7 +4,7 @@ Planning decisions: AD-23 (test doubles and fault injection), AD-24 (coverage an
 
 ## Context
 
-The template promises that every gate can fail: 100% line and function coverage and no surviving mutant over all production source. Adapters can only be observed against the real backing services (LocalStack and the Kafka broker; the template's PostgreSQL went with [ADR 0020](0020-postgresql-is-removed.md)), and tests must be able to force a dependency to fail without stopping a container.
+The template promises that every gate can fail: 100% line and function coverage and no surviving mutant over all production source. Adapters can only be observed against the real backing services (the Kafka broker; the template's PostgreSQL went with [ADR 0020](0020-postgresql-is-removed.md) and LocalStack with [ADR 0023](0023-sqs-is-removed.md)), and tests must be able to force a dependency to fail without stopping a container.
 
 ## Decision
 

@@ -38,11 +38,10 @@ setup_file() {
   unset COMPOSE_PROJECT_NAME CI IN_DEV_CONTAINER RUN_IN_CONTAINER
   export PROJECT_NAME="bats-exec-${suffix}"
   # free_port of the helper (20000 to 32767, below the ephemeral ports) keeps the chosen ports in a file, so the
-  # three command substitutions cannot draw the same port twice.
-  LOCALSTACK_PORT="$(free_port)"
+  # two command substitutions cannot draw the same port twice.
   APP_PORT="$(free_port)"
   STRUCTURIZR_PORT="$(free_port)"
-  export LOCALSTACK_PORT APP_PORT STRUCTURIZR_PORT
+  export APP_PORT STRUCTURIZR_PORT
   # An image that an earlier `make start` of this checkout built is reused; otherwise `make start` builds it.
   if [[ -z "${DEV_IMAGE:-}" ]]; then
     if docker image inspect "$(_default_dev_image)" >/dev/null 2>&1; then
@@ -132,7 +131,7 @@ probe_makefile() {
   refute_output --partial 'docker compose exec'
   RUN_IN_CONTAINER=1 run make --no-print-directory -n start-deps
   assert_success
-  assert_output --partial 'up --detach --wait --no-recreate localstack'
+  assert_output --partial 'up --detach --wait --no-recreate kafka'
   refute_output --partial 'compose exec'
 }
 
@@ -195,17 +194,17 @@ probe_makefile() {
   assert_output 'test'
 }
 
-@test "inside the container the URL uses the in-network port whatever .env publishes" {
-  # A host port in .env that differs from the in-network port 4566. The container reads the bind-mounted .env, and
-  # compose gives it the in-network port, which wins over the file.
-  sed -e 's/^LOCALSTACK_PORT=.*/LOCALSTACK_PORT=14566/' .env >"${tmp}/env"
-  run grep -c -E '^LOCALSTACK_PORT=14566$' "${tmp}/env"
+@test "inside the container the broker address is the in-network listener whatever .env names" {
+  # A host listener in .env that differs from the in-network listener kafka:9092. The container reads the
+  # bind-mounted .env, and compose gives it the in-network listener, which wins over the file.
+  sed -e 's/^KAFKA_BOOTSTRAP_SERVERS=.*/KAFKA_BOOTSTRAP_SERVERS=localhost:19095/' .env >"${tmp}/env"
+  run grep -c -E '^KAFKA_BOOTSTRAP_SERVERS=localhost:19095$' "${tmp}/env"
   assert_output '1'
   plant_replace .env "${tmp}/env"
-  probe_makefile "scripts/with-env.sh .env .env.test -- printenv AWS_ENDPOINT_URL_SQS"
+  probe_makefile "scripts/with-env.sh .env .env.test -- printenv KAFKA_BOOTSTRAP_SERVERS"
   RUN_IN_CONTAINER=1 run make --no-print-directory -f Makefile -f "${tmp}/probe.mk" probe
   assert_success
-  assert_output 'http://localstack:4566'
+  assert_output 'kafka:9092'
 }
 
 @test "TEST_SEED=7 reaches a command behind EXEC" {

@@ -10,7 +10,7 @@ Conformance and load tests must run against the production image, not a debug bu
 
 One `Dockerfile` with six stages: `base`, `chef`, `planner`, `builder`, `dev` and `prod`. The builder is `rust:1.99.1-slim-trixie` and the runtime is `gcr.io/distroless/cc-debian13:nonroot`, both written as literal `FROM` references with tag and digest, and no build argument replaces an image. The dependency layer uses cargo-chef. The production image runs as user `65532:65532` with entry point `/app/service` and a healthcheck in exec form that makes the binary probe itself, because the image has no shell. The development image carries the toolchain and the tools, runs as the invoking user and keeps cargo state outside `/app`.
 
-Schemathesis and the load tests run against the production image in a compose project of its own, built from `docker-compose.yml` plus `docker-compose.load_test.override.yml`: its own network and volumes, no published LocalStack or broker port, and the service published on `LOAD_TEST_APP_PORT`. A script builds the stack, waits for health, runs the command and always removes the project with its volumes. When the caller sets `SCHEMATHESIS_URL`, no environment is started and that URL is tested.
+Schemathesis and the load tests run against the production image in a compose project of its own, built from `docker-compose.yml` plus `docker-compose.load_test.override.yml`: its own network and volumes, no published broker port, and the service published on `LOAD_TEST_APP_PORT`. A script builds the stack, waits for health, runs the command and always removes the project with its volumes. When the caller sets `SCHEMATHESIS_URL`, no environment is started and that URL is tested.
 
 ## Consequences
 

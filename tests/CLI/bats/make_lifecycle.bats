@@ -12,10 +12,9 @@
 # check, `make start-deps` on a running environment, the two log tests, the occupied-port test, the rebuild
 # test, `make stop` and `make down`) is tagged `slow` too, so that `--filter-tags '!slow'` skips the whole
 # group and no test that stays untagged depends on another one. The two untagged tests start only containers of
-# private projects of their own and pass on their own: the second-project test starts its own LocalStack; the
-# start that never becomes healthy starts the Kafka broker of the stack and, both from the LocalStack image, app and
-# a stand-in for LocalStack (no LocalStack and no service image), and stops at the failed health check of app. The
-# rebuild test is slow by itself.
+# private projects of their own and pass on their own: the second-project test starts its own Kafka broker; the
+# start that never becomes healthy starts the Kafka broker of the stack and, from the Kafka image, a stand-in for app
+# (no service image), and stops at the failed health check of app. The rebuild test is slow by itself.
 
 bats_require_minimum_version 1.8.0
 load test_helper
@@ -44,12 +43,9 @@ setup_file() {
   export ALT_PROJECT="bats-alt-${suffix}"
   export BUSY_PROJECT="bats-busy-${suffix}"
   export SICK_PROJECT="bats-sick-${suffix}"
-  LOCALSTACK_PORT="$(free_port)"
   APP_PORT="$(free_port)"
   STRUCTURIZR_PORT="$(free_port)"
-  export LOCALSTACK_PORT APP_PORT STRUCTURIZR_PORT
-  ALT_LOCALSTACK_PORT="$(free_port)"
-  export ALT_LOCALSTACK_PORT
+  export APP_PORT STRUCTURIZR_PORT
   # An image that an earlier `make start` of this checkout built is reused; otherwise `make start` builds it.
   if [[ -z "${DEV_IMAGE:-}" ]]; then
     if docker image inspect "$(_default_dev_image)" >/dev/null 2>&1; then
@@ -159,10 +155,10 @@ listening_entries() {
 # bats test_tags=slow
 @test "make start-deps on a running environment recreates no container" {
   local before after
-  before="$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$(container_of localstack)")"
+  before="$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$(container_of kafka)")"
   run make --no-print-directory start-deps
   assert_success
-  after="$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$(container_of localstack)")"
+  after="$(docker inspect --format '{{.Id}} {{.State.StartedAt}}' "$(container_of kafka)")"
   assert_equal "${after}" "${before}"
 }
 
@@ -199,12 +195,12 @@ listening_entries() {
 # --- a second project ------------------------------------------------------------------------------------------
 
 @test "a second project creates containers named after it and is removed with its volumes" {
-  PROJECT_NAME="${ALT_PROJECT}" LOCALSTACK_PORT="${ALT_LOCALSTACK_PORT}" \
-    run make --no-print-directory start-deps
+  # The broker of start-deps publishes no host port, so the second project needs no port of its own.
+  PROJECT_NAME="${ALT_PROJECT}" run make --no-print-directory start-deps
   assert_success
   run docker ps --all --filter "label=com.docker.compose.project=${ALT_PROJECT}" --format '{{.Names}}'
   assert_success
-  assert_line --regexp '^bats-alt-.*localstack'
+  assert_line --regexp '^bats-alt-.*kafka'
   refute_output --regexp "^${PROJECT_NAME}"
   run docker compose -p "${ALT_PROJECT}" down --volumes
   assert_success
@@ -217,25 +213,14 @@ listening_entries() {
 @test "make start exits non-zero when the stack does not become healthy" {
   # A third project whose app never passes its health check while every dependency is satisfied: only the wait of
   # the recipe (`--wait`) turns that into a failure; without it `up --detach` succeeds once app has started. The
-  # stand-ins run the LocalStack image of docker-compose.yml, so the test needs no service image and builds nothing
-  # (BUILD_IMAGE=0 gives `--no-build`): LocalStack is a stand-in that is healthy at once, the Kafka broker of the
-  # stack starts as it is, and app sleeps with a health check that always fails.
+  # stand-in for app runs the Kafka image of docker-compose.yml, so the test needs no service image and builds
+  # nothing (BUILD_IMAGE=0 gives `--no-build`): the Kafka broker of the stack starts as it is, and app sleeps with a
+  # health check that always fails.
   local stand_in
-  stand_in="$(awk '/^  [a-z][a-z0-9_-]*:$/ {inside = ($0 == "  localstack:"); next} inside && /^    image: / {print $2; exit}' docker-compose.yml)"
-  [[ -n "${stand_in}" ]] || fail 'docker-compose.yml names no image for the service localstack'
+  stand_in="$(awk '/^  [a-z][a-z0-9_-]*:$/ {inside = ($0 == "  kafka:"); next} inside && /^    image: / {print $2; exit}' docker-compose.yml)"
+  [[ -n "${stand_in}" ]] || fail 'docker-compose.yml names no image for the service kafka'
   cat >"${tmp}/unhealthy.yml" <<OVERRIDE
 services:
-  localstack:
-    image: ${stand_in}
-    entrypoint: ['sleep', '600']
-    stop_grace_period: 1s # sleep ignores the stop signal as process 1
-    healthcheck:
-      test: ['CMD', 'true']
-      interval: 1s
-      timeout: 1s
-      retries: 1
-      start_period: 0s
-      start_interval: 1s
   app:
     image: ${stand_in}
     entrypoint: ['sleep', '600']
@@ -249,8 +234,7 @@ services:
       start_interval: 1s
 OVERRIDE
   # Every published port is its own (the stack of the first test holds the others) and is drawn right before use.
-  PROJECT_NAME="${SICK_PROJECT}" LOCALSTACK_PORT="$(free_port)" APP_PORT="$(free_port)" \
-    STRUCTURIZR_PORT="$(free_port)" \
+  PROJECT_NAME="${SICK_PROJECT}" APP_PORT="$(free_port)" STRUCTURIZR_PORT="$(free_port)" \
     COMPOSE_FILE="docker-compose.yml:docker-compose.override.yml:${tmp}/unhealthy.yml" BUILD_IMAGE=0 \
     run make --no-print-directory start
   assert_failure
@@ -261,9 +245,15 @@ OVERRIDE
 }
 
 # bats test_tags=slow
-@test "make start-deps with LOCALSTACK_PORT set to an occupied port exits non-zero" {
-  # The port of the running development LocalStack is occupied; the second project cannot publish it.
-  PROJECT_NAME="${BUSY_PROJECT}" LOCALSTACK_PORT="${LOCALSTACK_PORT}" \
+@test "make start-deps exits non-zero when a port it publishes is occupied" {
+  # The broker of start-deps publishes no host port, so an override makes it publish the port of the running
+  # development app, which is occupied; the second project cannot publish it.
+  cat >"${tmp}/busy.yml" <<OVERRIDE
+services:
+  kafka:
+    ports: ['127.0.0.1:${APP_PORT}:9092']
+OVERRIDE
+  PROJECT_NAME="${BUSY_PROJECT}" COMPOSE_FILE="docker-compose.yml:docker-compose.override.yml:${tmp}/busy.yml" \
     run make --no-print-directory start-deps
   assert_failure
   _remove_project "${BUSY_PROJECT}"

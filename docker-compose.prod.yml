@@ -2,16 +2,22 @@
 #   docker compose --env-file /etc/service/prod.env -f docker-compose.yml -f docker-compose.prod.yml up --detach --wait
 services:
   app:
-    # No dependency: the base dependencies on localstack and kafka belong to the inactive profile local.
+    # No dependency: the base dependency on kafka belongs to the inactive profile local.
     depends_on: !reset null
     environment:
       APP_ENV: prod
-      AWS_REGION: ${AWS_REGION:?AWS_REGION is required}
-      AWS_ENDPOINT_URL_SQS: !reset null # real SQS through the default credential chain
-      AWS_ACCESS_KEY_ID: !reset null
-      AWS_SECRET_ACCESS_KEY: !reset null
-      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
-      MAX_SUBSCRIBERS: ${MAX_SUBSCRIBERS:-5000} # production reference cap (NFR-9)
+      # The real cluster: the kafka service of the base file belongs to the inactive profile local.
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:?KAFKA_BOOTSTRAP_SERVERS is required}
+      # Production reference cap (NFR-9), far below the open-file limit below (one socket each).
+      MAX_SUBSCRIBERS: ${MAX_SUBSCRIBERS:-5000}
+      # A 16 MiB replay window: the 64 MiB default would take a quarter of the 256M memory limit.
+      EVENT_WINDOW_MAX_BYTES: ${EVENT_WINDOW_MAX_BYTES:-16777216}
+      EVENT_WINDOW_MAX_EVENTS: ${EVENT_WINDOW_MAX_EVENTS:-20000}
+      EVENT_WINDOW_START_EVENTS: ${EVENT_WINDOW_START_EVENTS:-20000}
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     deploy:
       resources:
         limits:
@@ -25,9 +31,6 @@ services:
       options:
         max-size: 10m
         max-file: '3'
-
-  localstack:
-    profiles: [local]
 
   kafka:
     profiles: [local]

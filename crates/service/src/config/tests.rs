@@ -2,9 +2,13 @@ use rstest::rstest;
 
 use super::*;
 
+/// The arguments with only the required `KAFKA_BOOTSTRAP_SERVERS` set.
 fn valid() -> ServeArgs {
     ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..KafkaArgs::default()
+        },
         ..ServeArgs::default()
     }
 }
@@ -37,11 +41,6 @@ fn the_defaults_are_the_documented_ones() {
     assert_eq!(config.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(config.port, 8081);
     assert_eq!(config.log_level, "info");
-    assert_eq!(config.sqs.region, "us-east-1");
-    assert_eq!(config.sqs.endpoint_url, None);
-    assert_eq!(config.sqs.connect_timeout, Duration::from_millis(500));
-    assert_eq!(config.sqs.operation_timeout, Duration::from_secs(2));
-    assert_eq!(config.sqs.max_attempts, 1);
     assert_eq!(config.health_probe_timeout, Duration::from_secs(3));
     assert_eq!(config.request_timeout, Duration::from_secs(10));
     assert_eq!(config.max_body_bytes, 65_536);
@@ -85,13 +84,6 @@ fn every_variable_accepts_a_valid_value() {
         app_host: some("127.0.0.1"),
         app_port: some("9000"),
         log_level: some("service=debug,warn"),
-        aws_region: some("eu-west-1"),
-        aws_endpoint_url_sqs: some("http://localhost:4566"),
-        aws_access_key_id: some("key"),
-        aws_secret_access_key: some("secret"),
-        sqs_connect_timeout: some("300ms"),
-        sqs_operation_timeout: some("1s"),
-        sqs_max_attempts: some("3"),
         health_probe_timeout: some("4s"),
         http_request_timeout: some("1m"),
         http_max_body_bytes: some("2048"),
@@ -131,14 +123,6 @@ fn every_variable_accepts_a_valid_value() {
     assert_eq!(config.host, IpAddr::from([127, 0, 0, 1]));
     assert_eq!(config.port, 9000);
     assert_eq!(config.log_level, "service=debug,warn");
-    assert_eq!(config.sqs.region, "eu-west-1");
-    assert_eq!(
-        config.sqs.endpoint_url.as_deref(),
-        Some("http://localhost:4566")
-    );
-    assert_eq!(config.sqs.connect_timeout, Duration::from_millis(300));
-    assert_eq!(config.sqs.operation_timeout, Duration::from_secs(1));
-    assert_eq!(config.sqs.max_attempts, 3);
     assert_eq!(config.health_probe_timeout, Duration::from_secs(4));
     assert_eq!(config.request_timeout, Duration::from_secs(60));
     assert_eq!(config.max_body_bytes, 2048);
@@ -295,23 +279,27 @@ fn log_level_rejects_invalid_directives(#[case] raw: &str) {
 }
 
 #[test]
-fn a_blank_required_variable_is_reported_as_empty() {
-    let args = ServeArgs {
-        aws_region: some("  "),
-        ..valid()
-    };
+fn kafka_bootstrap_servers_is_required() {
+    let mut args = valid();
+    args.kafka.bootstrap_servers = None;
 
     assert_eq!(
         problems(args),
-        [("AWS_REGION", "must not be empty".to_owned())]
+        [("KAFKA_BOOTSTRAP_SERVERS", "is required".to_owned())]
+    );
+}
+
+#[test]
+fn an_empty_environment_lacks_only_kafka_bootstrap_servers() {
+    assert_eq!(
+        problems(ServeArgs::default()),
+        [("KAFKA_BOOTSTRAP_SERVERS", "is required".to_owned())]
     );
 }
 
 #[test]
 fn an_unparsable_duration_names_its_variable() {
     let args = ServeArgs {
-        sqs_connect_timeout: some(""),
-        sqs_operation_timeout: some("-2s"),
         health_probe_timeout: some("fast"),
         http_request_timeout: some("1 fortnight"),
         shutdown_grace_period: some("later"),
@@ -326,8 +314,6 @@ fn an_unparsable_duration_names_its_variable() {
             .map(|(variable, _)| *variable)
             .collect::<Vec<_>>(),
         [
-            "SQS_CONNECT_TIMEOUT",
-            "SQS_OPERATION_TIMEOUT",
             "HEALTH_PROBE_TIMEOUT",
             "HTTP_REQUEST_TIMEOUT",
             "SHUTDOWN_GRACE_PERIOD",
@@ -428,102 +414,6 @@ fn a_ranged_duration_refuses_zero_through_its_range(#[case] raw: &str) {
 }
 
 #[rstest]
-#[case("http://localhost:4566")]
-#[case("https://sqs.eu-west-1.amazonaws.com")]
-#[case("http://localstack:4566/")]
-#[case("http://[::1]:4566")]
-#[case("http://[::1]")]
-#[case("http://user:secret@localstack:4566")]
-#[case("http://localhost:0")]
-#[case("http://localhost:65535")]
-fn the_sqs_endpoint_accepts_http_and_https_urls(#[case] raw: &str) {
-    let args = ServeArgs {
-        aws_endpoint_url_sqs: some(raw),
-        ..valid()
-    };
-
-    assert_eq!(
-        Config::from_args(args).unwrap().sqs.endpoint_url.as_deref(),
-        Some(raw)
-    );
-}
-
-#[rstest]
-#[case("ftp://localhost")]
-#[case("localhost:4566")]
-#[case("http://")]
-#[case("https://")]
-#[case("")]
-#[case("http:// ")]
-#[case("http://exa mple:4566")]
-#[case("http://:4566")]
-#[case("http://localhost:abc")]
-#[case("http://localhost:99999")]
-#[case("http://127.0.0.1:4566x")]
-#[case("http://abc:abc")]
-#[case("http://localhost:")]
-#[case("http://user@localhost:4566x")]
-#[case("http://[::1]x:80")]
-#[case("http://[::1]x")]
-#[case("http://localhost:+80")]
-#[case("http://localhost:-1")]
-fn the_sqs_endpoint_rejects_everything_else(#[case] raw: &str) {
-    let args = ServeArgs {
-        aws_endpoint_url_sqs: some(raw),
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "AWS_ENDPOINT_URL_SQS",
-            "must be an http:// or https:// URL".to_owned()
-        )]
-    );
-}
-
-#[test]
-fn aws_region_is_required() {
-    let args = ServeArgs {
-        aws_region: None,
-        ..valid()
-    };
-
-    assert_eq!(problems(args), [("AWS_REGION", "is required".to_owned())]);
-}
-
-#[rstest]
-#[case("1", 1)]
-#[case("5", 5)]
-fn sqs_max_attempts_accepts_its_bounds(#[case] raw: &str, #[case] expected: u32) {
-    let args = ServeArgs {
-        sqs_max_attempts: some(raw),
-        ..valid()
-    };
-
-    assert_eq!(Config::from_args(args).unwrap().sqs.max_attempts, expected);
-}
-
-#[rstest]
-#[case("0")]
-#[case("6")]
-#[case("x")]
-fn sqs_max_attempts_rejects_values_outside_the_range(#[case] raw: &str) {
-    let args = ServeArgs {
-        sqs_max_attempts: some(raw),
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "SQS_MAX_ATTEMPTS",
-            "must be an integer from 1 to 5".to_owned()
-        )]
-    );
-}
-
-#[rstest]
 #[case("1024", 1024)]
 #[case("10485760", 10_485_760)]
 fn http_max_body_bytes_accepts_its_bounds(#[case] raw: &str, #[case] expected: usize) {
@@ -554,53 +444,8 @@ fn http_max_body_bytes_rejects_values_outside_the_range(#[case] raw: &str) {
     );
 }
 
-#[test]
-fn credentials_set_together_or_not_at_all_are_valid() {
-    let both = ServeArgs {
-        aws_access_key_id: some("key"),
-        aws_secret_access_key: some("secret"),
-        ..valid()
-    };
-
-    assert!(Config::from_args(both).is_ok());
-    assert!(Config::from_args(valid()).is_ok());
-}
-
-#[test]
-fn a_key_id_without_a_secret_names_the_missing_secret() {
-    let args = ServeArgs {
-        aws_access_key_id: some("key"),
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "AWS_SECRET_ACCESS_KEY",
-            "is required when AWS_ACCESS_KEY_ID is set".to_owned()
-        )]
-    );
-}
-
-#[test]
-fn a_secret_without_a_key_id_names_the_missing_key_id() {
-    let args = ServeArgs {
-        aws_secret_access_key: some("secret"),
-        ..valid()
-    };
-
-    assert_eq!(
-        problems(args),
-        [(
-            "AWS_ACCESS_KEY_ID",
-            "is required when AWS_SECRET_ACCESS_KEY is set".to_owned()
-        )]
-    );
-}
-
-fn timeouts(operation: &str, probe: &str, request: &str) -> ServeArgs {
+fn timeouts(probe: &str, request: &str) -> ServeArgs {
     ServeArgs {
-        sqs_operation_timeout: some(operation),
         health_probe_timeout: some(probe),
         http_request_timeout: some(request),
         ..valid()
@@ -608,37 +453,20 @@ fn timeouts(operation: &str, probe: &str, request: &str) -> ServeArgs {
 }
 
 #[test]
-fn the_probe_timeout_may_equal_the_operation_timeout() {
-    assert!(Config::from_args(timeouts("3s", "3s", "4s")).is_ok());
-}
-
-#[test]
-fn the_probe_timeout_below_the_operation_timeout_is_reported() {
-    assert_eq!(
-        problems(timeouts("4s", "3s", "10s")),
-        [(
-            "HEALTH_PROBE_TIMEOUT",
-            "must not be shorter than SQS_OPERATION_TIMEOUT".to_owned()
-        )]
-    );
-}
-
-#[test]
 fn the_request_timeout_must_exceed_the_probe_timeout() {
     assert_eq!(
-        problems(timeouts("2s", "3s", "3s")),
+        problems(timeouts("3s", "3s")),
         [(
             "HTTP_REQUEST_TIMEOUT",
             "must be longer than HEALTH_PROBE_TIMEOUT".to_owned()
         )]
     );
-    assert!(Config::from_args(timeouts("2s", "3s", "3001ms")).is_ok());
+    assert!(Config::from_args(timeouts("3s", "3001ms")).is_ok());
 }
 
 #[test]
 fn a_timeout_above_its_prd_ceiling_is_accepted() {
     let args = ServeArgs {
-        sqs_operation_timeout: some("1m"),
         health_probe_timeout: some("2m"),
         http_request_timeout: some("5m"),
         shutdown_grace_period: some("10m"),
@@ -648,7 +476,6 @@ fn a_timeout_above_its_prd_ceiling_is_accepted() {
 
     let config = Config::from_args(args).unwrap();
 
-    assert_eq!(config.sqs.operation_timeout, Duration::from_secs(60));
     assert_eq!(config.health_probe_timeout, Duration::from_secs(120));
     assert_eq!(config.shutdown_grace_period, Duration::from_secs(600));
 }
@@ -669,9 +496,11 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
     let args = ServeArgs {
         app_env: some("staging"),
         app_port: some("99999"),
-        aws_region: None,
-        aws_endpoint_url_sqs: some("ftp://user:hunter2@h/queue"),
-        aws_access_key_id: some("key"),
+        kafka: KafkaArgs {
+            sasl_password: some("hunter2"),
+            ..KafkaArgs::default()
+        },
+        cors_allowed_origins: some("ftp://user:hunter2@h/queue"),
         ..ServeArgs::default()
     };
 
@@ -686,9 +515,9 @@ fn every_problem_is_reported_in_one_run_in_the_order_of_the_table() {
         [
             "APP_ENV",
             "APP_PORT",
-            "AWS_REGION",
-            "AWS_ENDPOINT_URL_SQS",
-            "AWS_SECRET_ACCESS_KEY"
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "CORS_ALLOWED_ORIGINS",
+            "KAFKA_SASL_PASSWORD",
         ]
     );
     assert_eq!(
@@ -727,7 +556,7 @@ fn event_types_is_reported_after_the_limits() {
 fn event_types_is_reported_before_the_rules_between_variables() {
     let args = ServeArgs {
         event_types: some(""),
-        ..timeouts("4s", "3s", "10s")
+        ..timeouts("3s", "3s")
     };
 
     assert_eq!(
@@ -735,8 +564,8 @@ fn event_types_is_reported_before_the_rules_between_variables() {
         [
             ("EVENT_TYPES", EVENT_TYPES_REASON.to_owned()),
             (
-                "HEALTH_PROBE_TIMEOUT",
-                "must not be shorter than SQS_OPERATION_TIMEOUT".to_owned()
+                "HTTP_REQUEST_TIMEOUT",
+                "must be longer than HEALTH_PROBE_TIMEOUT".to_owned()
             ),
         ]
     );
@@ -819,42 +648,11 @@ type Mutator = fn(&mut ServeArgs);
 
 /// One row per variable of `ServeArgs`: the variable, a way to make it the only problem, and the
 /// variable that the problem names.
-const FIELDS: [(&str, Mutator, &str); 38] = [
+const FIELDS: [(&str, Mutator, &str); 31] = [
     ("APP_ENV", |a| a.app_env = some("x"), "APP_ENV"),
     ("APP_HOST", |a| a.app_host = some("x"), "APP_HOST"),
     ("APP_PORT", |a| a.app_port = some("x"), "APP_PORT"),
     ("LOG_LEVEL", |a| a.log_level = some("x=y"), "LOG_LEVEL"),
-    ("AWS_REGION", |a| a.aws_region = None, "AWS_REGION"),
-    (
-        "AWS_ENDPOINT_URL_SQS",
-        |a| a.aws_endpoint_url_sqs = some("x"),
-        "AWS_ENDPOINT_URL_SQS",
-    ),
-    (
-        "AWS_ACCESS_KEY_ID",
-        |a| a.aws_access_key_id = some("x"),
-        "AWS_SECRET_ACCESS_KEY",
-    ),
-    (
-        "AWS_SECRET_ACCESS_KEY",
-        |a| a.aws_secret_access_key = some("x"),
-        "AWS_ACCESS_KEY_ID",
-    ),
-    (
-        "SQS_CONNECT_TIMEOUT",
-        |a| a.sqs_connect_timeout = some("x"),
-        "SQS_CONNECT_TIMEOUT",
-    ),
-    (
-        "SQS_OPERATION_TIMEOUT",
-        |a| a.sqs_operation_timeout = some("x"),
-        "SQS_OPERATION_TIMEOUT",
-    ),
-    (
-        "SQS_MAX_ATTEMPTS",
-        |a| a.sqs_max_attempts = some("x"),
-        "SQS_MAX_ATTEMPTS",
-    ),
     (
         "HEALTH_PROBE_TIMEOUT",
         |a| a.health_probe_timeout = some("x"),

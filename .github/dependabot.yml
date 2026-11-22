@@ -30,8 +30,6 @@ updates:
     schedule: { interval: weekly, day: monday }
     groups:
       compose: { patterns: ['*'] }
-    ignore:
-      - dependency-name: localstack/localstack # frozen at the tokenless community tag 3.4.0
     commit-message: { prefix: build, include: scope }
   - package-ecosystem: npm
     directory: /tests/Load

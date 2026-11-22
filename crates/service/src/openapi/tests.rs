@@ -100,7 +100,7 @@ fn json_document() -> Value {
     "get",
     "api_health_get",
     "HealthCheck",
-    ("Checks the health of the service.", "Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
+    ("Checks the health of the service.", "Returns 204 when the cache responds and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.", "204 500 default")
 )]
 #[case(
     "/api/event-types",
@@ -149,7 +149,7 @@ fn json_document() -> Value {
     "get",
     "ping_get",
     "HealthCheck",
-    ("Checks that the process is alive.", "Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.", "200 default")
+    ("Checks that the process is alive.", "Answers `pong` without touching any dependency, so it keeps answering while the cache or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.", "200 default")
 )]
 #[case(
     "/api/docs",
@@ -615,7 +615,10 @@ fn the_route_oracle_skips_the_test_sources() {
 fn config(app_env: &str) -> Config {
     let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         ..ServeArgs::default()
     };
     Config::from_args(args).unwrap()

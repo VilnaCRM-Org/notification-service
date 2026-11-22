@@ -14,8 +14,8 @@ RESTORE_DIR_NAME=target/bats-restore
 # plain `NAME ?=` (BATS_ARGS, BATS_PATH, CI_STAGES, DEPS, base_ref, ...), read from the files so that a new one needs
 # no edit here. What the suite takes from its caller stays: the execution switches (RUN_IN_CONTAINER, CI,
 # IN_DEV_CONTAINER) and every exported setting (`export NAME ?=`: DOCKER, DOCKER_COMPOSE, BUILD_IMAGE, APP_IMAGE,
-# DEV_IMAGE, LOAD_TEST_PROJECT, COMPOSE_PROJECT_NAME, ...), plus DB_PORT and LOCALSTACK_PORT, which are not declared
-# in the Makefile at all.
+# DEV_IMAGE, LOAD_TEST_PROJECT, COMPOSE_PROJECT_NAME, ...), plus DB_PORT and the compose port variables (APP_PORT,
+# STRUCTURIZR_PORT), which are not declared in the Makefile at all.
 isolate_make_environment() {
   local root name
   root="${REPO_ROOT:-$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)}"

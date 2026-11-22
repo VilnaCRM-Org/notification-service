@@ -5,18 +5,11 @@ use rstest::rstest;
 
 use crate::support::{Scratch, VALID_ENVIRONMENT, stderr, stdout};
 
-const FULL_ENVIRONMENT: [(&str, &str); 38] = [
+const FULL_ENVIRONMENT: [(&str, &str); 31] = [
     ("APP_ENV", "dev"),
     ("APP_HOST", "127.0.0.1"),
     ("APP_PORT", "0"),
     ("LOG_LEVEL", "debug"),
-    ("AWS_REGION", "us-east-1"),
-    ("AWS_ENDPOINT_URL_SQS", "http://127.0.0.1:1"),
-    ("AWS_ACCESS_KEY_ID", "test"),
-    ("AWS_SECRET_ACCESS_KEY", "test"),
-    ("SQS_CONNECT_TIMEOUT", "300ms"),
-    ("SQS_OPERATION_TIMEOUT", "1s"),
-    ("SQS_MAX_ATTEMPTS", "2"),
     ("HEALTH_PROBE_TIMEOUT", "2s"),
     ("HTTP_REQUEST_TIMEOUT", "5s"),
     ("HTTP_MAX_BODY_BYTES", "2048"),
@@ -74,7 +67,10 @@ fn every_variable_of_the_table_is_accepted_together() {
 fn flags_replace_variables() {
     let scratch = Scratch::new();
 
-    let output = scratch.run(&["check-config", "--aws-region", "eu-west-1"], &[]);
+    let output = scratch.run(
+        &["check-config", "--kafka-bootstrap-servers", "a:9092"],
+        &[],
+    );
 
     assert_eq!(output.status.code(), Some(0));
 }
@@ -86,7 +82,7 @@ fn every_invalid_or_missing_variable_is_named_in_one_run_without_its_value() {
     let output = scratch.run(
         &["check-config"],
         &[
-            ("AWS_ENDPOINT_URL_SQS", "ftp://user:hunter2@h/queue"),
+            ("CORS_ALLOWED_ORIGINS", "ftp://user:hunter2@h/queue"),
             ("APP_PORT", "99999"),
             ("APP_ENV", "staging"),
         ],
@@ -99,19 +95,19 @@ fn every_invalid_or_missing_variable_is_named_in_one_run_without_its_value() {
     assert_eq!(lines.len(), 4, "{errors}");
     assert!(lines[0].starts_with("APP_ENV: "));
     assert!(lines[1].starts_with("APP_PORT: "));
-    assert!(lines[2].starts_with("AWS_REGION: "));
-    assert!(lines[3].starts_with("AWS_ENDPOINT_URL_SQS: "));
+    assert!(lines[2].starts_with("KAFKA_BOOTSTRAP_SERVERS: "));
+    assert!(lines[3].starts_with("CORS_ALLOWED_ORIGINS: "));
     assert!(!errors.contains("hunter2"));
     assert!(!errors.contains("99999"));
     assert!(!errors.contains("staging"));
 }
 
 #[test]
-fn an_sqs_endpoint_with_a_malformed_host_is_named_without_its_value() {
+fn an_origin_with_a_malformed_host_is_named_without_its_value() {
     let scratch = Scratch::new();
     let variables = [
         VALID_ENVIRONMENT[0],
-        ("AWS_ENDPOINT_URL_SQS", "http://exa mple:4566"),
+        ("CORS_ALLOWED_ORIGINS", "http://exa mple:4566"),
     ];
 
     let output = scratch.run(&["check-config"], &variables);
@@ -121,7 +117,8 @@ fn an_sqs_endpoint_with_a_malformed_host_is_named_without_its_value() {
     let errors = stderr(&output);
     assert_eq!(
         errors,
-        "AWS_ENDPOINT_URL_SQS: must be an http:// or https:// URL\n"
+        "CORS_ALLOWED_ORIGINS: must be * or a comma-separated list of origins such as \
+         https://app.example.com\n"
     );
     assert!(!errors.contains("exa mple"));
 }
@@ -312,60 +309,9 @@ fn the_sasl_password_is_never_printed_by_check_config_or_serve() {
 }
 
 #[test]
-fn a_key_id_without_a_secret_names_the_missing_variable() {
-    let scratch = Scratch::new();
-    let variables = [VALID_ENVIRONMENT[0], ("AWS_ACCESS_KEY_ID", "key")];
-
-    let output = scratch.run(&["check-config"], &variables);
-
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        "AWS_SECRET_ACCESS_KEY: is required when AWS_ACCESS_KEY_ID is set\n"
-    );
-}
-
-#[test]
-fn a_secret_without_a_key_id_names_the_missing_variable() {
-    let scratch = Scratch::new();
-    let variables = [VALID_ENVIRONMENT[0], ("AWS_SECRET_ACCESS_KEY", "secret")];
-
-    let output = scratch.run(&["check-config"], &variables);
-
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        stderr(&output),
-        "AWS_ACCESS_KEY_ID: is required when AWS_SECRET_ACCESS_KEY is set\n"
-    );
-}
-
-#[test]
-fn both_credentials_set_or_both_unset_is_valid() {
-    let scratch = Scratch::new();
-    let both = [
-        VALID_ENVIRONMENT[0],
-        ("AWS_ACCESS_KEY_ID", "key"),
-        ("AWS_SECRET_ACCESS_KEY", "secret"),
-    ];
-
-    assert_eq!(scratch.run(&["check-config"], &both).status.code(), Some(0));
-    assert_eq!(
-        scratch
-            .run(&["check-config"], &VALID_ENVIRONMENT)
-            .status
-            .code(),
-        Some(0)
-    );
-}
-
-#[test]
 fn the_help_lists_every_flag_and_never_a_value() {
     let scratch = Scratch::new();
-    let variables = [
-        ("KAFKA_SASL_PASSWORD", "topsecret"),
-        ("AWS_SECRET_ACCESS_KEY", "credentialvalue"),
-        ("APP_PORT", "4242"),
-    ];
+    let variables = [("KAFKA_SASL_PASSWORD", "topsecret"), ("APP_PORT", "4242")];
 
     let serve = scratch.run(&["serve", "--help"], &variables);
     let check = scratch.run(&["check-config", "--help"], &variables);
@@ -375,7 +321,6 @@ fn the_help_lists_every_flag_and_never_a_value() {
         assert_eq!(output.status.code(), Some(0));
         let text = stdout(output);
         assert!(!text.contains("topsecret"));
-        assert!(!text.contains("credentialvalue"));
         assert!(!text.contains("4242"));
         assert!(!text.contains("DATABASE_"));
         assert!(!text.contains("migrate"));
@@ -386,11 +331,6 @@ fn the_help_lists_every_flag_and_never_a_value() {
         "--app-host",
         "--app-port",
         "--log-level",
-        "--aws-region",
-        "--aws-endpoint-url-sqs",
-        "--sqs-connect-timeout",
-        "--sqs-operation-timeout",
-        "--sqs-max-attempts",
         "--health-probe-timeout",
         "--http-request-timeout",
         "--http-max-body-bytes",
@@ -403,9 +343,10 @@ fn the_help_lists_every_flag_and_never_a_value() {
     ] {
         assert!(help.contains(flag), "{flag} is missing from the help");
     }
-    assert!(help.contains("[env: AWS_REGION]"));
-    assert!(!help.contains("AWS_ACCESS_KEY_ID"));
-    assert!(!help.contains("AWS_SECRET_ACCESS_KEY"));
+    // The help wraps at the terminal width when clap has `wrap_help` (a workspace test build
+    // unifies it in), so the label is matched with its whitespace collapsed.
+    let words = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(words.contains("[env: KAFKA_BOOTSTRAP_SERVERS]"));
     assert!(stdout(&root).contains("check-config"));
 }
 
@@ -441,7 +382,7 @@ fn the_env_file_of_the_working_directory_is_loaded() {
     let scratch = Scratch::new();
     scratch.write(
         ".env",
-        "PORT_BASE=9000\nAPP_PORT=${PORT_BASE}\nAWS_REGION=us-east-1\n",
+        "PORT_BASE=9000\nAPP_PORT=${PORT_BASE}\nKAFKA_BOOTSTRAP_SERVERS=localhost:9092\n",
     );
 
     let output = scratch.run(&["check-config"], &[]);
@@ -478,7 +419,7 @@ fn a_directory_without_an_env_file_has_no_configuration() {
     let output = scratch.run(&["check-config"], &[]);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(stderr(&output), "AWS_REGION: is required\n");
+    assert_eq!(stderr(&output), "KAFKA_BOOTSTRAP_SERVERS: is required\n");
 }
 
 #[test]

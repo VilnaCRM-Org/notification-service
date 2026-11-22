@@ -1,6 +1,4 @@
-//! Integration tests of the probes against the test stack (the SQS emulator).
+//! Integration tests of the probes against the real adapters they are wired to.
 
 #[cfg(test)]
-mod sqs_probe;
-#[cfg(test)]
-mod support;
+mod cache_probe;

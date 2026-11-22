@@ -160,7 +160,7 @@ async fn ids(subscription: &mut Subscription, count: usize) -> Vec<u64> {
             break;
         }
         match step(subscription).await {
-            Step::Frame(frame) => ids.push(frame.sequence.value()),
+            Step::Frame(frame) => ids.push(frame.sequence().value()),
             Step::Idle => {}
             Step::End(_) => panic!("the subscription ended"),
         }
@@ -518,6 +518,68 @@ async fn a_cursor_inside_the_window_is_served_from_the_window_then_live_without_
     assert_eq!(ids(&mut subscription, 2).await, [1_001, 1_003]);
     assert!(waits(&mut subscription).await);
     assert_eq!(replay.calls(), Vec::<Cursor>::new());
+}
+
+/// The ids of the frames [`Subscription::try_next`] gives until it answers `None`.
+fn ready_ids(subscription: &mut Subscription) -> Vec<u64> {
+    std::iter::from_fn(|| subscription.try_next())
+        .map(|frame| frame.sequence().value())
+        .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_next_takes_the_queued_frames_of_a_live_subscription_without_awaiting() {
+    let (node, replay) = quiet_node(900);
+    let mut subscription = node.open(&["a"], None);
+    assert_eq!(ready_ids(&mut subscription), Vec::<u64>::new());
+
+    pass_all(&node, 901..=905);
+
+    assert_eq!(ready_ids(&mut subscription), [901, 903, 905]);
+    assert_eq!(subscription.position(), Cursor::new(905));
+    assert!(waits(&mut subscription).await);
+    assert_eq!(replay.calls(), Vec::<Cursor>::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_next_drops_a_queued_frame_at_or_below_the_floor() {
+    let (node, _replay) = quiet_node(900);
+    let mut subscription = node.open(&["a"], None);
+    pass_all(&node, 901..=903);
+    subscription.floor = Cursor::new(901);
+
+    assert_eq!(ready_ids(&mut subscription), [903]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_next_drains_the_rest_of_the_last_page_then_the_queue() {
+    let (node, _replay) = quiet_node(0);
+    pass_all(&node, 1..=10);
+    let mut subscription = node.open(&["a", "b"], Some(4));
+    idle(&mut subscription).await;
+    assert_eq!(ready_ids(&mut subscription), Vec::<u64>::new());
+    idle(&mut subscription).await;
+    pass_all(&node, 11..=12);
+
+    assert_eq!(ready_ids(&mut subscription), all(5..=12));
+}
+
+#[tokio::test(start_paused = true)]
+async fn try_next_leaves_an_unread_page_and_an_ended_queue_to_the_next_step() {
+    let (node, _replay) = quiet_node(0);
+    pass_all(&node, 1..=4);
+    let mut subscription = node.open(&["a", "b"], Some(0));
+    idle(&mut subscription).await;
+    assert_eq!(ready_ids(&mut subscription), Vec::<u64>::new());
+    assert_eq!(ids(&mut subscription, 4).await, all(1..=4));
+
+    node.hub.close();
+
+    assert_eq!(ready_ids(&mut subscription), Vec::<u64>::new());
+    assert!(matches!(
+        step(&mut subscription).await,
+        Step::End(EndReason::HubClosed)
+    ));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1380,7 +1442,7 @@ async fn next_skips_the_idle_steps_returns_the_first_frame_and_none_at_the_end()
     let mut subscription = node.open(&["a"], Some(950));
 
     let frame = within_polls(subscription.next()).await.unwrap().unwrap();
-    assert_eq!(frame.sequence.value(), 951);
+    assert_eq!(frame.sequence().value(), 951);
 
     let mut ended = node.open(&["a"], Some(950));
     node.hub.close();
@@ -1406,7 +1468,7 @@ async fn next_hands_the_thread_back_at_an_idle_step_once_the_task_budget_is_spen
     let Poll::Ready(Some(frame)) = fresh else {
         panic!("a fresh budget gives the first frame in one poll: {fresh:?}");
     };
-    assert_eq!(frame.sequence.value(), 951);
+    assert_eq!(frame.sequence().value(), 951);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1547,7 +1609,7 @@ async fn a_live_step_serves_the_window_and_the_live_queue_like_a_step() {
     let mut frames = Vec::new();
     for _ in 0..IDLE_STEPS {
         match timeout(WAIT, subscription.step_live()).await.unwrap() {
-            Step::Frame(frame) => frames.push(frame.sequence.value()),
+            Step::Frame(frame) => frames.push(frame.sequence().value()),
             Step::Idle => {}
             Step::End(reason) => panic!("the subscription ended: {reason:?}"),
         }

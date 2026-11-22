@@ -1,6 +1,6 @@
 [package]
 name = "health-check-infrastructure"
-description = "Health-check context, infrastructure layer: cache and SQS probes"
+description = "Health-check context, infrastructure layer: the cache probe"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,13 +10,10 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-aws-sdk-sqs.workspace = true
 health-check-domain.workspace = true
 shared-domain.workspace = true
 
 [dev-dependencies]
-aws-sdk-sqs = { workspace = true, features = ["test-util"] }
-aws-smithy-mocks.workspace = true
 shared-infrastructure.workspace = true
 test-support.workspace = true
 tokio.workspace = true

@@ -18,11 +18,9 @@ use crate::limit::{bounded, listen_on};
 
 /// The configuration of every node of a test: the topic and the broker, nothing about another
 /// node, and a keep-alive every second, which ends the read that shows that nothing follows the
-/// last expected event. SQS is on port 1 and never reached (no request of these tests needs it).
+/// last expected event.
 fn config(topic: &str) -> Config {
     Config::from_args(ServeArgs {
-        aws_region: Some("us-east-1".to_owned()),
-        aws_endpoint_url_sqs: Some("http://127.0.0.1:1".to_owned()),
         event_types: Some(TYPE.to_owned()),
         kafka: KafkaArgs {
             bootstrap_servers: Some(bootstrap_servers()),

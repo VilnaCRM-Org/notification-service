@@ -58,18 +58,28 @@ impl EventStreamProbe {
     /// The readiness rule: the first reason that holds, in the order fault, starting, unreachable,
     /// behind; [`Self::probe`] is its only caller outside the tests of this module.
     fn readiness(&self) -> Result<(), EventStreamNotReady> {
-        let state = self.tail.borrow().clone();
+        // Copies the four fields the rule reads inside the borrow, so the whole state is never
+        // cloned and the read lock of the channel is released before the clock is asked.
+        let (fault, started, observed_at, caught_up_at) = {
+            let state = self.tail.borrow();
+            (
+                state.fault,
+                state.started,
+                state.observed_at,
+                state.caught_up_at,
+            )
+        };
         let now = self.clock.now();
-        if let Some(fault) = state.fault {
+        if let Some(fault) = fault {
             return Err(EventStreamNotReady::Fault(fault));
         }
-        if !state.started {
+        if !started {
             return Err(EventStreamNotReady::Starting);
         }
-        if !self.fresh(state.observed_at, now) {
+        if !self.fresh(observed_at, now) {
             return Err(EventStreamNotReady::Unreachable);
         }
-        if !self.fresh(state.caught_up_at, now) {
+        if !self.fresh(caught_up_at, now) {
             return Err(EventStreamNotReady::Behind);
         }
         Ok(())

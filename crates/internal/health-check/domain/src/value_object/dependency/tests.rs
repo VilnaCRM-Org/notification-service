@@ -4,11 +4,6 @@ use super::Dependency;
 
 #[rstest]
 #[case::cache(Dependency::Cache, "cache", "Cache is not working")]
-#[case::message_broker(
-    Dependency::MessageBroker,
-    "message_broker",
-    "Message broker is not available"
-)]
 #[case::event_stream(Dependency::EventStream, "event_stream", "Event stream is not ready")]
 fn a_dependency_has_an_identifier_and_a_failure_message(
     #[case] dependency: Dependency,

@@ -6,12 +6,13 @@
 //! [`super::socket`] owns the socket, the pings and the deadlines.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, close_code};
 use event_stream_domain::{Cursor, EventType};
 
 use super::dto::{Command, TypesError, parse_names};
-use super::frame::error_json;
+use super::frame::{Frame, error_json};
 use super::subscription::{EndReason, Step, Subscription, TooManyTypes};
 
 /// The reason of the error frame of a text that is not a command.
@@ -75,6 +76,12 @@ impl Session {
     /// pings may cancel (see [`Subscription::step_live`]).
     pub(crate) async fn live_step(&mut self) -> Step {
         self.subscription.step_live().await
+    }
+
+    /// The next frame that is ready without awaiting (see [`Subscription::try_next`]), for the
+    /// write batch that follows a frame.
+    pub(crate) fn try_next(&mut self) -> Option<Arc<Frame>> {
+        self.subscription.try_next()
     }
 
     /// True when the next step reads Kafka: a permit wait and one page read, which no inbound

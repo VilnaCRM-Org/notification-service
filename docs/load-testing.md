@@ -25,31 +25,33 @@ The budgets of the `health` scenario (`GET /api/health`, checked for status 204)
 
 | Profile | Budget (p99, milliseconds) | Ceiling (milliseconds) | Where the budget comes from |
 | --- | --- | --- | --- |
-| `smoke` | 50 | 500 | the budget rule applied to the p99 measured on a 4-vCPU GitHub-hosted runner (7.25 ms on 2026-11-11) |
-| `average` | 200 | 200 | the ceiling: no hosted-runner measurement |
-| `stress` | 1000 | 1000 | the ceiling: no hosted-runner measurement |
-| `spike` | 5000 | 5000 | the ceiling: no hosted-runner measurement |
+| `smoke` | 50 | 500 | the floor of the budget rule: 3 x 1.17 ms (worst p99 of three local runs, 2026-11-22) and 3 x 7.25 ms (4-vCPU GitHub-hosted runner, 2026-11-11) are both below 50 ms |
+| `average` | 50 | 200 | the floor of the budget rule: 3 x 1.00 ms (worst p99 of three local runs, 2026-11-22) = 3.00 ms, rounded up to 10 ms |
+| `stress` | 50 | 1000 | the floor of the budget rule: 3 x 1.29 ms (worst p99 of three local runs, 2026-11-22) = 3.87 ms, rounded up to 10 ms |
+| `spike` | 50 | 5000 | the floor of the budget rule: 3 x 0.89 ms (worst p99 of three local runs, 2026-11-22) = 2.67 ms, rounded up to 10 ms |
 
-When these measurements were taken, each health request made one `SELECT 1` and one `ListQueues` call to LocalStack; since the removal of PostgreSQL it makes only the `ListQueues` call, and the cache and event-stream checks run in memory. The smoke profile ran on a 4-vCPU GitHub-hosted runner in the job `Smoke load tests` of commit `db7fe08` (2026-11-11): p99 7.25 ms, 101 of 101 checks passed. The rule gives 3 x 7.25 = 21.75 ms, rounded up to 30 ms, raised to the floor of 50 ms, so the smoke budget is 50 ms. A second hosted run, job `Smoke load tests` of commit `14d0d18` on the same day, measured a p99 of 6.45 ms with 101 of 101 checks: the rule gives 3 x 6.45 = 19.35 ms, rounded up to 20 ms, raised to the floor of 50 ms, so the budget stays 50 ms. CI runs the smoke profile only. The average, stress and spike profiles run in no pipeline (each of them, and `make load-tests`, was run locally on 2026-11-11; see the table below), so they have no hosted-runner measurement and stay at their ceilings; their local measurements are in the table below and are not hosted-runner values. On that machine, while other work shared it, a second stress run measured 1.48 s and failed the 1000 ms budget (load average 9.3), and one smoke run during a concurrent container compile measured 66.41 ms and failed the 50 ms budget (load average 11); every other local run stayed within its budget. The budgets and ceilings were not changed: the rule uses the hosted-runner value, and a busy developer machine can fail `make smoke-load-tests`.
+**The measurements of 2026-11-22.** Since the removal of PostgreSQL and of SQS ([ADR 0023](adr/0023-sqs-is-removed.md)) a health request no longer calls SQS or LocalStack, nor any other backing service: it reads in-memory state only (the cache and event-stream checks run in memory), so the scenario measures the service itself. Before this change the health scenario collapsed at about 200 to 400 requests per second, and the stress and spike profiles of the `subscriptions` scenario failed with `Too many open files (os error 24)`, because the soft `nofile` limit of the service container was 1024 and every held subscriber holds one socket. The service of `docker-compose.prod.yml` now sets `nofile` to 1048576 (soft and hard), and both failures are gone. The budgets of both scenarios were then derived from three consecutive runs of `make load-tests BUILD_IMAGE=0` on the production image of the branch, on a local 4-core, 8-thread Intel Core i7-1165G7 laptop with Docker 29.10: every check passed in every run (`health` 3373, 3374 and 3373 checks; `subscriptions` 12040, 12040 and 12035 checks), and every p99 is in the table under [Measured values](#measured-values). The maintainer chose to derive the budgets from these local measurements instead of waiting for hosted-runner measurements of the larger profiles, and kept the floor of 50 ms. Every `health` p99 stayed below 1.3 ms, so all four `health` budgets are the floor of 50 ms.
+
+**The earlier measurements.** When the measurements of 2026-11-11 were taken, each health request made one `SELECT 1` and one `ListQueues` call to LocalStack. The smoke profile ran on a 4-vCPU GitHub-hosted runner in the job `Smoke load tests` of commit `db7fe08` (2026-11-11): p99 7.25 ms, 101 of 101 checks passed. The rule gives 3 x 7.25 = 21.75 ms, rounded up to 30 ms, raised to the floor of 50 ms, so the smoke budget is 50 ms. A second hosted run, job `Smoke load tests` of commit `14d0d18` on the same day, measured a p99 of 6.45 ms with 101 of 101 checks: the rule gives 3 x 6.45 = 19.35 ms, rounded up to 20 ms, raised to the floor of 50 ms, so the budget stays 50 ms. CI runs the smoke profile only. The average, stress and spike profiles run in no pipeline (each of them, and `make load-tests`, was run locally on 2026-11-11; see the table below), so they had no hosted-runner measurement and stayed at their ceilings until the measurements of 2026-11-22; their local measurements are in the table below and are not hosted-runner values. On that machine, while other work shared it, a second stress run measured 1.48 s and failed the 1000 ms budget (load average 9.3), and one smoke run during a concurrent container compile measured 66.41 ms and failed the 50 ms budget (load average 11); every other local run stayed within its budget. The budgets and ceilings were not changed then, because the rule used the hosted-runner value only; a busy developer machine can fail `make smoke-load-tests`.
 
 The four budget values are protected configuration: changing one needs the label `approved-config-change` on the pull request. The rest of the file changes freely. The success-rate threshold of the checks (above 99%) lives in `tests/Load/utils/thresholdsBuilder.js`, which is a protected file in its entirety.
 
 ### The budget rule
 
-Each budget is three times the p99 measured on a 4-vCPU GitHub-hosted runner, rounded up to a multiple of 10 milliseconds, and it is not below 50 milliseconds (so that runner noise does not fail the gate) and not above its ceiling:
+Each budget is three times the measured p99, rounded up to a multiple of 10 milliseconds, and it is not below 50 milliseconds (so that machine and runner noise does not fail the gate) and not above its ceiling. The measured p99 is the worst of the p99 values of three consecutive local runs of the production image (`make load-tests BUILD_IMAGE=0`) and of the p99 values measured on a 4-vCPU GitHub-hosted runner, where one exists:
 
 ```text
-budget = min(ceiling, max(50, 3 x measured p99 rounded up to 10))
+budget = min(ceiling, max(50, 3 x worst measured p99 rounded up to 10))
 ```
 
-Ceilings: smoke 500 ms, average 200 ms, stress 1000 ms, spike 5000 ms (the PHP template used 9000 ms for smoke).
+Ceilings: smoke 500 ms, average 200 ms, stress 1000 ms, spike 5000 ms for the request budgets `threshold` of both scenarios (the PHP template used 9000 ms for smoke), and 2000 ms for every `deliveryThreshold` of the `subscriptions` scenario.
 
 Procedure:
 
-1. After the first run of the smoke profile on a hosted runner, read the p99 of the `smoke` profile from the job log or from the `load-test-results` artifact.
-2. Compute the budget with the rule and record the measurement, its date and the budget in the table below.
-3. Change `threshold` of the smoke profile in `tests/Load/config.json.dist` in a pull request with the label `approved-config-change`.
-4. The average, stress and spike profiles run in no pipeline. They stay at their ceilings until a maintainer measures them on comparable hardware (the default AWS instance has 4 vCPU) and applies the same rule.
+1. Run `make load-tests BUILD_IMAGE=0` three times in a row on the production image of the change, on a machine that runs nothing else, and read the p99 of every profile from the end-of-run summaries or from the dashboards in `tests/Load/results/`. Every check must pass in every run. For the smoke profile, also read the p99 of the hosted runner from the job log or from the `load-test-results` artifact.
+2. Take the worst p99 of each profile, compute the budget with the rule and record every measurement, its date and the budget in the table below. Add rows; never overwrite old ones.
+3. Change the budgets in `tests/Load/config.json.dist` in a pull request with the label `approved-config-change`.
+4. The average, stress and spike profiles run in no pipeline, so their budgets come from the local runs until a maintainer measures them on comparable hardware (the default AWS instance has 4 vCPU) and applies the same rule.
 
 ## The subscriptions scenario
 
@@ -76,16 +78,25 @@ A profile starts `rps` iterations per second and each one lasts `hold` seconds, 
 
 | Profile | `rps` | `vus` | Duration (seconds) | `hold` (seconds) | Subscribers of each kind once ramped up | Catalog budget `threshold` (p99, milliseconds) | `deliveryThreshold` (p99, milliseconds) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `smoke` | 10 | 60 | 10 | 5 | 50 | 500 | 2000 |
-| `average` | 20 | 120 | 3 rise, 10 plateau, 3 fall | 5 | 100 | 200 | 2000 |
-| `stress` | 100 | 600 | 3 rise, 10 plateau, 3 fall | 5 | 500 | 1000 | 2000 |
-| `spike` | 150 | 800 | 5 rise, 5 fall | 5 | about 560 at the peak | 5000 | 2000 |
+| `smoke` | 10 | 60 | 10 | 5 | 50 | 50 | 50 |
+| `average` | 20 | 120 | 3 rise, 10 plateau, 3 fall | 5 | 100 | 50 | 130 |
+| `stress` | 100 | 600 | 3 rise, 10 plateau, 3 fall | 5 | 500 | 240 | 310 |
+| `spike` | 150 | 800 | 5 rise, 5 fall | 5 | about 560 at the peak | 650 | 830 |
 
-Both numbers are budgets, not measurements: no hosted-runner measurement of this scenario exists yet. The catalog budgets are the ceilings of the budget rule, which apply until a hosted-runner measurement derives a budget. The delivery budget of 2 000 milliseconds is the ceiling the requirement sets for the smoke profile, used for every profile because the event rate of the publisher does not change with the profile. The delivery interval includes the console producer, the broker, the service's read of the topic and the WebSocket write, so it can neither prove nor disprove the fan-out design target of the service. Unlike the four `health` budgets, the values of this entry are not protected configuration; like them, they are never raised to make a failing run pass, and a change of a budget records its measurement in the table below.
+Both numbers are budgets derived with the [budget rule](#the-budget-rule) from the worst p99 of the three local runs of 2026-11-22 (no hosted-runner measurement of this scenario exists yet):
+
+| Profile | Worst catalog p99 (ms) | Catalog budget (ms) | Worst delivery p99 (ms) | Delivery budget (ms) |
+| --- | --- | --- | --- | --- |
+| `smoke` | 1.14 | 50 (3 x 1.14 = 3.42, rounded up to 10, floor 50) | 10 | 50 (3 x 10 = 30, floor 50) |
+| `average` | 7.54 | 50 (3 x 7.54 = 22.62, rounded up to 30, floor 50) | 42 | 130 (3 x 42 = 126, rounded up to 130) |
+| `stress` | 77.35 | 240 (3 x 77.35 = 232.05, rounded up to 240) | 102 | 310 (3 x 102 = 306, rounded up to 310) |
+| `spike` | 213.98 | 650 (3 x 213.98 = 641.94, rounded up to 650) | 275 | 830 (3 x 275 = 825, rounded up to 830) |
+
+The catalog ceilings are those of the `health` scenario; the delivery ceiling of 2 000 milliseconds is the one the requirement sets for the smoke profile, used for every profile because the event rate of the publisher does not change with the profile. No budget reaches its ceiling. The stress and spike p99 values vary much more between runs than the others (catalog stress 9.08 to 77.35 ms, spike 6.40 to 213.98 ms), so their budgets carry the worst run. The delivery interval includes the console producer, the broker, the service's read of the topic and the WebSocket write, so it can neither prove nor disprove the fan-out design target of the service. Unlike the four `health` budgets, the values of this entry are not protected configuration; like them, they are never raised to make a failing run pass, and a change of a budget records its measurement in the table below.
 
 ## Measured values
 
-One row per measurement. Add a row for every new measurement; do not overwrite old rows. Only a hosted-runner row derives a budget; a local row records what the profile measured on that machine. An empty cell means that nothing has been measured yet.
+One row per measurement. Add a row for every new measurement; do not overwrite old rows. Until 2026-11-22 only a hosted-runner row derived a budget and a local row recorded what the profile measured on that machine; since then the rows of three consecutive local runs of the production image derive budgets too (see [The budget rule](#the-budget-rule)). An empty cell means that nothing has been measured yet.
 
 | Scenario | Profile | Environment | Date | Measured p99 (ms) | Budget derived (ms) | Budget in `config.json.dist` (ms) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -112,6 +123,14 @@ One row per measurement. Add a row for every new measurement; do not overwrite o
 | `health` | `stress` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work, production image, `BUILD_IMAGE=0`, `make load-tests` | 2026-11-11 | 399.22 | not derived; the rule uses the hosted-runner value | 1000 |
 | `health` | `spike` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work, production image, `BUILD_IMAGE=0`, `make load-tests` | 2026-11-11 | 394.73 | not derived; the rule uses the hosted-runner value | 5000 |
 | `subscriptions` | `smoke` | local, 4 vCPU and 15 GB Linux virtual machine shared with other work; **not the production image** (it could not be built on that machine) but a debug build of the service, a topic of its own on the development broker fed by the loop of `load-test-publisher`, and `tests/Load/execute-load-test.sh` called with `API_HOST` and `API_PORT`; two runs (404 and 400 checks, 100%; `subscribers` 100 while the subscribers were held) | 2026-11-15 | catalog 3.19 and 3.65; delivery 8 and 8 | not derived; the rule uses the hosted-runner value | catalog 500, delivery 2000 |
+| `health` | `smoke` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (3373, 3374 and 3373 checks, 100%) | 2026-11-22 | 1.17, 0.76, 0.82 | 50 (3 x 1.17 = 3.51, rounded up to 10, floor 50) | 50 |
+| `health` | `average` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (3373, 3374 and 3373 checks, 100%) | 2026-11-22 | 0.92, 0.93, 1.00 | 50 (3 x 1.00 = 3.00, rounded up to 10, floor 50) | 50 |
+| `health` | `stress` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (3373, 3374 and 3373 checks, 100%) | 2026-11-22 | 0.89, 1.26, 1.29 | 50 (3 x 1.29 = 3.87, rounded up to 10, floor 50) | 50 |
+| `health` | `spike` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (3373, 3374 and 3373 checks, 100%) | 2026-11-22 | 0.89, 0.86, 0.89 | 50 (3 x 0.89 = 2.67, rounded up to 10, floor 50) | 50 |
+| `subscriptions` | `smoke` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 1.06, 0.89, 1.14; delivery 7, 4, 10 | catalog 50 (3 x 1.14 = 3.42, rounded up to 10, floor 50), delivery 50 (3 x 10 = 30, floor 50) | catalog 50, delivery 50 |
+| `subscriptions` | `average` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 1.20, 1.08, 7.54; delivery 6, 6, 42 | catalog 50 (3 x 7.54 = 22.62, rounded up to 30, floor 50), delivery 130 (3 x 42 = 126, rounded up to 130) | catalog 50, delivery 130 |
+| `subscriptions` | `stress` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 9.08, 77.35, 48.49; delivery 26, 102, 89 | catalog 240 (3 x 77.35 = 232.05, rounded up to 240), delivery 310 (3 x 102 = 306, rounded up to 310) | catalog 240, delivery 310 |
+| `subscriptions` | `spike` | local, 4-core, 8-thread Intel Core i7-1165G7 laptop, Docker 29.10, production image of the branch, `BUILD_IMAGE=0`, `make load-tests`, three consecutive runs (12040, 12040 and 12035 checks, 100%) | 2026-11-22 | catalog 213.98, 8.45, 6.40; delivery 275, 36, 27 | catalog 650 (3 x 213.98 = 641.94, rounded up to 650), delivery 830 (3 x 275 = 825, rounded up to 830) | catalog 650, delivery 830 |
 
 ## Running the tests
 
@@ -146,7 +165,7 @@ The assistant skill `load-testing` lists the same steps, with the `health` scena
 
 ## The isolated environment
 
-Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no LocalStack or broker port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). It also runs `load-test-publisher`, which writes the events of the `subscriptions` scenario to its broker from the start of the project to its removal. The development service on port 8081 is a debug build and keeps running next to it.
+Schemathesis and K6 run against the production image in a compose project of their own, `<project>-load`, never against the development stack. The project has its own network and volumes, publishes no broker port, and publishes the service on `LOAD_TEST_APP_PORT` (default `18081`). It also runs `load-test-publisher`, which writes the events of the `subscriptions` scenario to its broker from the start of the project to its removal. The development service on port 8081 is a debug build and keeps running next to it.
 
 `scripts/with-load-test-stack.sh` builds the production image (unless `BUILD_IMAGE=0`), starts the project and waits until it is healthy, runs the given command with `API_HOST=localhost` and `API_PORT=$LOAD_TEST_APP_PORT`, and always removes the project with its volumes, also when the command fails. When the command fails (a crossed K6 threshold, a failed Schemathesis check), it prints a line with the exit status and the logs of the project, the service's included, to standard error before it removes the project, and exits with the status of the command. It exits with status 2 and prints the logs when the environment does not become healthy.
 
@@ -154,7 +173,7 @@ To test a service that already runs elsewhere, call the runners directly with `A
 
 ## The AWS runner
 
-`make aws-load-tests` runs the load tests on a temporary EC2 instance and `make aws-load-tests-cleanup` removes everything it created. Use it to measure on hardware that is not your own. The host needs Docker and git only: the AWS CLI runs from a pinned image, the run id comes from `/dev/urandom`, and the policy files are rendered with `sed`.
+`make aws-load-tests` runs the load tests on a temporary EC2 instance and `make aws-load-tests-cleanup` removes everything it created. Use it to measure on hardware that is not your own. The host needs Docker and git only (the dry run, git only): the AWS CLI runs from a pinned image, the run id comes from `/dev/urandom`, and the policy files are rendered with `sed`.
 
 ```sh
 make aws-load-tests region=eu-west-1 instance_type=c6i.xlarge load_target=smoke-load-tests
@@ -191,4 +210,4 @@ A smoke run keeps one `c6i.xlarge` instance for the image build (about 5 minutes
 
 ### What is verified
 
-The AWS flow is verified only against the LocalStack dry run: with `LOCAL_MODE_ENV=true` every call goes to the LocalStack container on `LOCALSTACK_PORT` with the placeholder credentials `test`, the AMI is a fixed placeholder, and the wait is skipped because the emulator does not execute user data. The Bats suite asserts the two output markers and a clean `make aws-load-tests-cleanup` in that mode. Nothing in CI starts a real instance. The first real run is yours: expect to adjust the permissions of the identity, the instance type or the region, and report what you had to change.
+The AWS flow is verified only by its dry run: with `LOCAL_MODE_ENV=true` every call goes to the stub AWS CLI `tests/Load/stub-aws.sh` instead of the CLI image, so the dry run needs neither credentials, an emulator nor Docker. The stub answers each call of the runner and of its cleanup with a canned value (the AMI of the SSM parameter, a VPC, a security group, an instance id, ARNs that carry the run id) and starts nothing, so the wait is skipped. With `AWS_STUB_LOG=<file>` it appends every call to that file. The Bats suite asserts the two output markers, the calls made and a clean `make aws-load-tests-cleanup` in that mode. Nothing in CI starts a real instance. The first real run is yours: expect to adjust the permissions of the identity, the instance type or the region, and report what you had to change.

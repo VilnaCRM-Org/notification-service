@@ -28,7 +28,7 @@ use tokio::sync::watch;
 use tokio::time::{Instant, timeout};
 use tracing::Level;
 
-use super::{COMPLETE, KEEP_ALIVE, next_block, respond};
+use super::{COMPLETE, KEEP_ALIVE, next_block, push_next_block, respond};
 use crate::graphql::schema::{ApiSchema, MAX_COMPLEXITY, MAX_DEPTH, builder};
 
 /// The bound of every awaited call of these tests; the clock is paused where a wait must pass.
@@ -139,7 +139,12 @@ impl Node {
 
     /// What the tail does with a valid event: the window first, then the hub.
     fn pass(&self, id: u64, event_type: &str) {
-        let event = stored_event(id, event_type, &event_json(id, event_type));
+        self.pass_json(id, event_type, &event_json(id, event_type));
+    }
+
+    /// What the tail does with a valid event whose event object is `json`.
+    fn pass_json(&self, id: u64, event_type: &str, json: &str) {
+        let event = stored_event(id, event_type, json);
         self.window.push(Arc::new(event.clone()));
         self.state.hub.deliver(&event);
     }
@@ -222,6 +227,11 @@ fn event_block(id: u64) -> String {
     )
 }
 
+/// The subscription result blocks of the events `ids`, joined, as one chunk writes them.
+fn event_blocks(ids: std::ops::RangeInclusive<u64>) -> String {
+    ids.map(event_block).collect()
+}
+
 /// The single-result body of a result encoded as `data`.
 fn single(data: &str) -> Vec<String> {
     vec![
@@ -276,6 +286,33 @@ fn lines_of(recorder: &LogRecorder, message: &str) -> Vec<LogLine> {
 
 // ---- the wire blocks (FR-8) ----
 
+/// The `next` block of `result` as text.
+fn block(result: &async_graphql::Response, id: Option<Sequence>) -> String {
+    String::from_utf8(next_block(result, id)).unwrap()
+}
+
+#[test]
+fn a_block_is_appended_after_the_blocks_already_in_the_buffer() {
+    let first = async_graphql::Response::new(
+        async_graphql::Value::from_json(json!({"events": {"id": "1"}})).unwrap(),
+    );
+    let second = async_graphql::Response::new(
+        async_graphql::Value::from_json(json!({"events": {"id": "2"}})).unwrap(),
+    );
+    let mut buffer = Vec::new();
+
+    push_next_block(&mut buffer, &first, Some(Sequence::new(1).unwrap()));
+    push_next_block(&mut buffer, &second, Some(Sequence::new(2).unwrap()));
+
+    assert_eq!(
+        String::from_utf8(buffer).unwrap(),
+        concat!(
+            "event: next\nid: 1\ndata: {\"data\":{\"events\":{\"id\":\"1\"}}}\n\n",
+            "event: next\nid: 2\ndata: {\"data\":{\"events\":{\"id\":\"2\"}}}\n\n"
+        )
+    );
+}
+
 #[test]
 fn the_comment_and_complete_blocks_are_written_byte_for_byte() {
     assert_eq!(KEEP_ALIVE, ":\n\n");
@@ -289,15 +326,15 @@ fn a_result_block_has_an_id_line_only_with_an_id() {
     );
 
     assert_eq!(
-        next_block(&result, None),
+        block(&result, None),
         "event: next\ndata: {\"data\":{\"events\":{\"type\":\"a\"}}}\n\n"
     );
     assert_eq!(
-        next_block(&result, Some(Sequence::new(1043).unwrap())),
+        block(&result, Some(Sequence::new(1043).unwrap())),
         "event: next\nid: 1043\ndata: {\"data\":{\"events\":{\"type\":\"a\"}}}\n\n"
     );
     assert_eq!(
-        next_block(&result, Some(Sequence::new(u64::MAX).unwrap())),
+        block(&result, Some(Sequence::new(u64::MAX).unwrap())),
         "event: next\nid: 18446744073709551615\ndata: {\"data\":{\"events\":{\"type\":\"a\"}}}\n\n"
     );
 }
@@ -308,7 +345,7 @@ fn an_error_result_block_holds_null_data_and_the_errors() {
         async_graphql::Response::from_errors(vec![async_graphql::ServerError::new("boom", None)]);
 
     assert_eq!(
-        next_block(&result, None),
+        block(&result, None),
         "event: next\ndata: {\"data\":null,\"errors\":[{\"message\":\"boom\"}]}\n\n"
     );
 }
@@ -325,7 +362,7 @@ fn a_result_is_written_on_one_data_line_that_parses_back_unchanged(#[case] text:
             .unwrap(),
     );
 
-    let block = next_block(&result, Some(Sequence::new(7).unwrap()));
+    let block = block(&result, Some(Sequence::new(7).unwrap()));
 
     let data = block
         .strip_prefix("event: next\nid: 7\ndata: ")
@@ -414,8 +451,7 @@ async fn the_event_object_is_written_byte_for_byte_in_the_producers_member_order
     node.pass(1_043, "a");
     node.pass(1_044, "a");
 
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_043)));
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_044)));
+    assert_eq!(chunk(&mut body).await, Some(event_blocks(1_043..=1_044)));
     assert!(quiet(&mut body).await);
 }
 
@@ -515,8 +551,7 @@ async fn every_result_restarts_the_interval_and_no_comment_carries_an_id_line() 
     node.pass(1_002, "a");
     node.pass(1_003, "a");
     let delivered = Instant::now();
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_002)));
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_003)));
+    assert_eq!(chunk(&mut body).await, Some(event_blocks(1_002..=1_003)));
     assert_eq!(delivered.elapsed(), Duration::ZERO);
     assert_comments(&mut body, delivered, INTERVAL, 2).await;
     assert_eq!(node.subscribers(), 1);
@@ -1051,9 +1086,84 @@ async fn a_closed_hub_ends_the_stream_after_its_queued_results_without_complete(
 
     node.state.hub.close();
 
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_001)));
-    assert_eq!(chunk(&mut body).await, Some(event_block(1_002)));
+    assert_eq!(chunk(&mut body).await, Some(event_blocks(1_001..=1_002)));
     assert_eq!(chunk(&mut body).await, None);
+}
+
+/// The data of an event whose subscription result block takes about 6 KiB.
+fn padded_event(id: u64) -> String {
+    format!(
+        r#"{{"type":"a","id":"00000000-0000-0000-0000-{id:012x}","occurredAt":"2026-11-14T10:00:00Z","data":{{"pad":"{}"}}}}"#,
+        "x".repeat(6_000)
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_results_that_are_ready_together_are_joined_into_chunks_up_to_32_kib() {
+    let node = Node::ready();
+    let mut body = node.answer(EVENTS).await.into_body();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+
+    for id in 1_001..=1_008 {
+        node.pass_json(id, "a", &padded_event(id));
+    }
+
+    let first = chunk(&mut body).await.unwrap();
+    let second = chunk(&mut body).await.unwrap();
+    assert_eq!(first.matches("event: next\n").count(), 6, "{first}");
+    assert!(first.len() >= 32_768, "{}", first.len());
+    assert!(first.len() < 32_768 + 6_200, "{}", first.len());
+    assert_eq!(second.matches("event: next\n").count(), 2, "{second}");
+    let written = format!("{first}{second}");
+    let ids: Vec<&str> = written
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "1001", "1002", "1003", "1004", "1005", "1006", "1007", "1008"
+        ]
+    );
+    assert!(quiet(&mut body).await);
+}
+
+/// The data of the event `id` whose `pad` holds `pad` characters.
+fn event_with_pad(id: u64, pad: usize) -> String {
+    format!(
+        r#"{{"type":"a","id":"00000000-0000-0000-0000-{id:012x}","occurredAt":"2026-11-14T10:00:00Z","data":{{"pad":"{}"}}}}"#,
+        "x".repeat(pad)
+    )
+}
+
+/// The subscription result block of the event `id` whose data is `json`.
+fn block_of(id: u64, json: &str) -> String {
+    format!(
+        "event: next\nid: {id}\ndata: {{\"data\":{{\"events\":{{\"id\":\"{id}\",\"type\":\"a\",\"data\":{json}}}}}}}\n\n"
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_chunk_that_reaches_exactly_32_kib_takes_no_further_ready_result() {
+    let node = Node::ready();
+    let mut body = node.answer(EVENTS).await.into_body();
+    assert_eq!(chunk(&mut body).await.as_deref(), Some(":\n\n"));
+    let quarter = 32_768_usize / 4;
+    let pad = quarter.saturating_sub(block_of(1_001, &event_with_pad(1_001, 0)).len());
+    let blocks: Vec<String> = (1_001..=1_005)
+        .map(|id| block_of(id, &event_with_pad(id, pad)))
+        .collect();
+
+    for id in 1_001..=1_005 {
+        node.pass_json(id, "a", &event_with_pad(id, pad));
+    }
+
+    let first = chunk(&mut body).await.unwrap();
+    assert!(blocks.iter().all(|block| block.len() == quarter));
+    assert_eq!(first.len(), 32_768);
+    assert_eq!(first, blocks[..4].concat());
+    assert_eq!(chunk(&mut body).await.as_ref(), Some(&blocks[4]));
+    assert!(quiet(&mut body).await);
 }
 
 #[tokio::test(start_paused = true)]

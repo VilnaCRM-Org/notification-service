@@ -176,7 +176,10 @@ async fn the_example_query_result_is_the_answer_of_a_catalog_of_the_example_type
     let topic = StaticTopic::empty();
     let args = ServeArgs {
         app_env: Some("test".to_owned()),
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         event_types: Some(EXAMPLE_TYPE.to_owned()),
         ..ServeArgs::default()
     };

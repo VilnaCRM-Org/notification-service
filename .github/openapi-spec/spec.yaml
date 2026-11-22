@@ -810,7 +810,7 @@ paths:
       tags:
       - HealthCheck
       summary: Checks the health of the service.
-      description: Returns 204 when the cache and the message broker respond and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.
+      description: Returns 204 when the cache responds and the event stream of the node is ready. Returns a 500 problem document that lists every failing dependency otherwise.
       operationId: api_health_get
       responses:
         '204':
@@ -844,7 +844,7 @@ paths:
       tags:
       - HealthCheck
       summary: Checks that the process is alive.
-      description: Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.
+      description: Answers `pong` without touching any dependency, so it keeps answering while the cache or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.
       operationId: ping_get
       responses:
         '200':
@@ -875,7 +875,7 @@ components:
       properties:
         dependency:
           type: string
-          description: '`cache`, `message_broker` or `event_stream`.'
+          description: '`cache` or `event_stream`.'
         message:
           type: string
           description: Failure message of the probe.

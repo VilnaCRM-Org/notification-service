@@ -5,9 +5,6 @@ workspace "Service architecture" "C4 model of the service: system context, conta
             "structurizr.groupSeparator" "/"
         }
         apiClient = person "API client" "A person or program that calls the REST and GraphQL API and subscribes to events over Server-Sent Events, WebSocket, or GraphQL subscriptions over Server-Sent Events."
-        messageBroker = softwareSystem "Message broker" "Amazon SQS, or LocalStack in development." {
-            tags "External"
-        }
         kafka = softwareSystem "Kafka" "The VilnaCRM event bus; the notifications topic." {
             tags "External"
         }
@@ -26,7 +23,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Shared/Infrastructure" {
-                        sharedInfrastructure = component "shared-infrastructure" "In-process buses, cache adapter, clock, UUID generator, SQS client factory." "Rust crate" {
+                        sharedInfrastructure = component "shared-infrastructure" "In-process buses, cache adapter, clock, UUID generator." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -43,7 +40,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                         }
                     }
                     group "Internal/HealthCheck/Infrastructure" {
-                        healthCheckInfrastructure = component "health-check-infrastructure" "Cache and SQS probes." "Rust crate" {
+                        healthCheckInfrastructure = component "health-check-infrastructure" "The cache probe." "Rust crate" {
                             tags "Infrastructure"
                         }
                     }
@@ -66,7 +63,7 @@ workspace "Service architecture" "C4 model of the service: system context, conta
                     }
                 }
                 compositionRoot -> sharedApplication "Uses fallbacks and middleware"
-                compositionRoot -> sharedInfrastructure "Builds buses, cache and SQS client"
+                compositionRoot -> sharedInfrastructure "Builds buses and cache"
                 compositionRoot -> healthCheckApplication "Mounts the health route"
                 compositionRoot -> healthCheckInfrastructure "Registers the probes"
                 compositionRoot -> sharedDomain "Wires the bus, clock and UUID ports"
@@ -91,7 +88,6 @@ workspace "Service architecture" "C4 model of the service: system context, conta
             }
         }
         apiClient -> system.service "Calls the REST and GraphQL API and subscribes to events over SSE, WebSocket and GraphQL subscriptions over SSE" "HTTP, JSON, Server-Sent Events, WebSocket"
-        system.service.healthCheckInfrastructure -> messageBroker "Calls ListQueues" "HTTPS, AWS SDK"
         system.service.eventStreamInfrastructure -> kafka "Reads the notifications topic from" "Kafka protocol, krafka"
     }
     views {

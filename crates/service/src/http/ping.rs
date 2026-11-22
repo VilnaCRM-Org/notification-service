@@ -13,7 +13,7 @@ use shared_application::http::Problem;
     operation_id = "ping_get",
     tag = "HealthCheck",
     summary = "Checks that the process is alive.",
-    description = "Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.",
+    description = "Answers `pong` without touching any dependency, so it keeps answering while the cache or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.",
     responses(
         (status = 200, description = "The process is alive.", body = String, content_type = "text/plain",
             example = json!("pong")),

@@ -82,7 +82,7 @@ image_content_findings() {
 
 # `docker compose config` of the production reference with the given variables set and no .env file read.
 render_production_reference() {
-  env -u AWS_REGION "$@" docker compose --env-file /dev/null \
+  env -u KAFKA_BOOTSTRAP_SERVERS "$@" docker compose --env-file /dev/null \
     -f docker-compose.yml -f docker-compose.prod.yml config --format json
 }
 
@@ -334,10 +334,9 @@ LISTING
   require_docker
   local image status
   image="$(production_image)"
-  # The liveness probe does not need LocalStack: the connections are opened lazily.
+  # The liveness probe does not need the Kafka broker: the address of the required variable answers nothing.
   container="$(docker run --detach --read-only --cap-drop ALL --security-opt no-new-privileges:true \
-    -e APP_ENV=prod -e AWS_REGION=us-east-1 \
-    -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_ENDPOINT_URL_SQS=http://127.0.0.1:1 \
+    -e APP_ENV=prod -e KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:1 \
     "${image}")"
   run docker inspect --format '{{json .HostConfig}}' "${container}"
   assert_success
@@ -360,7 +359,7 @@ LISTING
 
 @test "the production reference renders with limits, read-only root, dropped capabilities, no-new-privileges and restart policies" {
   require_docker
-  run render_production_reference AWS_REGION=eu-west-1
+  run render_production_reference KAFKA_BOOTSTRAP_SERVERS=broker.example:9092
   assert_success
   local rendered="${output}"
   run json_query 'data.services.app.deploy.resources.limits.cpus === 1
@@ -373,7 +372,14 @@ LISTING
     && JSON.stringify(data.services.app.security_opt) === JSON.stringify(["no-new-privileges:true"])' <<<"${rendered}"
   assert_success
   run json_query 'data.services.app.environment.APP_ENV === "prod"
-    && !("AWS_ENDPOINT_URL_SQS" in data.services.app.environment)' <<<"${rendered}"
+    && data.services.app.environment.KAFKA_BOOTSTRAP_SERVERS === "broker.example:9092"' <<<"${rendered}"
+  assert_success
+  # One socket per subscriber: the open-file limit is raised, and the replay window stays small against the memory
+  # limit.
+  run json_query 'data.services.app.ulimits.nofile.soft === 1048576 && data.services.app.ulimits.nofile.hard === 1048576
+    && data.services.app.environment.EVENT_WINDOW_MAX_BYTES === "16777216"
+    && data.services.app.environment.EVENT_WINDOW_MAX_EVENTS === "20000"
+    && data.services.app.environment.EVENT_WINDOW_START_EVENTS === "20000"' <<<"${rendered}"
   assert_success
   # The restart policy (FR91): the service restarts unless it was stopped and gets 15 s to drain.
   run json_query 'data.services.app.restart === "unless-stopped" && data.services.app.stop_grace_period === "15s"' \
@@ -384,8 +390,8 @@ LISTING
 @test "the production reference rendered with --env-file /dev/null fails and names each required variable" {
   require_docker
   # Compose stops at the first missing variable and its order is not fixed, so each case leaves exactly one
-  # required variable unset. AWS_REGION is the only one.
+  # required variable unset. KAFKA_BOOTSTRAP_SERVERS is the only one.
   run render_production_reference
   assert_failure
-  assert_output --partial 'AWS_REGION is required'
+  assert_output --partial 'KAFKA_BOOTSTRAP_SERVERS is required'
 }

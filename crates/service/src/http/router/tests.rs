@@ -38,7 +38,10 @@ struct Answer {
 fn config(app_env: &str) -> Config {
     let args = ServeArgs {
         app_env: Some(app_env.to_owned()),
-        aws_region: Some("us-east-1".to_owned()),
+        kafka: crate::cli::KafkaArgs {
+            bootstrap_servers: Some("localhost:9092".to_owned()),
+            ..crate::cli::KafkaArgs::default()
+        },
         ..ServeArgs::default()
     };
     Config::from_args(args).unwrap()
