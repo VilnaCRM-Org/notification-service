@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::pin::pin;
@@ -9,16 +10,18 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::http::header::{
-    CACHE_CONTROL, CONNECTION, CONTENT_TYPE, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE,
+    CACHE_CONTROL, CONNECTION, CONTENT_TYPE, HeaderName, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION,
+    UPGRADE,
 };
 use axum::http::response::Parts;
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use event_stream_domain::{
     Cursor, EventType, Offset, StoredEvent, TopicError, TopicRecord, TopicReplay,
 };
 use http_body_util::BodyExt as _;
 use rstest::rstest;
 use serde_json::{Value, json};
+use shared_application::http::Problem;
 use shared_domain::{ErasedBusError, ErasedMessage, QueryBus, QueryHandler as _};
 use test_support::bus::FakeQueryBus;
 use test_support::fixture::stored_event;
@@ -31,13 +34,21 @@ use tower::ServiceExt as _;
 use tracing::Level;
 
 use crate::catalog::EventCatalog;
-use crate::http::hub::{Hub, HubSettings};
-use crate::http::subscription::{ReplaySettings, Subscriptions};
+use crate::http::dto::{
+    Command, EXAMPLE_CURSOR, EXAMPLE_TYPE, TypesError, parse_cursor, parse_types, read_cursor,
+    types_problem,
+};
+use crate::http::frame::{error_json, ws_json};
+use crate::http::hub::{Hub, HubError, HubSettings};
+use crate::http::session::Session;
+use crate::http::subscription::{ReplaySettings, Subscription, Subscriptions};
 use crate::http::{EventStreamState, StreamSettings, router};
 use crate::query::list_event_types::{ListEventTypes, ListEventTypesHandler};
 use crate::status::StatusSource;
 use crate::tail::{EventPublisher as _, TailState, TopicFault};
 use crate::window::Window;
+
+mod json_schema;
 
 const PROBLEM: &str = "application/problem+json";
 
@@ -959,6 +970,7 @@ async fn a_hundred_distinct_names_with_repeats_open_a_stream() {
 }
 
 #[rstest]
+#[case::empty("")]
 #[case::text("abc")]
 #[case::negative("-1")]
 #[case::overflow("18446744073709551616")]
@@ -976,8 +988,17 @@ async fn an_invalid_cursor_is_400_naming_its_carrier(#[case] value: &str) {
         &format!("/events/stream?types=a&lastEventId={value}"),
     )
     .await;
+    let beside_a_valid_header = send_request(
+        node.state.clone(),
+        get_after(&format!("/events/stream?types=a&lastEventId={value}"), "5"),
+    )
+    .await;
 
-    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+    for (reply, carrier) in [
+        (by_header, "Last-Event-ID"),
+        (by_parameter, "lastEventId"),
+        (beside_a_valid_header, "lastEventId"),
+    ] {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
         assert_eq!(reply.content_type, PROBLEM);
         assert_eq!(
@@ -986,6 +1007,30 @@ async fn an_invalid_cursor_is_400_naming_its_carrier(#[case] value: &str) {
         );
     }
     assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+/// The request of the Schemathesis check ST201 (schema-violating request accepted): a valid
+/// `Last-Event-ID` beside an empty `lastEventId`, which the parameter schema refuses. It is
+/// refused before the node is asked, so a starting node answers it the same.
+#[tokio::test(start_paused = true)]
+async fn a_valid_header_beside_an_empty_parameter_is_the_400_problem_naming_the_parameter() {
+    for node in [ready(1_000), refusing(8, Life::Unstarted)] {
+        let request = get_after("/events/stream?types=load.test&lastEventId=", "1043");
+
+        let reply = send_request(node.state.clone(), request).await;
+
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+        assert_eq!(reply.content_type, PROBLEM);
+        assert_eq!(
+            reply.json(),
+            blank_problem(
+                400,
+                "Bad Request",
+                "lastEventId must be a decimal unsigned 64-bit integer"
+            )
+        );
+        assert_eq!(node.hub.subscriber_count(), 0);
+    }
 }
 
 /// What happened to the hub of a refusing node.
@@ -1295,6 +1340,7 @@ async fn invalid_types_on_the_websocket_route_are_422_before_the_503_and_the_upg
 }
 
 #[rstest]
+#[case::empty("")]
 #[case::text("abc")]
 #[case::negative("-1")]
 #[case::overflow("18446744073709551616")]
@@ -1305,6 +1351,10 @@ async fn an_invalid_cursor_on_the_websocket_route_is_400_naming_its_carrier(#[ca
     by_header
         .headers_mut()
         .insert("last-event-id", value.parse().unwrap());
+    let mut beside_a_valid_header = handshake(&format!("/events/ws?types=a&lastEventId={value}"));
+    beside_a_valid_header
+        .headers_mut()
+        .insert("last-event-id", HeaderValue::from_static("1043"));
 
     let by_header = send_request(node.state.clone(), by_header).await;
     let by_parameter = send(
@@ -1312,8 +1362,13 @@ async fn an_invalid_cursor_on_the_websocket_route_is_400_naming_its_carrier(#[ca
         &format!("/events/ws?lastEventId={value}"),
     )
     .await;
+    let beside_a_valid_header = send_request(node.state.clone(), beside_a_valid_header).await;
 
-    for (reply, carrier) in [(by_header, "Last-Event-ID"), (by_parameter, "lastEventId")] {
+    for (reply, carrier) in [
+        (by_header, "Last-Event-ID"),
+        (by_parameter, "lastEventId"),
+        (beside_a_valid_header, "lastEventId"),
+    ] {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{carrier}");
         assert_eq!(reply.content_type, PROBLEM);
         assert_eq!(
@@ -1433,21 +1488,30 @@ fn document() -> Value {
     serde_json::to_value(router::<EventStreamState>().into_openapi()).unwrap()
 }
 
-fn problem_response(description: &str) -> Value {
-    json!({
-        "description": description,
-        "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}
-    })
+/// The `default` answer of every operation: the 500 problem of the panic catcher as its example.
+fn default_response() -> Value {
+    problem_with_example(
+        "Problem response.",
+        &json!({"type": "about:blank", "title": "Internal Server Error", "status": 500}),
+    )
 }
 
 #[test]
-fn the_document_has_the_catalog_and_the_status_operations_only() {
+fn the_document_has_the_four_operations_of_the_event_stream() {
     let document = document();
 
     let paths = document["paths"].as_object().unwrap();
     let mut names: Vec<&str> = paths.keys().map(String::as_str).collect();
     names.sort_unstable();
-    assert_eq!(names, ["/event-types", "/events/status"]);
+    assert_eq!(
+        names,
+        [
+            "/event-types",
+            "/events/status",
+            "/events/stream",
+            "/events/ws"
+        ]
+    );
     for path in names {
         assert_eq!(
             paths[path].as_object().unwrap().keys().collect::<Vec<_>>(),
@@ -1455,6 +1519,853 @@ fn the_document_has_the_catalog_and_the_status_operations_only() {
             "{path}"
         );
     }
+}
+
+/// The problem response of `status` with its description and example.
+fn problem_with_example(description: &str, example: &Value) -> Value {
+    json!({
+        "description": description,
+        "content": {"application/problem+json": {
+            "schema": {"$ref": "#/components/schemas/Problem"},
+            "example": example,
+        }}
+    })
+}
+
+fn blank_problem(status: u16, title: &str, detail: &str) -> Value {
+    json!({"type": "about:blank", "title": title, "status": status, "detail": detail})
+}
+
+fn types_problem_example() -> Value {
+    json!({
+        "type": "/problems/validation-failed",
+        "title": "Unprocessable Entity",
+        "status": 422,
+        "detail": "The request failed validation.",
+        "violations": [{
+            "propertyPath": "types",
+            "message": "types must not hold an empty event type name",
+            "code": "required",
+        }],
+    })
+}
+
+fn parameter_names(operation: &Value) -> Vec<(String, String, bool)> {
+    operation["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|parameter| {
+            (
+                parameter["name"].as_str().unwrap().to_owned(),
+                parameter["in"].as_str().unwrap().to_owned(),
+                parameter["required"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn named(names: &[(&str, &str, bool)]) -> Vec<(String, String, bool)> {
+    names
+        .iter()
+        .map(|(name, location, required)| ((*name).to_owned(), (*location).to_owned(), *required))
+        .collect()
+}
+
+fn status_codes(operation: &Value) -> Vec<&str> {
+    operation["responses"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+#[test]
+fn the_stream_operation_documents_its_parameters_and_every_answer() {
+    let document = document();
+
+    let operation = &document["paths"]["/events/stream"]["get"];
+    assert_eq!(operation["operationId"], "api_events_stream_get");
+    assert_eq!(operation["tags"], json!(["EventStream"]));
+    assert_eq!(
+        operation["summary"],
+        "Opens an event stream of the listed event types."
+    );
+    assert!(
+        operation["description"]
+            .as_str()
+            .unwrap()
+            .contains("Server-Sent Events")
+    );
+    assert_eq!(
+        parameter_names(operation),
+        named(&[
+            ("types", "query", true),
+            ("lastEventId", "query", false),
+            ("Last-Event-ID", "header", false),
+        ])
+    );
+    let responses = &operation["responses"];
+    assert_eq!(
+        status_codes(operation),
+        ["200", "400", "422", "503", "default"]
+    );
+    let opened = &responses["200"];
+    assert_eq!(opened["description"], super::STREAM_OPENED);
+    assert_eq!(
+        opened["content"],
+        json!({"text/event-stream": {
+            "schema": {"$ref": "#/components/schemas/SseFrame"},
+            "example": {"event": "load.test", "id": "1043", "data": super::EXAMPLE_EVENT},
+        }})
+    );
+    assert_eq!(
+        opened["headers"],
+        json!({
+            "cache-control": {"schema": {"type": "string"}, "description": "Always `no-cache`."},
+            "x-accel-buffering": {"schema": {"type": "string"}, "description": "Always `no`, so that a proxy does not hold frames and keep-alives back."},
+        })
+    );
+    assert_eq!(
+        responses["400"],
+        problem_with_example(
+            super::STREAM_BAD_REQUEST,
+            &blank_problem(
+                400,
+                "Bad Request",
+                "lastEventId must be a decimal unsigned 64-bit integer"
+            )
+        )
+    );
+    assert_eq!(
+        responses["422"],
+        problem_with_example(super::TYPES_INVALID, &types_problem_example())
+    );
+    assert_eq!(
+        responses["503"],
+        problem_with_example(
+            super::NODE_UNAVAILABLE,
+            &blank_problem(503, "Service Unavailable", "the node is starting")
+        )
+    );
+    assert_eq!(responses["default"], default_response());
+}
+
+#[test]
+fn the_websocket_operation_documents_its_handshake_its_frames_and_every_answer() {
+    let document = document();
+
+    let operation = &document["paths"]["/events/ws"]["get"];
+    assert_eq!(operation["operationId"], "api_events_ws_get");
+    assert_eq!(operation["tags"], json!(["EventStream"]));
+    assert_eq!(
+        operation["summary"],
+        "Upgrades to a WebSocket subscription of the listed event types."
+    );
+    assert!(operation["description"].as_str().unwrap().contains("(403)"));
+    assert_eq!(
+        parameter_names(operation),
+        named(&[
+            ("types", "query", false),
+            ("lastEventId", "query", false),
+            ("Connection", "header", true),
+            ("Upgrade", "header", true),
+            ("Sec-WebSocket-Version", "header", true),
+            ("Sec-WebSocket-Key", "header", true),
+            ("Last-Event-ID", "header", false),
+        ])
+    );
+    let responses = &operation["responses"];
+    assert_eq!(
+        status_codes(operation),
+        ["101", "400", "403", "422", "426", "503", "default"]
+    );
+    assert_eq!(
+        responses["101"],
+        json!({
+            "description": super::WS_UPGRADED,
+            "headers": {
+                "Connection": {"schema": {"type": "string"}, "description": "`upgrade`."},
+                "Sec-WebSocket-Accept": {"schema": {"type": "string"}, "description": "The key derived from `Sec-WebSocket-Key` as RFC 6455 states."},
+                "Upgrade": {"schema": {"type": "string"}, "description": "`websocket`."},
+            },
+        })
+    );
+    let server_frame = format!(
+        r#"{{"id":"{EXAMPLE_CURSOR}","type":"{EXAMPLE_TYPE}","data":{}}}"#,
+        super::EXAMPLE_EVENT
+    );
+    for part in [
+        server_frame.as_str(),
+        r#"{"error":"invalid command"}"#,
+        r#"{"action":"subscribe","types":["load.test"]}"#,
+        r#"{"action":"unsubscribe","types":["load.test"]}"#,
+    ] {
+        assert!(super::WS_UPGRADED.contains(&format!("`{part}`")), "{part}");
+    }
+    assert_eq!(
+        responses["400"],
+        problem_with_example(
+            super::WS_BAD_REQUEST,
+            &blank_problem(
+                400,
+                "Bad Request",
+                "Connection header did not include 'upgrade'"
+            )
+        )
+    );
+    assert_eq!(
+        responses["403"],
+        problem_with_example(
+            super::ORIGIN_REFUSED,
+            &blank_problem(403, "Forbidden", "the origin is not allowed")
+        )
+    );
+    assert_eq!(
+        responses["422"],
+        problem_with_example(super::TYPES_INVALID, &types_problem_example())
+    );
+    assert_eq!(
+        responses["426"],
+        problem_with_example(
+            super::NOT_UPGRADABLE_TEXT,
+            &blank_problem(426, "Upgrade Required", NOT_UPGRADABLE)
+        )
+    );
+    assert_eq!(
+        responses["503"],
+        problem_with_example(
+            super::NODE_UNAVAILABLE,
+            &blank_problem(503, "Service Unavailable", "the node is starting")
+        )
+    );
+    assert_eq!(responses["default"], default_response());
+}
+
+#[test]
+fn the_websocket_handshake_problems_name_their_causes() {
+    assert!(super::STREAM_BAD_REQUEST.contains("cursor"));
+    assert!(super::WS_BAD_REQUEST.contains("handshake header"));
+    assert!(super::ORIGIN_REFUSED.contains("CORS_ALLOWED_ORIGINS"));
+    assert!(super::TYPES_INVALID.contains("`max_items`"));
+    assert!(super::NODE_UNAVAILABLE.contains("safe to retry"));
+    assert!(super::NOT_UPGRADABLE_TEXT.contains("cannot be upgraded"));
+    assert!(super::STREAM_OPENED.contains("`:`"));
+}
+
+/// The parameter of the operation at `path` named `name`, its name compared without case.
+fn parameter<'a>(document: &'a Value, path: &str, name: &str) -> &'a Value {
+    document["paths"][path]["get"]["parameters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parameter| {
+            parameter["name"]
+                .as_str()
+                .unwrap()
+                .eq_ignore_ascii_case(name)
+        })
+        .unwrap_or_else(|| panic!("{path} documents {name}"))
+}
+
+/// Whether the parameter admits the value as it is sent: a list that is not exploded is split at
+/// its commas, every other value is one string; an absent value is admitted when not required.
+fn admits_sent(document: &Value, parameter: &Value, sent: Option<&str>) -> bool {
+    let Some(text) = sent else {
+        return parameter["required"] == false;
+    };
+    let value = if parameter["explode"] == false {
+        json!(text.split(',').collect::<Vec<_>>())
+    } else {
+        json!(text)
+    };
+    json_schema::admits(document, &parameter["schema"], &value)
+}
+
+/// The `types` values the tests of the streaming routes send, accepted or refused by the routes.
+fn types_sent() -> Vec<(String, bool)> {
+    let mut sent: Vec<(String, bool)> = [
+        "user.created",
+        "order.paid,user.created,order.paid",
+        "a",
+        "b,a,b,a",
+        "load.test",
+        "first.ok",
+    ]
+    .iter()
+    .map(|text| ((*text).to_owned(), true))
+    .collect();
+    sent.push(("a".repeat(128), true));
+    sent.push((distinct_names(100), true));
+    for refused in [
+        "",
+        "a,,b",
+        "a,",
+        "User.Created",
+        "A",
+        "B,",
+        " ",
+        "Secret.Name",
+        "first.ok,,Secret.Name",
+    ] {
+        sent.push((refused.to_owned(), false));
+    }
+    sent.push(("a".repeat(129), false));
+    sent.push(("x".repeat(129), false));
+    sent.push((distinct_names(101), false));
+    sent
+}
+
+#[test]
+fn a_types_value_matches_the_documented_schema_exactly_when_the_routes_accept_it() {
+    let document = document();
+
+    for (text, accepted) in types_sent() {
+        assert_eq!(
+            parse_types(&text).is_ok(),
+            accepted,
+            "the route on {text:?}"
+        );
+        for path in ["/events/stream", "/events/ws"] {
+            let types = parameter(&document, path, "types");
+            assert_eq!(
+                admits_sent(&document, types, Some(&text)),
+                accepted,
+                "{path} on {text:?}"
+            );
+        }
+    }
+    assert!(!admits_sent(
+        &document,
+        parameter(&document, "/events/stream", "types"),
+        None
+    ));
+    assert!(admits_sent(
+        &document,
+        parameter(&document, "/events/ws", "types"),
+        None
+    ));
+}
+
+#[test]
+fn a_repeated_name_is_the_one_types_fault_the_schema_cannot_express_and_its_text_says_so() {
+    let document = document();
+    let repeated = format!("{0},{0}", distinct_names(100));
+
+    assert!(parse_types(&repeated).is_ok());
+    for path in ["/events/stream", "/events/ws"] {
+        let types = parameter(&document, path, "types");
+        assert!(!admits_sent(&document, types, Some(&repeated)));
+        let text = types["description"].as_str().unwrap();
+        assert!(text.contains("A repeated name counts once"), "{text}");
+        assert!(text.contains("cannot express"), "{text}");
+    }
+}
+
+/// The cursor values the tests send, accepted or refused by the routes.
+const CURSORS_SENT: [(&str, bool); 21] = [
+    ("0", true),
+    ("1", true),
+    ("2", true),
+    ("3", true),
+    ("5", true),
+    ("7", true),
+    ("8", true),
+    ("100", true),
+    ("950", true),
+    ("007", true),
+    ("18446744073709551615", true),
+    ("abc", false),
+    ("x", false),
+    ("-1", false),
+    ("+1", false),
+    ("1 2", false),
+    (" 1", false),
+    ("1.5", false),
+    ("", false),
+    ("18446744073709551616", false),
+    ("\u{ff}1", false),
+];
+
+#[test]
+fn a_cursor_matches_the_documented_schemas_exactly_when_the_routes_accept_it() {
+    let document = document();
+
+    for (text, accepted) in CURSORS_SENT {
+        assert_eq!(
+            read_cursor(None, Some(text)).is_ok(),
+            accepted,
+            "the parameter rule on {text:?}"
+        );
+        if let Ok(header) = text.parse::<HeaderValue>() {
+            assert_eq!(
+                read_cursor(Some(&header), None).is_ok(),
+                accepted,
+                "the header rule on {text:?}"
+            );
+        }
+        for path in ["/events/stream", "/events/ws"] {
+            for name in ["lastEventId", "Last-Event-ID"] {
+                let cursor = parameter(&document, path, name);
+                assert_eq!(
+                    admits_sent(&document, cursor, Some(text)),
+                    accepted,
+                    "{path} {name} on {text:?}"
+                );
+                assert!(admits_sent(&document, cursor, None));
+            }
+        }
+    }
+}
+
+/// The values around each digit of the largest cursor, 18446744073709551615: at each position the
+/// digit one lower followed by nines, the largest cursor with that prefix, and the digit one higher
+/// followed by zeros, the smallest value with that prefix above the largest cursor; then each of
+/// them, the largest cursor included, after a leading zero. `true` for a cursor.
+fn cursors_around_the_largest() -> Vec<(String, bool)> {
+    let largest: Vec<u32> = u64::MAX
+        .to_string()
+        .chars()
+        .map(|digit| digit.to_digit(10).unwrap())
+        .collect();
+    let mut values = vec![(u64::MAX.to_string(), true)];
+    for (position, digit) in largest.iter().enumerate() {
+        // The digits of the largest cursor before `position`, `at` at it and `fill` after it.
+        let around = |at: u32, fill: u32| -> String {
+            largest
+                .iter()
+                .enumerate()
+                .map(|(index, other)| match index.cmp(&position) {
+                    Ordering::Less => *other,
+                    Ordering::Equal => at,
+                    Ordering::Greater => fill,
+                })
+                .map(|digit| char::from_digit(digit, 10).unwrap())
+                .collect()
+        };
+        if let Some(lower) = digit.checked_sub(1) {
+            values.push((around(lower, 9), true));
+        }
+        if let Some(higher) = digit.checked_add(1).filter(|higher| *higher <= 9) {
+            values.push((around(higher, 0), false));
+        }
+    }
+    let padded: Vec<(String, bool)> = values
+        .iter()
+        .map(|(text, accepted)| (format!("0{text}"), *accepted))
+        .collect();
+    values.extend(padded);
+    values
+}
+
+#[test]
+fn the_values_around_the_largest_cursor_are_one_per_digit_bound() {
+    let values = cursors_around_the_largest();
+
+    // 20 digits, of which two are 0 (no lower value) and one is 9 (no higher value).
+    assert_eq!(values.len(), 2 * (1 + 18 + 19));
+    assert!(values.contains(&("09999999999999999999".to_owned(), true)));
+    assert!(values.contains(&("20000000000000000000".to_owned(), false)));
+    assert!(values.contains(&("18446744073709551614".to_owned(), true)));
+    assert!(values.contains(&("18446744073709551616".to_owned(), false)));
+    assert!(values.contains(&("018446744073709551615".to_owned(), true)));
+    assert!(values.contains(&("018446744074000000000".to_owned(), false)));
+}
+
+#[test]
+fn a_cursor_next_to_a_digit_bound_matches_the_pattern_exactly_when_the_routes_accept_it() {
+    let document = document();
+
+    for (text, accepted) in cursors_around_the_largest() {
+        assert_eq!(
+            Cursor::parse(&text).is_ok(),
+            accepted,
+            "the cursor on {text}"
+        );
+        assert_eq!(
+            read_cursor(None, Some(&text)).is_ok(),
+            accepted,
+            "the parameter rule on {text}"
+        );
+        for path in ["/events/stream", "/events/ws"] {
+            for name in ["lastEventId", "Last-Event-ID"] {
+                let pattern = parameter(&document, path, name)["schema"]["pattern"]
+                    .as_str()
+                    .unwrap();
+                assert_eq!(
+                    json_schema::is_match(pattern, &text),
+                    accepted,
+                    "{path} {name} on {text}"
+                );
+            }
+        }
+    }
+}
+
+/// The handshake header values sent to the WebSocket route; `true` when the upgrade accepts it.
+const HANDSHAKES_SENT: [(&str, &str, bool); 13] = [
+    ("connection", "upgrade", true),
+    ("connection", "Upgrade", true),
+    ("connection", "keep-alive, Upgrade", true),
+    ("connection", "keep-alive", false),
+    ("upgrade", "websocket", true),
+    ("upgrade", "WebSocket", true),
+    ("upgrade", "h2c", false),
+    ("upgrade", "websocket2", false),
+    ("sec-websocket-version", "13", true),
+    ("sec-websocket-version", "8", false),
+    ("sec-websocket-version", "130", false),
+    ("sec-websocket-key", HANDSHAKE_KEY, true),
+    ("sec-websocket-key", "", true),
+];
+
+/// A handshake on the WebSocket route with `name` set to `value`, or without it.
+fn handshake_with(name: &str, value: Option<&str>) -> Request<Body> {
+    let mut request = handshake_without("/events/ws?types=user.created", Some(name));
+    if let Some(value) = value {
+        request.headers_mut().insert(
+            HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+    }
+    request
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_handshake_header_matches_the_documented_schema_exactly_when_the_upgrade_accepts_it() {
+    let document = document();
+    let node = ready(1_000);
+
+    for (name, value, accepted) in HANDSHAKES_SENT {
+        let reply = send_request(node.state.clone(), handshake_with(name, Some(value))).await;
+
+        let expected = if accepted {
+            StatusCode::UPGRADE_REQUIRED
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(reply.status, expected, "the route on {name}: {value:?}");
+        let header = parameter(&document, "/events/ws", name);
+        assert_eq!(
+            admits_sent(&document, header, Some(value)),
+            accepted,
+            "{name}: {value:?}"
+        );
+    }
+    for (name, _) in UPGRADE_HEADERS {
+        let reply = send_request(node.state.clone(), handshake_with(name, None)).await;
+
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_REQUEST,
+            "the route without {name}"
+        );
+        let header = parameter(&document, "/events/ws", name);
+        assert!(!admits_sent(&document, header, None), "{name}");
+    }
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+/// The fields of one SSE frame as an object: `field: value` per line.
+fn frame_fields(frame: &str) -> Value {
+    let mut fields = serde_json::Map::new();
+    for line in frame.lines().filter(|line| !line.is_empty()) {
+        let (field, value) = line.split_once(": ").unwrap();
+        fields.insert(field.to_owned(), json!(value));
+    }
+    Value::Object(fields)
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_event_frame_of_the_route_matches_the_frame_schema_and_its_data_the_event_object() {
+    let document = document();
+    let frame_schema = json!({"$ref": "#/components/schemas/SseFrame"});
+    let node = ready(1_000);
+    let (_head, mut body) =
+        open(node.state.clone(), get("/events/stream?types=user.created")).await;
+
+    node.pass(&event(1_001, "user.created"));
+    let written = chunk(&mut body).await.unwrap();
+
+    let fields = frame_fields(&written);
+    assert_eq!(
+        fields,
+        json!({"id": "1001", "event": "user.created", "data": event_json(1_001, "user.created")})
+    );
+    assert!(json_schema::admits(&document, &frame_schema, &fields));
+    let content =
+        &document["components"]["schemas"]["SseFrame"]["properties"]["data"]["contentSchema"];
+    let data: Value = serde_json::from_str(fields["data"].as_str().unwrap()).unwrap();
+    assert!(json_schema::admits(&document, content, &data));
+}
+
+#[rstest]
+#[case::id_zero(json!({"id": "0", "event": "a", "data": event_json(1, "a")}))]
+#[case::id_padded(json!({"id": "01", "event": "a", "data": event_json(1, "a")}))]
+#[case::event_not_a_name(json!({"id": "1", "event": "A", "data": event_json(1, "a")}))]
+#[case::no_event(json!({"id": "1", "data": event_json(1, "a")}))]
+#[case::no_id(json!({"event": "a", "data": event_json(1, "a")}))]
+#[case::no_data(json!({"id": "1", "event": "a"}))]
+#[case::data_not_json(json!({"id": "1", "event": "a", "data": "{"}))]
+#[case::data_without_a_member(json!({"id": "1", "event": "a", "data": r#"{"id":"00000000-0000-0000-0000-000000000001","type":"a","data":1}"#}))]
+#[case::data_with_another_member(json!({"id": "1", "event": "a", "data": r#"{"id":"00000000-0000-0000-0000-000000000001","type":"a","occurredAt":"2026-11-14T10:00:00Z","data":1,"key":"k"}"#}))]
+#[case::data_with_a_bad_type(json!({"id": "1", "event": "a", "data": r#"{"id":"00000000-0000-0000-0000-000000000001","type":"A","occurredAt":"2026-11-14T10:00:00Z","data":1}"#}))]
+fn a_frame_the_route_never_writes_does_not_match_the_frame_schema(#[case] fields: Value) {
+    let document = document();
+
+    assert!(!json_schema::admits(
+        &document,
+        &json!({"$ref": "#/components/schemas/SseFrame"}),
+        &fields
+    ));
+}
+
+#[test]
+fn every_example_of_the_event_stream_operations_matches_its_schema() {
+    let document = document();
+
+    for path in [
+        "/event-types",
+        "/events/status",
+        "/events/stream",
+        "/events/ws",
+    ] {
+        let operation = &document["paths"][path]["get"];
+        for parameter in operation["parameters"].as_array().into_iter().flatten() {
+            assert!(
+                json_schema::admits(&document, &parameter["schema"], &parameter["example"]),
+                "{path} {}",
+                parameter["name"]
+            );
+        }
+        for (status, response) in operation["responses"].as_object().unwrap() {
+            for (media_type, content) in response["content"].as_object().into_iter().flatten() {
+                if let Some(example) = content.get("example") {
+                    assert!(
+                        json_schema::admits(&document, &content["schema"], example),
+                        "{path} {status} {media_type}"
+                    );
+                }
+            }
+        }
+    }
+    let frame = &document["components"]["schemas"]["SseFrame"]["properties"];
+    for field in ["event", "id", "data"] {
+        let examples = frame[field]["examples"].as_array().unwrap();
+        assert_eq!(examples.len(), 1, "{field}");
+        for example in examples {
+            assert!(
+                json_schema::admits(&document, &frame[field], example),
+                "{field}"
+            );
+        }
+    }
+}
+
+/// The example of the problem answer `status` of the operation at `path`.
+fn problem_example<'a>(document: &'a Value, path: &str, status: &str) -> &'a Value {
+    &document["paths"][path]["get"]["responses"][status]["content"][PROBLEM]["example"]
+}
+
+#[tokio::test(start_paused = true)]
+async fn every_problem_example_is_the_answer_of_its_producer() {
+    let document = document();
+    let node = ready(1_000);
+    let answers = [
+        (
+            "/event-types",
+            "400",
+            send(three(), "/event-types?page=abc").await,
+        ),
+        (
+            "/event-types",
+            "422",
+            send(three(), "/event-types?itemsPerPage=101").await,
+        ),
+        (
+            "/events/stream",
+            "400",
+            send(three(), "/events/stream?types=a&lastEventId=x").await,
+        ),
+        (
+            "/events/stream",
+            "422",
+            send(three(), "/events/stream?types=a,,b").await,
+        ),
+        (
+            "/events/stream",
+            "503",
+            send(three(), "/events/stream?types=a").await,
+        ),
+        (
+            "/events/ws",
+            "400",
+            send_request(
+                node.state.clone(),
+                handshake_with("connection", Some("keep-alive")),
+            )
+            .await,
+        ),
+        (
+            "/events/ws",
+            "422",
+            send_request(three(), handshake("/events/ws?types=a,,b")).await,
+        ),
+        (
+            "/events/ws",
+            "426",
+            send_request(node.state.clone(), handshake("/events/ws?types=a")).await,
+        ),
+        (
+            "/events/ws",
+            "503",
+            send_request(three(), handshake("/events/ws?types=a")).await,
+        ),
+    ];
+
+    for (path, status, reply) in answers {
+        assert_eq!(reply.status.as_str(), status, "{path} {status}");
+        assert_eq!(reply.content_type, PROBLEM, "{path} {status}");
+        assert_eq!(
+            *problem_example(&document, path, status),
+            reply.json(),
+            "{path} {status}"
+        );
+    }
+    let types = serde_json::to_value(types_problem(TypesError::Blank)).unwrap();
+    let unavailable = serde_json::to_value(Problem::from(HubError::NotReady)).unwrap();
+    for path in ["/events/stream", "/events/ws"] {
+        assert_eq!(*problem_example(&document, path, "422"), types, "{path}");
+        assert_eq!(
+            *problem_example(&document, path, "503"),
+            unavailable,
+            "{path}"
+        );
+    }
+    let cursor = parse_cursor(&HeaderMap::new(), Some("x")).unwrap_err();
+    assert_eq!(
+        *problem_example(&document, "/events/stream", "400"),
+        serde_json::to_value(cursor).unwrap()
+    );
+    assert_eq!(node.hub.subscriber_count(), 0);
+}
+
+#[tokio::test]
+async fn the_catalog_example_is_the_answer_of_a_catalog_of_its_names() {
+    let document = document();
+
+    let reply = send(state(&["user.created", EXAMPLE_TYPE]), "/event-types").await;
+
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        document["paths"]["/event-types"]["get"]["responses"]["200"]["content"]["application/json"]
+            ["example"],
+        reply.json()
+    );
+}
+
+/// The event of the examples, as the tail hands it to the hub.
+fn example_event() -> StoredEvent {
+    stored_event(
+        EXAMPLE_CURSOR.parse().unwrap(),
+        EXAMPLE_TYPE,
+        super::EXAMPLE_EVENT,
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_frame_examples_are_the_frames_the_routes_write() {
+    let document = document();
+    let node = ready(1_000);
+    let (_head, mut body) = open(
+        node.state.clone(),
+        get(&format!("/events/stream?types={EXAMPLE_TYPE}")),
+    )
+    .await;
+
+    node.pass(&example_event());
+    let written = chunk(&mut body).await.unwrap();
+
+    assert_eq!(
+        document["paths"]["/events/stream"]["get"]["responses"]["200"]["content"]["text/event-stream"]
+            ["example"],
+        frame_fields(&written)
+    );
+    let frame = &document["components"]["schemas"]["SseFrame"]["properties"];
+    assert_eq!(frame["event"]["examples"], json!([EXAMPLE_TYPE]));
+    assert_eq!(frame["id"]["examples"], json!([EXAMPLE_CURSOR]));
+    assert_eq!(frame["data"]["examples"], json!([super::EXAMPLE_EVENT]));
+    let server_frame = ws_json(&example_event());
+    assert_eq!(
+        server_frame,
+        format!(
+            r#"{{"id":"{EXAMPLE_CURSOR}","type":"{EXAMPLE_TYPE}","data":{}}}"#,
+            super::EXAMPLE_EVENT
+        )
+    );
+    assert!(super::WS_UPGRADED.contains(&format!("`{server_frame}`")));
+}
+
+#[test]
+fn the_documented_messages_of_a_websocket_are_those_of_its_session() {
+    for (text, command) in [
+        (
+            r#"{"action":"subscribe","types":["load.test"]}"#,
+            Command::Subscribe {
+                types: vec![EXAMPLE_TYPE.to_owned()],
+            },
+        ),
+        (
+            r#"{"action":"unsubscribe","types":["load.test"]}"#,
+            Command::Unsubscribe {
+                types: vec![EXAMPLE_TYPE.to_owned()],
+            },
+        ),
+    ] {
+        assert!(super::WS_UPGRADED.contains(&format!("`{text}`")), "{text}");
+        assert_eq!(serde_json::from_str::<Command>(text).unwrap(), command);
+    }
+    let error = error_json("invalid command");
+    assert!(
+        super::WS_UPGRADED.contains(&format!("`{error}`")),
+        "{error}"
+    );
+}
+
+/// `value` in decimal with a space before each group of three digits from the right, as the
+/// descriptions write a number.
+fn grouped(value: usize) -> String {
+    let reversed: Vec<char> = value.to_string().chars().rev().collect();
+    let groups: Vec<String> = reversed
+        .chunks(3)
+        .rev()
+        .map(|group| group.iter().rev().collect())
+        .collect();
+    groups.join(" ")
+}
+
+#[test]
+fn the_texts_of_the_streaming_operations_state_the_limits_of_the_code() {
+    assert_eq!(grouped(7), "7");
+    assert_eq!(grouped(100), "100");
+    assert_eq!(grouped(4_096), "4 096");
+    assert_eq!(grouped(1_234_567), "1 234 567");
+    for part in [
+        format!(
+            "a frame larger than {} bytes ends the connection",
+            grouped(super::MAX_MESSAGE_BYTES)
+        ),
+        format!(
+            "Text frames of at most {} bytes",
+            grouped(Session::MAX_COMMAND_BYTES)
+        ),
+        format!("each with 1 to {} distinct names", Subscription::MAX_TYPES),
+    ] {
+        assert!(super::WS_UPGRADED.contains(&part), "{part}");
+    }
+    let too_many = format!("more than {} distinct names", Subscription::MAX_TYPES);
+    assert!(super::TYPES_INVALID.contains(&too_many));
 }
 
 #[test]
@@ -1481,7 +2392,33 @@ fn the_status_operation_matches_the_contract() {
         responses["200"]["content"]["application/json"]["schema"],
         json!({"$ref": "#/components/schemas/EventStreamStatus"})
     );
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    let example = &responses["200"]["content"]["application/json"]["example"];
+    let mut fields: Vec<&str> = example
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "brokerReachable",
+            "endOffset",
+            "lag",
+            "position",
+            "reason",
+            "rejectedRecords",
+            "replayCapped",
+            "retentionLosses",
+            "state",
+            "subscribers",
+            "windowFirst",
+            "windowLast"
+        ]
+    );
+    assert_eq!(example["state"], "ready");
+    assert_eq!(responses["default"], default_response());
     assert_eq!(
         responses.as_object().unwrap().keys().collect::<Vec<_>>(),
         ["200", "default"]
@@ -1511,17 +2448,45 @@ fn the_catalog_operation_matches_the_contract() {
     assert_eq!(parameters[1]["schema"]["minimum"], 1);
     assert_eq!(parameters[1]["schema"]["maximum"], 100);
     assert_eq!(parameters[1]["schema"]["default"], 30);
+    assert_eq!(parameters[0]["example"], 1);
+    assert_eq!(parameters[1]["example"], 10);
     let responses = &operation["responses"];
     assert_eq!(
-        responses["200"]["content"]["application/json"]["schema"],
-        json!({"type": "array", "items": {"$ref": "#/components/schemas/EventType"}})
+        responses["200"]["content"]["application/json"],
+        json!({
+            "schema": {"type": "array", "items": {"$ref": "#/components/schemas/EventType"}},
+            "example": [{"name": "load.test"}, {"name": "user.created"}],
+        })
     );
     assert_eq!(
         responses["400"],
-        problem_response("Invalid query parameter.")
+        problem_with_example(
+            "Invalid query parameter.",
+            &blank_problem(
+                400,
+                "Bad Request",
+                "Failed to deserialize query string: page: invalid digit found in string"
+            )
+        )
     );
-    assert_eq!(responses["422"], problem_response("Validation failed."));
-    assert_eq!(responses["default"], problem_response("Problem response."));
+    assert_eq!(
+        responses["422"],
+        problem_with_example(
+            "Validation failed.",
+            &json!({
+                "type": "/problems/validation-failed",
+                "title": "Unprocessable Entity",
+                "status": 422,
+                "detail": "The request failed validation.",
+                "violations": [{
+                    "propertyPath": "itemsPerPage",
+                    "message": "itemsPerPage must be between 1 and 100",
+                    "code": "range",
+                }],
+            })
+        )
+    );
+    assert_eq!(responses["default"], default_response());
     assert_eq!(
         responses.as_object().unwrap().keys().collect::<Vec<_>>(),
         ["200", "400", "422", "default"]
@@ -1529,11 +2494,11 @@ fn the_catalog_operation_matches_the_contract() {
 }
 
 #[test]
-fn the_document_carries_the_event_type_schema() {
+fn the_document_carries_the_event_type_and_the_frame_schemas() {
     let document = document();
 
     let schemas = &document["components"]["schemas"];
-    for name in ["EventStreamStatus", "EventType", "Problem"] {
+    for name in ["EventStreamStatus", "EventType", "Problem", "SseFrame"] {
         assert!(schemas.get(name).is_some(), "{name} is missing");
     }
 }

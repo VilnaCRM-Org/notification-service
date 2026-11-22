@@ -133,7 +133,7 @@ The rust-implementer agent never edits a protected path or the profile, and the 
 
 ## Open items
 
-1. **`.sqlx/` and `migrations/` stay as placeholders in pull request #5.** Story 3.1 was committed on the feature branch (`37acdfe`, `3cdb4f2`) and is not merged into `main`, and the configuration guard reads `required_directories` from `main`, which still lists `.sqlx` and `migrations`. So pull request #5 keeps both directories, each holding only a `.gitkeep`; every other file in them is deleted. A follow-up pull request deletes the two placeholders after #5 is merged; only then is the FR-31 clause "`migrations/` and `.sqlx/` do not exist" met. It belongs in the body of pull request #5 as well.
+1. **`.sqlx/` and `migrations/` stay as placeholders in pull request #5.** Story 3.1 was committed on the feature branch (`37acdfe`, `3cdb4f2`) and is not merged into `main`, and the configuration guard reads `required_directories` from `main`, which still lists `.sqlx` and `migrations`. So pull request #5 keeps both directories, each holding only a `.gitkeep`; every other file in them is deleted. A follow-up pull request deletes the two placeholders after #5 is merged; only then is the FR-31 clause "`migrations/` and `.sqlx/` do not exist" met. It belongs in the body of pull request #5 as well. Resolved for issue #7 after #5 merged: both placeholders are deleted, the three ignore entries of `.sqlx/` are gone and the profile is refreshed.
 
 ## Epic 5 decisions that change the plan
 

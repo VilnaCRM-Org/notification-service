@@ -5,7 +5,6 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
-use axum::routing::{get, post};
 use shared_application::http::fallback::{method_not_allowed, not_found, panic_response};
 use shared_application::http::middleware::request_timeout;
 use tower::ServiceBuilder;
@@ -13,29 +12,44 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::config::{AppEnv, Config};
-use crate::graphql::handler::{execute, explorer};
+use crate::config::Config;
 use crate::graphql::schema::ApiSchema;
-use crate::http::docs::{docs_asset, docs_page, openapi_json};
 use crate::http::origin;
-use crate::http::ping::ping;
 use crate::http::request_id::{REQUEST_ID_HEADER, sanitize_request_id};
+use crate::http::vary::vary_accept;
 use crate::http::{AppState, security_headers, trace};
-use crate::openapi::api_router;
+use crate::openapi::{api_router, graphql_router, operational_router};
+
+/// The path of the `GraphQL` route.
+pub const GRAPHQL_PATH: &str = "/api/graphql";
 
 /// Builds the complete router.
 ///
-/// It holds the REST routes, the `GraphQL` route (with the explorer in `dev` only), liveness, the
-/// documentation routes and the two fallbacks, all under one middleware stack whose first layer is
-/// the outermost: request id, security headers, tracing, the CORS layer of the allowed origins
-/// (absent when none is allowed), the origin check of a WebSocket handshake, the panic catcher,
-/// the request budget and the body limit.
+/// It holds the REST routes, the `GraphQL` route, liveness, the documentation routes and the two
+/// fallbacks. Every route comes from one of the three routers of the `OpenAPI` document
+/// ([`api_router`], [`graphql_router`] and [`operational_router`]), whose handlers
+/// are registered through `routes!`; each is split from its document and merged once its state is
+/// applied, so every route served is an operation of the document. A GET of the `GraphQL` path
+/// serves the event stream in every mode when `Accept` admits it. Otherwise it serves the explorer
+/// when the schema data's `ExplorerPage` is set, as `bootstrap::assemble_router` sets it from
+/// `APP_ENV` (`dev` only), and a schema without the flag answers the 405 problem with
+/// `Allow: POST`; this function does not read `APP_ENV` for that choice. The `Allow` of every
+/// other method lists `GET`, `HEAD` and `POST`. All of them sit under one middleware stack
+/// whose first layer is the outermost: the three request id layers (sanitize, set, propagate),
+/// security headers, tracing, the CORS layer of the allowed origins (absent when none is allowed),
+/// `vary_accept` (`Vary: accept` on every answer to a GET or HEAD of the `GraphQL` path), the
+/// origin check of a WebSocket handshake, the panic catcher, the request budget and the body
+/// limit. `vary_accept` sits outside the panic catcher and the request budget, so their 500 and
+/// 503 answers carry `Vary: accept` too, and inside the CORS layer, which appends its own `Vary`
+/// values. A request that the HTTP server refuses itself never reaches this router: on an HTTP/1.1
+/// connection, a request-target over 65 534 bytes gets its bare 414 (decision M6), a malformed
+/// request head its bare 400 and a head of more than 100 header fields its bare 431, each without
+/// a body or any header of this stack; these answers are the documented exception to the CORS and
+/// `Vary` rules.
 pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
     let (rest, _document) = api_router().split_for_parts();
-    let mut graphql = post(execute);
-    if config.app_env == AppEnv::Dev {
-        graphql = graphql.get(explorer);
-    }
+    let (graphql, _document) = graphql_router().split_for_parts();
+    let (operational, _document) = operational_router().split_for_parts();
     let middleware = ServiceBuilder::new()
         .layer(from_fn(sanitize_request_id))
         .layer(SetRequestIdLayer::new(REQUEST_ID_HEADER, MakeRequestUuid))
@@ -48,6 +62,7 @@ pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
                 .on_failure(()),
         )
         .option_layer(origin::cors(&config.allowed_origins))
+        .layer(from_fn(vary_accept))
         .layer(from_fn_with_state(
             Arc::new(config.allowed_origins.clone()),
             origin::websocket_origin,
@@ -56,11 +71,8 @@ pub fn assemble(state: AppState, schema: ApiSchema, config: &Config) -> Router {
         .layer(from_fn_with_state(config.request_timeout, request_timeout))
         .layer(DefaultBodyLimit::max(config.max_body_bytes));
     rest.with_state(state)
-        .route("/api/graphql", graphql.with_state(schema))
-        .route("/ping", get(ping))
-        .route("/api/docs", get(docs_page))
-        .route("/api/docs/openapi.json", get(openapi_json))
-        .route("/api/docs/{*file}", get(docs_asset))
+        .merge(graphql.with_state(schema))
+        .merge(operational)
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(middleware)

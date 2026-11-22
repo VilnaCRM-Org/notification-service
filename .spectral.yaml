@@ -295,3 +295,9 @@ rules:
       function: truthy
 
   oas3-unused-component: false
+
+overrides:
+  - files:
+      - 'openapi/spec.yaml#/paths/~1api~1events~1ws/get'
+    rules:
+      operation-success-response: 'off'

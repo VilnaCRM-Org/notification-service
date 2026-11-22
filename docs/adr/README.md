@@ -1,6 +1,6 @@
 # Architecture decision records
 
-These records explain why the structure of the service is what it is. Each one has the same parts: the context that forced a decision, the decision, and its consequences. Each names the planning decisions it summarises, so a reader can trace a record back to its planning bundle. Records 0001 to 0012 come from the template (`AD-nn` are its core architecture decisions, `DD-nn` its delivery decisions); the records from 0013 on are the decisions of the event stream and of the removal of PostgreSQL and name the design decisions (`Dn`) and the requirements (`FR-n`, `NFR-n`) of the bundle `specs/4-realtime-event-delivery-hub/`. The [architecture overview](../architecture.md) shows how the decisions fit together.
+These records explain why the structure of the service is what it is. Each one has the same parts: the context that forced a decision, the decision, and its consequences. Each names the planning decisions it summarises, so a reader can trace a record back to its planning bundle. Records 0001 to 0012 come from the template (`AD-nn` are its core architecture decisions, `DD-nn` its delivery decisions); the records 0013 to 0020 are the decisions of the event stream and of the removal of PostgreSQL and name the design decisions (`Dn`) and the requirements (`FR-n`, `NFR-n`) of the bundle `specs/4-realtime-event-delivery-hub/`; record 0021 is the decision of the GraphQL subscription and names the protocol choices (`P1` to `P20`) and the requirements of the bundle `specs/8-graphql-subscriptions-over-sse/`, and record 0022 the decision of that bundle to put every route in the OpenAPI document. The [architecture overview](../architecture.md) shows how the decisions fit together.
 
 | Record | Title | Planning decisions |
 | --- | --- | --- |
@@ -9,8 +9,8 @@ These records explain why the structure of the service is what it is. Each one h
 | [0003](0003-error-model.md) | Error model | AD-06 |
 | [0004](0004-configuration.md) | Configuration | AD-07 |
 | [0005](0005-persistence-and-migrations.md) | Persistence and migrations (superseded by [0020](0020-postgresql-is-removed.md)) | AD-08, AD-20 |
-| [0006](0006-health-and-liveness.md) | Health and liveness | AD-11, AD-12 |
-| [0007](0007-api-contracts.md) | API contracts | AD-16, AD-17, AD-18, AD-19, DD-10 |
+| [0006](0006-health-and-liveness.md) | Health and liveness (amended by [0022](0022-every-route-in-the-openapi-document.md)) | AD-11, AD-12 |
+| [0007](0007-api-contracts.md) | API contracts (amended by [0021](0021-graphql-subscriptions-over-server-sent-events.md) and [0022](0022-every-route-in-the-openapi-document.md)) | AD-16, AD-17, AD-18, AD-19, DD-10 |
 | [0008](0008-tests-coverage-mutation.md) | Tests, coverage and mutation | AD-23, AD-24, DD-09 |
 | [0009](0009-make-execution-model.md) | Make execution model | DD-01, DD-02 |
 | [0010](0010-workflow-layout.md) | Workflow layout | DD-08, DD-13 |
@@ -24,5 +24,7 @@ These records explain why the structure of the service is what it is. Each one h
 | [0018](0018-sqs-stays.md) | SQS stays | D11, FR-29 |
 | [0019](0019-readiness-follows-the-freshness-of-the-tail.md) | Readiness follows the freshness of the tail | design brief 3.7, FR-20, NFR-5, NFR-6 |
 | [0020](0020-postgresql-is-removed.md) | PostgreSQL is removed | D10, FR-31, FR-32, FR-33, FR-34 |
+| [0021](0021-graphql-subscriptions-over-server-sent-events.md) | GraphQL subscriptions over Server-Sent Events (amended by [0022](0022-every-route-in-the-openapi-document.md)) | P1 to P20, FR-1 to FR-21, NFR-3, NFR-5, NFR-7, NFR-8 |
+| [0022](0022-every-route-in-the-openapi-document.md) | Every route in the OpenAPI document | maintainer decisions of 2026-11-17 and M5 of 2026-11-21, FR-26 to FR-29, NFR-13, NFR-16, NFR-17, NFR-20 |
 
-A service keeps its own records in this directory next to the twelve of the template, as this one does from 0013 on. To add one, copy the form of an existing record, number it with the next free four-digit prefix and add a row to the table above. A superseded record stays as history: its title and first line name the record that replaces it.
+A service keeps its own records in this directory next to the twelve of the template, as this one does from 0013 on. To add one, copy the form of an existing record, number it with the next free four-digit prefix and add a row to the table above. A superseded record stays as history: its title and first line name the record that replaces it. An amended record is not rewritten either: the record that amends it names the changed sentence, and the table above marks the amended record.

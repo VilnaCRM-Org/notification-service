@@ -207,3 +207,22 @@ fn the_route_documents_the_health_operation() {
         );
     }
 }
+
+#[tokio::test]
+async fn the_500_example_is_the_answer_of_a_failing_event_stream_and_default_the_bare_500() {
+    let (_router, openapi) = router::<HealthCheckState>().split_for_parts();
+    let document = serde_json::to_value(&openapi).unwrap();
+    let responses = &document["paths"]["/health"]["get"]["responses"];
+
+    let response = get_health(app(probes(&[Dependency::EventStream]))).await;
+
+    let served: Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(
+        responses["500"]["content"]["application/problem+json"]["example"],
+        served
+    );
+    assert_eq!(
+        responses["default"]["content"]["application/problem+json"]["example"],
+        json!({"type": "about:blank", "title": "Internal Server Error", "status": 500})
+    );
+}

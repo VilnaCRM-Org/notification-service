@@ -9,11 +9,136 @@ info:
   license:
     name: CC0-1.0
     url: https://creativecommons.org/publicdomain/zero/1.0/
-  version: 2.0.0
+  version: 2.1.0
 servers:
 - url: /
   description: Current host
 paths:
+  /api/docs:
+    get:
+      tags:
+      - Documentation
+      summary: Serves the API documentation page.
+      description: Serves the Swagger UI page, which renders `GET /api/docs/openapi.json` and loads its files from `GET /api/docs/{file}`, nothing from a third-party origin. It is answered directly, without a redirect, under its own content security policy.
+      operationId: api_docs_get
+      responses:
+        '200':
+          description: The documentation page.
+          headers:
+            content-security-policy:
+              schema:
+                type: string
+              description: 'The policy of the page: everything from the service itself, nothing third-party.'
+          content:
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /api/docs/openapi.json:
+    get:
+      tags:
+      - Documentation
+      summary: Serves the OpenAPI document.
+      description: 'Serves this document as JSON: every operation the service serves, the one `make generate-openapi-spec` writes to `.github/openapi-spec/spec.yaml`.'
+      operationId: api_docs_openapi_json_get
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: {}
+                propertyNames:
+                  type: string
+              example:
+                openapi: 3.1.0
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /api/docs/{file}:
+    get:
+      tags:
+      - Documentation
+      summary: Serves a file of the documentation page.
+      description: 'Serves one file of the embedded Swagger UI, which the page loads: the style sheets, the scripts, the HTML pages and the icons of its distribution, each with its media type. Every file is one path segment deep; a deeper path matches no route.'
+      operationId: api_docs_file_get
+      parameters:
+      - name: file
+        in: path
+        description: The name of the file, as the page references it.
+        required: true
+        schema:
+          type: string
+        example: swagger-ui.css
+      responses:
+        '200':
+          description: The file, with its media type.
+          content:
+            text/css:
+              schema:
+                type: string
+              example: /* the style sheet */
+            text/javascript:
+              schema:
+                type: string
+              example: /* the script */
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+            image/png:
+              schema:
+                type: string
+                contentMediaType: image/png
+        '400':
+          description: The file name is not percent-encoded UTF-8; the detail names the `file` parameter.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Invalid URL: Invalid UTF-8 in `file`'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '404':
+          description: No file of the page has this name.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 404
+                title: Not Found
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/event-types:
     get:
       tags:
@@ -31,6 +156,7 @@ paths:
           format: int32
           default: 1
           minimum: 1
+        example: 1
       - name: itemsPerPage
         in: query
         description: Number of items per page.
@@ -41,6 +167,7 @@ paths:
           default: 30
           maximum: 100
           minimum: 1
+        example: 10
       responses:
         '200':
           description: EventType collection
@@ -50,24 +177,45 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/EventType'
+              example:
+              - name: load.test
+              - name: user.created
         '400':
           description: Invalid query parameter.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to deserialize query string: page: invalid digit found in string'
+                status: 400
+                title: Bad Request
+                type: about:blank
         '422':
           description: Validation failed.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: range
+                  message: itemsPerPage must be between 1 and 100
+                  propertyPath: itemsPerPage
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/events/status:
     get:
       tags:
@@ -82,12 +230,581 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EventStreamStatus'
+              example:
+                brokerReachable: true
+                endOffset: '1043'
+                lag: '0'
+                position: '1043'
+                reason: null
+                rejectedRecords: '0'
+                replayCapped: '0'
+                retentionLosses: '0'
+                state: ready
+                subscribers: 2
+                windowFirst: '0'
+                windowLast: '1043'
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /api/events/stream:
+    get:
+      tags:
+      - EventStream
+      summary: Opens an event stream of the listed event types.
+      description: 'Opens a Server-Sent Events stream that delivers every event of the listed types as one frame, in increasing id order: after the cursor of `Last-Event-ID` or `lastEventId` when one is given, live otherwise. The checks run in this order: the query string (400), the types (422), the cursor (400), the node (503); no answer depends on a broker read. docs/streaming-protocol.md describes the protocol.'
+      operationId: api_events_stream_get
+      parameters:
+      - name: types
+        in: query
+        description: 'The event types to deliver: 1 to 100 distinct event type names separated by commas, each of 1 to 128 characters matching `^[a-z][a-z0-9]*([._-][a-z0-9]+)*$`. A repeated name counts once, so a list of more than 100 names of which at most 100 are distinct is accepted too, which the schema, counting every name, cannot express. A missing `types` or a parameter given twice is the 400 problem, an invalid list the 422 problem with one violation on `types`.'
+        required: true
+        schema:
+          type: array
+          items:
+            type: string
+            maxLength: 128
+            minLength: 1
+            pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+          maxItems: 100
+          minItems: 1
+        style: form
+        explode: false
+        example:
+        - load.test
+      - name: lastEventId
+        in: query
+        description: 'The cursor of a resume: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events; a valid `Last-Event-ID` header wins over it. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem, also beside a valid `Last-Event-ID` header.'
+        required: false
+        schema:
+          type: string
+          pattern: ^0*([0-9]{1,19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$
+        example: '1043'
+      - name: Last-Event-ID
+        in: header
+        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over a valid `lastEventId`, and a malformed `lastEventId` beside it is still the 400 problem of `lastEventId`. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
+        required: false
+        schema:
+          type: string
+          pattern: ^0*([0-9]{1,19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$
+        example: '1043'
+      responses:
+        '200':
+          description: 'The event stream: one frame per event of the listed types, in strictly increasing id order with gaps, and the comment line `:` followed by an empty line when no frame was written for `STREAM_KEEP_ALIVE`. The schema describes one event. The response stays open; it ends without a final frame when the node shuts down or a replay below the memory window cannot read Kafka, and the client then reconnects with its last id.'
+          headers:
+            cache-control:
+              schema:
+                type: string
+              description: Always `no-cache`.
+            x-accel-buffering:
+              schema:
+                type: string
+              description: Always `no`, so that a proxy does not hold frames and keep-alives back.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SseFrame'
+              example:
+                data: '{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}'
+                event: load.test
+                id: '1043'
+        '400':
+          description: The query string cannot be read (`types` missing, or a parameter given twice), or the cursor is not a decimal unsigned 64-bit integer; the detail names the parameter or the carrier of the cursor.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: lastEventId must be a decimal unsigned 64-bit integer
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '422':
+          description: '`types` is empty or holds an empty name (`required`), a name that is not an event type name (`length` or `pattern`), or more than 100 distinct names (`max_items`): one violation on `types`, which never echoes a name of the request.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: required
+                  message: types must not hold an empty event type name
+                  propertyPath: types
+        '503':
+          description: The node is shutting down, starting, or at its subscriber capacity, in this precedence; safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /api/events/ws:
+    get:
+      tags:
+      - EventStream
+      summary: Upgrades to a WebSocket subscription of the listed event types.
+      description: 'Upgrades the connection to a WebSocket that delivers every event of its types as one text frame, in increasing id order; the client adds and removes types at run time with commands. The checks run in this order: an `Origin` outside `CORS_ALLOWED_ORIGINS` (403), the query string (400), the types (422), the cursor (400), the node (503), then the upgrade (400 or 426). docs/streaming-protocol.md describes the protocol.'
+      operationId: api_events_ws_get
+      parameters:
+      - name: types
+        in: query
+        description: 'The event types to deliver from the start, as on the SSE route: 1 to 100 distinct event type names separated by commas. Optional: without it the connection starts with no type and the client subscribes with a command. A repeated name counts once, so a list of more than 100 names of which at most 100 are distinct is accepted too, which the schema, counting every name, cannot express. A parameter given twice is the 400 problem, an invalid list the 422 problem with one violation on `types`.'
+        required: false
+        schema:
+          type: array
+          items:
+            type: string
+            maxLength: 128
+            minLength: 1
+            pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+          maxItems: 100
+          minItems: 1
+        style: form
+        explode: false
+        example:
+        - load.test
+      - name: lastEventId
+        in: query
+        description: 'The cursor of a resume: the id of the last event received, a decimal unsigned 64-bit integer (digits only, at most 18446744073709551615, leading zeros accepted). The stream first delivers the retained events of the types of the request above it, then live events; a valid `Last-Event-ID` header wins over it. A browser `WebSocket`, which cannot set headers, resumes with it. Any other value is the 400 problem, also beside a valid `Last-Event-ID` header.'
+        required: false
+        schema:
+          type: string
+          pattern: ^0*([0-9]{1,19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$
+        example: '1043'
+      - name: Connection
+        in: header
+        description: Must hold `upgrade` in any letter case, as `Upgrade` or `keep-alive, Upgrade`; any other value, or none, is the 400 problem.
+        required: true
+        schema:
+          type: string
+          pattern: '[Uu][Pp][Gg][Rr][Aa][Dd][Ee]'
+        example: Upgrade
+      - name: Upgrade
+        in: header
+        description: Must be `websocket` in any letter case; any other value, or none, is the 400 problem.
+        required: true
+        schema:
+          type: string
+          pattern: ^[Ww][Ee][Bb][Ss][Oo][Cc][Kk][Ee][Tt]$
+        example: websocket
+      - name: Sec-WebSocket-Version
+        in: header
+        description: Must be `13`, the version of RFC 6455; any other value, or none, is the 400 problem.
+        required: true
+        schema:
+          type: string
+          enum:
+          - '13'
+        example: '13'
+      - name: Sec-WebSocket-Key
+        in: header
+        description: The key from which the server derives `Sec-WebSocket-Accept`. RFC 6455 asks for 16 random bytes in base64; any value is accepted. Without it the route answers the 400 problem.
+        required: true
+        schema:
+          type: string
+        example: AAAAAAAAAAAAAAAAAAAAAA==
+      - name: Last-Event-ID
+        in: header
+        description: The cursor of a resume, with the grammar of `lastEventId`; it wins over a valid `lastEventId`, and a malformed `lastEventId` beside it is still the 400 problem of `lastEventId`. A browser `EventSource` sends it by itself when it reconnects. Any other value, a value that is not visible ASCII text included, is the 400 problem.
+        required: false
+        schema:
+          type: string
+          pattern: ^0*([0-9]{1,19}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$
+        example: '1043'
+      responses:
+        '101':
+          description: |-
+            Switching Protocols: the connection is a WebSocket.
+
+            **Server frames.** One text frame per event of the connection's types, in strictly increasing id order: `{"id":"<event id>","type":"<event type>","data":<event object>}`, the id a decimal string and the event object that of the SSE frame. For example:
+
+            `{"id":"1043","type":"load.test","data":{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}}`
+
+            An invalid command is answered with one error frame `{"error":"<reason>"}` and changes nothing, for example `{"error":"invalid command"}`. The server sends a ping every `STREAM_KEEP_ALIVE`; a frame larger than 32 768 bytes ends the connection.
+
+            **Client commands.** Text frames of at most 16 384 bytes that add or remove types, each with 1 to 100 distinct names; a valid command gets no answer. For example:
+
+            `{"action":"subscribe","types":["load.test"]}`
+
+            `{"action":"unsubscribe","types":["load.test"]}`
+          headers:
+            Connection:
+              schema:
+                type: string
+              description: '`upgrade`.'
+            Sec-WebSocket-Accept:
+              schema:
+                type: string
+              description: The key derived from `Sec-WebSocket-Key` as RFC 6455 states.
+            Upgrade:
+              schema:
+                type: string
+              description: '`websocket`.'
+        '400':
+          description: 'The query string cannot be read (a parameter given twice), the cursor is not a decimal unsigned 64-bit integer, or the request is not a valid upgrade: a handshake header is missing or holds a value the upgrade refuses. The detail names the parameter, the carrier of the cursor or the header.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: Connection header did not include 'upgrade'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '403':
+          description: The handshake carries an `Origin` that `CORS_ALLOWED_ORIGINS` does not allow; no subscriber is registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the origin is not allowed
+                status: 403
+                title: Forbidden
+                type: about:blank
+        '422':
+          description: '`types` is empty or holds an empty name (`required`), a name that is not an event type name (`length` or `pattern`), or more than 100 distinct names (`max_items`): one violation on `types`, which never echoes a name of the request.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: required
+                  message: types must not hold an empty event type name
+                  propertyPath: types
+        '426':
+          description: A valid handshake on a connection that cannot be upgraded; no subscriber stays registered.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: WebSocket request couldn't be upgraded since no upgrade state was present
+                status: 426
+                title: Upgrade Required
+                type: about:blank
+        '503':
+          description: The node is shutting down, starting, or at its subscriber capacity, in this precedence; safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /api/graphql:
+    get:
+      tags:
+      - GraphQL
+      summary: Runs the GraphQL operation of the query string as an event stream.
+      description: Runs the GraphQL operation of the query string as graphql-sse's distinct connections mode, for clients such as a browser `EventSource` that can only send a GET. The event stream is chosen when an `Accept` field admits `text/event-stream`, also through `*/*` or `text/*`, ranked above `text/html` and both JSON types. A GET without `Accept`, or one that ranks `text/html` or a JSON type at least as high, gets the explorer page in `dev` and the 405 problem elsewhere. The query-string problems come before any stream. docs/streaming-protocol.md describes the event stream.
+      operationId: api_graphql_get
+      parameters:
+      - name: query
+        in: query
+        description: The GraphQL document. A missing `query`, a parameter given twice or a value that is not percent-encoded UTF-8 is the 400 problem; a document longer than its `maxLength` is the 422 problem.
+        required: true
+        schema:
+          type: string
+          maxLength: 4096
+        example: 'subscription LoadTest { events(types: ["load.test"]) { id type data } }'
+      - name: operationName
+        in: query
+        description: The name of the operation of the document to run; needed only when the document holds more than one. A name longer than its `maxLength` is the 422 problem.
+        required: false
+        schema:
+          type: string
+          maxLength: 128
+        example: LoadTest
+      - name: variables
+        in: query
+        description: 'The values of the variables of the operation: a JSON-encoded object. Any other value is the 422 problem with one `format` violation on `variables`.'
+        required: false
+        schema:
+          type: string
+          examples:
+          - '{}'
+          contentMediaType: application/json
+          contentSchema:
+            type: object
+        example: '{}'
+      - name: extensions
+        in: query
+        description: 'Protocol extensions: a JSON-encoded object, accepted and ignored. Any other value is the 422 problem with one `format` violation on `extensions`.'
+        required: false
+        schema:
+          type: string
+          examples:
+          - '{}'
+          contentMediaType: application/json
+          contentSchema:
+            type: object
+        example: '{}'
+      - name: Last-Event-ID
+        in: header
+        description: 'The cursor of a subscription: the id of the last event received, a decimal unsigned 64-bit integer. It wins over the `lastEventId` argument of `events`. A browser `EventSource` sends it by itself when it reconnects. A value that is not a cursor fails the subscription inside the accepted stream with one `VALIDATION_FAILED` result on `Last-Event-ID`, and is ignored by every other operation.'
+        required: false
+        schema:
+          type: string
+        example: '1043'
+      responses:
+        '200':
+          description: 'The event stream, as on POST: the comment line `:` first, then one `next` block per execution result, each subscription result with the event id; `complete` follows a single result only. Its schema describes one event. In `dev` only, a GET that does not negotiate the event stream gets the explorer page as `text/html`.'
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/GraphQLEvent'
+              examples:
+                complete:
+                  summary: The end of a single result
+                  value:
+                    data: ''
+                    event: complete
+                next:
+                  summary: A subscription result
+                  value:
+                    data: '{"data":{"events":{"id":"1043","type":"load.test","data":{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}}}}'
+                    event: next
+                    id: '1043'
+            text/html:
+              schema:
+                type: string
+              example: <!doctype html>
+        '400':
+          description: 'The query string cannot be read: `query` is missing, a known parameter is given twice, or a name or a value is not percent-encoded UTF-8. The detail names only the four known parameters.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to deserialize query string: missing field `query`'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '405':
+          description: A GET that does not negotiate the event stream, outside `dev`.
+          headers:
+            Allow:
+              schema:
+                type: string
+              description: '`POST`.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 405
+                title: Method Not Allowed
+                type: about:blank
+        '414':
+          description: 'The query string, as received, is longer than the smaller of `HTTP_MAX_BODY_BYTES` and 65 521 bytes. The service answers this problem to a query string over `HTTP_MAX_BODY_BYTES` when that bound is below 65 521. On an HTTP/1.1 connection, the HTTP server refuses a request-target over 65 534 bytes (65 521 bytes of query string after `/api/graphql?`) itself, before the service sees the request, with a bare 414: no body, no `Content-Type` and none of the CORS or `Vary` headers of the service''s answers; that limit cannot be configured.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The query string is too long.
+                status: 414
+                title: URI Too Long
+                type: about:blank
+        '422':
+          description: '`variables` or `extensions` is not a JSON-encoded object: one `format` violation on that parameter. Else `query` or `operationName` is longer than its `maxLength`: one `length` violation for each.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request failed validation.
+                status: 422
+                title: Unprocessable Entity
+                type: /problems/validation-failed
+                violations:
+                - code: format
+                  message: variables must be a JSON-encoded object
+                  propertyPath: variables
+        '503':
+          description: A subscription the node cannot take, because it is shutting down, starting or at its subscriber capacity, in this precedence; or a request that exceeded its time budget before the head. Safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+    post:
+      tags:
+      - GraphQL
+      summary: Executes a GraphQL operation, answered as JSON or as an event stream.
+      description: 'Executes one GraphQL operation. Without an `Accept` that ranks `text/event-stream` above both JSON types the answer is the execution result as `application/json`, except that a `query` over 4 096 or an `operationName` over 128 characters is not executed and gets the 422 length problem, on both transports. With such an `Accept`, the operation runs as graphql-sse''s distinct connections mode: the subscription `events` delivers one `next` block per event, and a query one `next` block, then `complete`. The transport problems come before any stream; document errors, a breach of the one-root-field rule and invalid arguments are results. docs/streaming-protocol.md describes the event stream.'
+      operationId: api_graphql_post
+      parameters:
+      - name: Last-Event-ID
+        in: header
+        description: 'The cursor of a subscription: the id of the last event received, a decimal unsigned 64-bit integer. It wins over the `lastEventId` argument of `events`. A browser `EventSource` sends it by itself when it reconnects. A value that is not a cursor fails the subscription inside the accepted stream with one `VALIDATION_FAILED` result on `Last-Event-ID`, and is ignored by every other operation.'
+        required: false
+        schema:
+          type: string
+        example: '1043'
+      requestBody:
+        description: One GraphQL operation.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GraphQLRequest'
+            examples:
+              query:
+                summary: The catalog query
+                value:
+                  query: '{ eventTypes { name } }'
+              subscription:
+                summary: The subscription to load.test
+                value:
+                  operationName: LoadTest
+                  query: 'subscription LoadTest { events(types: ["load.test"]) { id type data } }'
+        required: true
+      responses:
+        '200':
+          description: 'The execution result as `application/json`, operation errors included; or, when `Accept` negotiates it, the event stream: the comment line `:` first, then one `next` block per execution result, each subscription result with the event id; `complete` follows a single result only. A subscription stream stays open, writes the comment whenever `STREAM_KEEP_ALIVE` passes without a block, and ends without `complete` when the node shuts down or a replay cannot read Kafka. The schema of the event stream describes one event.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GraphQLResponse'
+              example:
+                data:
+                  eventTypes:
+                  - name: load.test
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/GraphQLEvent'
+              examples:
+                complete:
+                  summary: The end of a single result
+                  value:
+                    data: ''
+                    event: complete
+                next:
+                  summary: A subscription result
+                  value:
+                    data: '{"data":{"events":{"id":"1043","type":"load.test","data":{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}}}}'
+                    event: next
+                    id: '1043'
+        '400':
+          description: The body is not JSON.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to parse the request body as JSON: expected value at line 1 column 1'
+                status: 400
+                title: Bad Request
+                type: about:blank
+        '413':
+          description: The body is larger than `HTTP_MAX_BODY_BYTES`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Failed to buffer the request body: length limit exceeded'
+                status: 413
+                title: Payload Too Large
+                type: about:blank
+        '415':
+          description: The body is not `application/json`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: 'Expected request with `Content-Type: application/json`'
+                status: 415
+                title: Unsupported Media Type
+                type: about:blank
+        '422':
+          description: 'The body is JSON but not a GraphQL request: not an object, without a string `query`, or with a member of the wrong type. Else `query` or `operationName` is longer than its `maxLength`: the validation problem with one `length` violation for each.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: The request body is not a GraphQL request.
+                status: 422
+                title: Unprocessable Entity
+                type: about:blank
+        '503':
+          description: A subscription the node cannot take, because it is shutting down, starting or at its subscriber capacity, in this precedence; or a request that exceeded its time budget before the head. Safe to retry on any node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                detail: the node is starting
+                status: 503
+                title: Service Unavailable
+                type: about:blank
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
   /api/health:
     get:
       tags:
@@ -104,12 +821,49 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                detail: Event stream is not ready
+                failures:
+                - dependency: event_stream
+                  message: Event stream is not ready
+                status: 500
+                title: Internal Server Error
+                type: /problems/dependency-unavailable
         default:
           description: Problem response.
           content:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
+  /ping:
+    get:
+      tags:
+      - HealthCheck
+      summary: Checks that the process is alive.
+      description: Answers `pong` without touching any dependency, so it keeps answering while the cache, the message broker or the event stream is down; the container health check requests it. Readiness is `GET /api/health`.
+      operationId: ping_get
+      responses:
+        '200':
+          description: The process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: pong
+        default:
+          description: Problem response.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 500
+                title: Internal Server Error
+                type: about:blank
 components:
   schemas:
     DependencyFailure:
@@ -220,6 +974,106 @@ components:
           maxLength: 128
           minLength: 1
           pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+    GraphQLEvent:
+      type: object
+      description: One event of the `text/event-stream` answer of the GraphQL path (graphql-sse, distinct connections mode), as the fields of its block. A `next` block carries one execution result; a subscription writes one per event, with the event id, and never `complete`; a single result is followed by `complete`, whose `data` line is empty. The comment line `:` followed by an empty line is the keep-alive and carries no event.
+      required:
+      - event
+      - data
+      properties:
+        data:
+          anyOf:
+          - type: string
+            maxLength: 0
+          - type: string
+            minLength: 1
+            contentMediaType: application/json
+            contentSchema:
+              $ref: '#/components/schemas/GraphQLResponse'
+          description: The execution result as one line of compact JSON for `next`; empty for `complete`.
+        event:
+          type: string
+          description: '`next` for an execution result, `complete` after a single result.'
+          enum:
+          - next
+          - complete
+        id:
+          type: string
+          description: The event id of a subscription result in decimal, the `id` of the event; a single result and `complete` have none. An `EventSource` sends the last one back as `Last-Event-ID`.
+          examples:
+          - '1043'
+          maxLength: 20
+          minLength: 1
+          pattern: ^[1-9][0-9]*$
+    GraphQLRequest:
+      type: object
+      description: One GraphQL operation, the JSON body of GraphQL over HTTP (section 4.4). Members other than the four listed are accepted and ignored; a JSON array, a batch, is refused. `query` and `operationName` are bounded by their `maxLength`, the whole body by `HTTP_MAX_BODY_BYTES`, whose default holds both at their bound in any encoding.
+      required:
+      - query
+      properties:
+        extensions:
+          type:
+          - object
+          - 'null'
+          description: Protocol extensions, accepted and ignored.
+        operationName:
+          type:
+          - string
+          - 'null'
+          description: The name of the operation of the document to run; needed only when the document holds more than one. A name longer than its `maxLength` is the 422 problem.
+          maxLength: 128
+        query:
+          type: string
+          description: The GraphQL document. A document longer than its `maxLength` is the 422 problem.
+          maxLength: 4096
+        variables:
+          type:
+          - object
+          - 'null'
+          description: The values of the variables of the operation.
+      additionalProperties: true
+    GraphQLResponse:
+      type: object
+      description: The execution result of one GraphQL operation. `data` is always written, `null` when a request error stopped the operation; `errors` and `extensions` only when they are not empty. An operation error, a document error or an invalid argument is a result, not a problem.
+      required:
+      - data
+      properties:
+        data:
+          description: The selected fields under their response names, or `null`.
+        errors:
+          type: array
+          items:
+            type: object
+            required:
+            - message
+            properties:
+              extensions:
+                type: object
+                description: '`code` (`VALIDATION_FAILED` or `INTERNAL_SERVER_ERROR`) and the `violations` of a validation error.'
+              locations:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    column:
+                      type: integer
+                    line:
+                      type: integer
+                description: The places of the document the error refers to.
+              message:
+                type: string
+                description: What went wrong.
+              path:
+                type: array
+                items:
+                  type:
+                  - string
+                  - integer
+                description: The response names and list indexes that led to the field.
+          description: The errors of the operation, each with its message.
+        extensions:
+          type: object
+          description: Protocol extensions of the result.
     Problem:
       type: object
       description: An RFC 9457 problem document.
@@ -255,6 +1109,67 @@ components:
           items:
             $ref: '#/components/schemas/Violation'
           description: Violated constraints, for `/problems/validation-failed`.
+    SseFrame:
+      type: object
+      description: |-
+        One event of the `text/event-stream` answer of the SSE route, as the fields of its frame.
+
+        The frame is the lines `id: <id>`, `event: <type>` and `data: <event object>`, then an empty
+        line; a comment line `:` followed by an empty line is the keep-alive and carries no event. A
+        documentation type: the route writes the frame itself.
+      required:
+      - event
+      - id
+      - data
+      properties:
+        data:
+          type: string
+          description: 'The event object as one line of compact JSON: `id`, `type`, `occurredAt` and `data`, in this order.'
+          examples:
+          - '{"id":"8f14e45f-ceea-467f-a8f4-3d1b5c4e1a2b","type":"load.test","occurredAt":"2026-11-14T10:00:00Z","data":{"run":1}}'
+          contentMediaType: application/json
+          contentSchema:
+            type: object
+            description: The event object, the same on both streaming transports.
+            required:
+            - id
+            - type
+            - occurredAt
+            - data
+            properties:
+              data:
+                description: The producer's data, any JSON value.
+              id:
+                type: string
+                format: uuid
+                description: 'The envelope id the producer wrote, a UUID in lower case. It identifies the event, not its position: a client deduplicates by it.'
+              occurredAt:
+                type: string
+                format: date-time
+                description: The time the producer wrote, an RFC 3339 time in UTC with the suffix `Z` or `+00:00`, unchanged.
+              type:
+                type: string
+                description: The event type name.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+            additionalProperties: false
+        event:
+          type: string
+          description: The event type; a browser `EventSource` hands the frame to the listener registered for this name, and its `onmessage` handler receives nothing.
+          examples:
+          - load.test
+          maxLength: 128
+          minLength: 1
+          pattern: ^[a-z][a-z0-9]*([._-][a-z0-9]+)*$
+        id:
+          type: string
+          description: 'The event id in decimal: the Kafka offset plus one, the same on every node. The ids of one stream strictly increase and have gaps; a client resumes with the last one it received.'
+          examples:
+          - '1043'
+          maxLength: 20
+          minLength: 1
+          pattern: ^[1-9][0-9]*$
     Violation:
       type: object
       description: One violated constraint.
@@ -273,7 +1188,11 @@ components:
           type: string
           description: Wire name of the invalid field.
 tags:
+- name: Documentation
+  description: The API documentation page and its document.
 - name: EventStream
   description: Event catalog and event stream status endpoints.
+- name: GraphQL
+  description: GraphQL queries and subscriptions over Server-Sent Events.
 - name: HealthCheck
   description: Runtime health-check endpoints.

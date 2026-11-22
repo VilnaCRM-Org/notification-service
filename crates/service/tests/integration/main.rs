@@ -13,11 +13,15 @@ mod cluster;
 #[cfg(test)]
 mod export;
 #[cfg(test)]
+mod graphql_sse;
+#[cfg(test)]
 mod healthcheck;
 #[cfg(test)]
 mod limit;
 #[cfg(test)]
 mod panic;
+#[cfg(test)]
+mod request_target;
 #[cfg(test)]
 mod serve;
 #[cfg(test)]

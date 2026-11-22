@@ -1,8 +1,14 @@
-//! GraphQL adapter of the event stream: the catalog and status object types and the query root.
+//! GraphQL adapter of the event stream: the catalog and status object types, the query root and
+//! the subscription root with its `Event` object and its stream link.
+//!
+//! The `Event` object is built from the frame the hub shares; the link connects a subscription
+//! transport to the `events` field.
 //!
 //! The resolvers call the same use case and read the same status as the REST handlers, so both
 //! transports answer the same values; every failure becomes a problem first and a GraphQL error
 //! second.
+
+mod subscription;
 
 use async_graphql::{Context, Object, SimpleObject};
 use shared_application::graphql::problem_to_error;
@@ -12,6 +18,7 @@ use crate::http::EventStreamState;
 use crate::http::dto::{EventStreamStatusResponse, ListEventTypesParams};
 use crate::http::handler::list_types;
 use crate::query::EventTypeView;
+pub use subscription::{EventObject, EventStreamSubscription, StreamLink, StreamPhase};
 
 /// A subscribable event type.
 #[derive(Debug, Clone, PartialEq, Eq, SimpleObject)]

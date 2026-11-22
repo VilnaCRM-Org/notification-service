@@ -2,20 +2,23 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::header::{CONTENT_SECURITY_POLICY, CONTENT_TYPE, LOCATION};
 use axum::http::{Request, Response, StatusCode};
-use axum::routing::get;
 use http_body_util::BodyExt as _;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use super::*;
 use crate::http::security_headers;
+use crate::openapi::operational_router;
 
+/// The documentation routes as the service registers them, through `routes!`.
 fn router() -> Router {
-    Router::new()
-        .route("/api/docs", get(docs_page))
-        .route("/api/docs/openapi.json", get(openapi_json))
-        .route("/api/docs/{*file}", get(docs_asset))
-        .layer(security_headers::layer())
+    let (routes, _document) = operational_router().split_for_parts();
+    routes.layer(security_headers::layer())
+}
+
+/// The entry of the document for the GET of `path`.
+fn entry(path: &str) -> Value {
+    serde_json::to_value(openapi::document()).unwrap()["paths"][path]["get"].clone()
 }
 
 async fn get_path(path: &str) -> Response<Body> {
@@ -178,4 +181,69 @@ async fn a_sub_path_that_is_not_utf_8_is_the_400_problem() {
     assert_eq!(problem["type"], "about:blank");
     assert_eq!(problem["title"], "Bad Request");
     assert_eq!(problem["status"], 400);
+}
+
+#[tokio::test]
+async fn a_path_deeper_than_one_segment_is_not_a_file() {
+    let response = get_path("/api/docs/a/swagger-ui.css").await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_of(response).await, Vec::<u8>::new());
+}
+
+#[test]
+fn the_page_entry_answers_html_under_its_policy() {
+    let entry = entry("/api/docs");
+
+    assert_eq!(entry["operationId"], "api_docs_get");
+    assert_eq!(entry["tags"], json!(["Documentation"]));
+    let answer = &entry["responses"]["200"];
+    assert_eq!(
+        answer["content"]["text/html"],
+        json!({"schema": {"type": "string"}, "example": "<!doctype html>"})
+    );
+    assert!(answer["headers"].get("content-security-policy").is_some());
+}
+
+#[test]
+fn the_document_entry_answers_a_json_object() {
+    let entry = entry("/api/docs/openapi.json");
+
+    assert_eq!(entry["operationId"], "api_docs_openapi_json_get");
+    assert_eq!(entry["tags"], json!(["Documentation"]));
+    let content = &entry["responses"]["200"]["content"]["application/json"];
+    assert_eq!(content["schema"]["type"], "object");
+    assert_eq!(content["example"], json!({"openapi": "3.1.0"}));
+}
+
+#[tokio::test]
+async fn the_file_entry_documents_the_name_the_media_types_and_both_problems() {
+    let entry = entry("/api/docs/{file}");
+
+    assert_eq!(entry["operationId"], "api_docs_file_get");
+    assert_eq!(entry["tags"], json!(["Documentation"]));
+    assert_eq!(entry["parameters"][0]["name"], "file");
+    assert_eq!(entry["parameters"][0]["in"], "path");
+    assert_eq!(entry["parameters"][0]["required"], true);
+    assert_eq!(entry["parameters"][0]["example"], "swagger-ui.css");
+    let mut media_types: Vec<&str> = entry["responses"]["200"]["content"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    media_types.sort_unstable();
+    assert_eq!(
+        media_types,
+        ["image/png", "text/css", "text/html", "text/javascript"]
+    );
+    assert_eq!(
+        entry["responses"]["200"]["content"]["image/png"],
+        json!({"schema": {"type": "string", "contentMediaType": "image/png"}})
+    );
+    for (status, path) in [("400", "/api/docs/%FF"), ("404", "/api/docs/nope.js")] {
+        let example = &entry["responses"][status]["content"]["application/problem+json"]["example"];
+        let served: Value = serde_json::from_slice(&body_of(get_path(path).await).await).unwrap();
+        assert_eq!(*example, served, "{status}");
+    }
 }

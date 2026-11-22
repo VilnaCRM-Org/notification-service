@@ -9,7 +9,7 @@ use crate::support::{Scratch, stderr};
 #[case("openapi-export", "openapi: 3.1.0\n")]
 #[case(
     "graphql-export",
-    "\"The status of the event stream on the answering instance; 64-bit values are decimal strings.\"\n"
+    "\"An event of a subscribed type: the same object as a WebSocket frame.\"\n"
 )]
 fn twenty_runs_with_an_empty_environment_are_byte_identical(
     #[case] command: &str,

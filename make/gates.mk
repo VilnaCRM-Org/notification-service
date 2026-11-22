@@ -32,7 +32,7 @@ MUTANTS_CMD      = env -u CARGO_TARGET_DIR -u CARGO_BUILD_WARNINGS cargo mutants
 OPENAPI_EXPORT_CMD  = cargo run --locked --quiet -p service -- openapi-export --output .github/openapi-spec/spec.yaml
 GRAPHQL_EXPORT_CMD  = cargo run --locked --quiet -p service -- graphql-export --output .github/graphql-spec/spec
 SNAPSHOT_STATUS_CMD = test -z "$$(git status --porcelain -- .github/openapi-spec .github/graphql-spec)"
-SCHEMATHESIS_FLAGS  = --checks all --phases=examples,coverage
+SCHEMATHESIS_FLAGS  = --checks all --phases=examples,coverage --exclude-operation-id api_events_ws_get
 export SPECTRAL_FLAGS = --fail-severity=hint
 export OASDIFF_FLAGS  = --fail-on ERR
 export TRIVY_FLAGS    = --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::error::Error as _;
+use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -17,7 +18,10 @@ use test_support::static_topic::StaticTopic;
 use test_support::topic::{ScriptedTopicProbe, ScriptedTopicTail};
 use tokio::sync::watch;
 use tokio::time::{advance, timeout};
-use tracing::Level;
+use tracing::field::{Field, Visit};
+use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::DefaultGuard;
+use tracing::{Event, Level, Metadata, Subscriber};
 
 use super::{
     EventPublisher, RoundError, RoundFailed, TailEvents, TailPorts, TailSettings, TailState,
@@ -360,6 +364,79 @@ fn fields(line: &LogLine) -> Vec<(&str, &str)> {
 
 fn assert_send<T: Send>(_value: &T) {}
 
+/// Records, for every entry written on this thread while its guard lives, the message of the
+/// entry and the state the watch channel of the tail held at the moment the entry was written:
+/// what a reader of the status route sees once it has read the entry. It also keeps the entries
+/// themselves, with their levels and fields, in `logs`.
+#[derive(Debug, Clone)]
+struct StateAtEntry {
+    state: watch::Receiver<TailState>,
+    seen: Arc<Mutex<Vec<(String, TailState)>>>,
+    logs: LogRecorder,
+}
+
+impl StateAtEntry {
+    /// Installs a recorder over `state` as the default subscriber of this thread.
+    fn install(state: watch::Receiver<TailState>) -> (Self, DefaultGuard) {
+        let recorder = Self {
+            state,
+            seen: Arc::default(),
+            logs: LogRecorder::default(),
+        };
+        let guard = tracing::subscriber::set_default(recorder.clone());
+        (recorder, guard)
+    }
+
+    /// The states the channel held when the entries with `message` were written, oldest first.
+    fn at(&self, message: &str) -> Vec<TailState> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(written, _state)| written == message)
+            .map(|(_written, state)| state.clone())
+            .collect()
+    }
+}
+
+/// The message of an entry.
+#[derive(Debug, Default)]
+struct Message(String);
+
+impl Visit for Message {
+    fn record_debug(&mut self, field: &Field, value: &dyn Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{value:?}");
+        }
+    }
+}
+
+impl Subscriber for StateAtEntry {
+    fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+    fn event(&self, event: &Event<'_>) {
+        let mut message = Message::default();
+        event.record(&mut message);
+        let state = self.state.borrow().clone();
+        self.seen.lock().unwrap().push((message.0, state));
+        self.logs.event(event);
+    }
+
+    fn enter(&self, _span: &Id) {}
+
+    fn exit(&self, _span: &Id) {}
+}
+
 #[test]
 fn the_topic_faults_have_their_texts() {
     assert_eq!(
@@ -474,6 +551,21 @@ fn the_round_can_run_on_another_thread() {
     assert_send(&round);
 }
 
+#[test]
+fn the_state_recorder_accepts_spans_and_records_each_entry_with_the_published_state() {
+    let harness = Harness::new(0);
+    let (recorder, _guard) = StateAtEntry::install(harness.state);
+
+    let span = tracing::info_span!("work", id = 1);
+    let other = tracing::info_span!("more");
+    span.record("id", 2);
+    other.follows_from(&span);
+    span.in_scope(|| tracing::info!(count = 1, "inside"));
+
+    assert_eq!(recorder.at("inside"), vec![TailState::default()]);
+    assert_eq!(recorder.at("elsewhere"), Vec::<TailState>::new());
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_unreachable_broker_fails_every_start_up_round_and_is_logged_once() {
     let (logs, _guard) = LogRecorder::install();
@@ -576,6 +668,33 @@ async fn a_fault_is_logged_again_once_another_fault_came_between() {
         ]
     );
     assert_eq!(harness.state().fault, None);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fault_is_published_before_its_entry_is_written() {
+    let mut harness = Harness::new(0);
+    let (recorder, _guard) = StateAtEntry::install(harness.state.clone());
+    harness.probe.push_partition_count(Ok(None));
+    harness
+        .probe
+        .push_partition_count(Err(unavailable("connection refused")));
+    harness.probe.push_partition_count(Ok(Some(3)));
+
+    let mut published = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(harness.round().await, Err(RoundFailed));
+        published.push(harness.published());
+    }
+
+    let invalid = recorder.at("event topic invalid");
+    let unreachable = recorder.at("event topic unreachable");
+    assert_eq!(invalid.len(), 2);
+    assert_eq!(invalid[0].fault, Some(TopicFault::Missing));
+    assert_eq!(invalid[0], published[0]);
+    assert_eq!(unreachable, vec![published[1].clone()]);
+    assert_eq!(unreachable[0].fault, Some(TopicFault::Unreachable));
+    assert_eq!(invalid[1], published[2]);
+    assert_eq!(invalid[1].fault, Some(TopicFault::Partitions(3)));
 }
 
 #[tokio::test(start_paused = true)]
@@ -785,6 +904,67 @@ async fn the_window_fills_without_publishing_until_the_node_reaches_its_goal() {
     let ready = entries(&logs, "event tail ready");
     assert_eq!(ready.len(), 1);
     assert_eq!(fields(&ready[0]), vec![("position", "10")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_node_is_published_ready_before_event_tail_ready_is_written() {
+    let mut at_start = Harness::new(0);
+    let (recorder, guard) = StateAtEntry::install(at_start.state.clone());
+    at_start.passes_start_up(42, 42);
+    assert_eq!(at_start.round().await, Ok(()));
+    drop(guard);
+
+    let ready = recorder.at("event tail ready");
+    assert_eq!(ready, vec![at_start.published()]);
+    assert!(ready[0].started);
+
+    let mut after_batch = Harness::new(3);
+    let (recorder, _guard) = StateAtEntry::install(after_batch.state.clone());
+    after_batch.start(0, 10).await;
+    after_batch.published();
+    after_batch.fetches(valid_range(7..10), 10);
+    assert_eq!(after_batch.round().await, Ok(()));
+
+    let ready = recorder.at("event tail ready");
+    assert_eq!(ready, vec![after_batch.published()]);
+    assert!(ready[0].started);
+    assert_eq!(ready[0].position, Some(Cursor::new(10)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_that_starts_the_node_and_then_fails_logs_ready_then_failed() {
+    let mut harness = Harness::new(3);
+    let (recorder, _guard) = StateAtEntry::install(harness.state.clone());
+    harness.start(0, 10).await;
+    harness.published();
+
+    harness.fetches(valid_range(7..10), 10);
+    advance(TailEvents::OBSERVE_EVERY).await;
+    harness
+        .probe
+        .push_watermarks(Err(unavailable("connection refused")));
+    assert_eq!(harness.round().await, Err(RoundFailed));
+
+    assert_eq!(harness.journal.take(), vec!["fetch", "watermarks"]);
+    assert_eq!(harness.publisher.take(), vec!["advance 10", "started 10"]);
+    let state = harness.published();
+    assert!(state.started);
+    assert!(!state.broker_reachable);
+    assert_eq!(state.position, Some(Cursor::new(10)));
+    assert_eq!(
+        messages(&recorder.logs),
+        vec!["event tail ready", "event tail failed"]
+    );
+    assert_eq!(
+        fields(&entries(&recorder.logs, "event tail ready")[0]),
+        vec![("position", "10")]
+    );
+    assert_eq!(
+        fields(&entries(&recorder.logs, "event tail failed")[0]),
+        vec![("error", "the topic is unavailable: connection refused")]
+    );
+    assert_eq!(recorder.at("event tail ready"), vec![state.clone()]);
+    assert_eq!(recorder.at("event tail failed"), vec![state]);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1238,6 +1418,31 @@ async fn the_tail_logs_failed_and_recovered_only_at_the_transitions() {
             "event tail recovered"
         ]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_failed_and_recovered_entries_come_after_the_state_of_their_round() {
+    let mut harness = Harness::new(0);
+    let (recorder, _guard) = StateAtEntry::install(harness.state.clone());
+    harness.start(0, 10).await;
+    harness.published();
+
+    harness.fails_every_step();
+    assert_eq!(harness.round().await, Err(RoundFailed));
+    let failing = harness.published();
+    harness.fetches(Vec::new(), 10);
+    harness.probe.push_watermarks(Ok(watermarks(0, 10)));
+    harness.tail.push_seek(Ok(()));
+    assert_eq!(harness.round().await, Ok(()));
+    let recovering = harness.published();
+
+    assert_eq!(recorder.at("event tail failed"), vec![failing.clone()]);
+    assert!(!failing.broker_reachable);
+    assert_eq!(
+        recorder.at("event tail recovered"),
+        vec![recovering.clone()]
+    );
+    assert!(recovering.broker_reachable);
 }
 
 #[tokio::test(start_paused = true)]

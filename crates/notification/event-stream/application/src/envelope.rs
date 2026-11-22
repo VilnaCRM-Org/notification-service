@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::ops::Range;
 
 use event_stream_domain::{EventType, Offset, StoredEvent};
 use serde::Serialize;
@@ -12,6 +13,13 @@ use uuid::fmt::Hyphenated;
 
 /// The length of `YYYY-MM-DDTHH:MM:SS`, after which an `occurredAt` may hold a fraction.
 const SECONDS_END: usize = 19;
+
+/// The separators of `YYYY-MM-DDTHH:MM:SS` at their byte positions; every other byte before
+/// [`SECONDS_END`] is a digit.
+const SEPARATORS: [(usize, u8); 5] = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
+
+/// The first year of an `occurredAt`.
+const FIRST_YEAR: u16 = 1970;
 
 /// Why a record is not an event (FR-19). The text is the `reason` field of the log entry
 /// `event record rejected`; it is fixed and never holds a member value.
@@ -187,10 +195,9 @@ fn parse_id(text: &str) -> Result<Uuid, RejectReason> {
     Uuid::try_parse(text).map_err(|_error| RejectReason::Id)
 }
 
-/// An RFC 3339 time in UTC ending with `Z` or `+00:00`, from 1970 to 9999. `humantime` checks the
-/// date, the time and the years, but it accepts any text between the seconds and a final `Z`
-/// (`10:00:00ZabcZ`, `10:00:00.1+abcdZ`) and a dot without digits, so that part is checked here:
-/// nothing, or a dot and one or more digits.
+/// An RFC 3339 time in UTC: `YYYY-MM-DDTHH:MM:SS` under the rule of [`is_calendar_time`], then
+/// nothing or a dot and one or more digits (any number of them), then `Z` or `+00:00`. Any other
+/// text between the seconds and the suffix, a dot without digits and any other offset are refused.
 fn is_utc_time(text: &str) -> bool {
     let Some(body) = text
         .strip_suffix('Z')
@@ -203,7 +210,56 @@ fn is_utc_time(text: &str) -> bool {
         Some([b'.', digits @ ..]) => !digits.is_empty() && digits.iter().all(u8::is_ascii_digit),
         _ => false,
     };
-    fraction_valid && humantime::parse_rfc3339(text).is_ok()
+    fraction_valid && is_calendar_time(body.as_bytes())
+}
+
+/// `YYYY-MM-DDTHH:MM:SS` from 1970 to 9999: digits and separators at their positions, a day of
+/// the calendar (Gregorian leap years), hour 0 to 23, minute 0 to 59, second 0 to 60 (a leap
+/// second is accepted at any minute, as before).
+fn is_calendar_time(body: &[u8]) -> bool {
+    let separated = SEPARATORS
+        .iter()
+        .all(|&(position, separator)| body.get(position) == Some(&separator));
+    let date = digits(body, 0..4)
+        .zip(digits(body, 5..7))
+        .zip(digits(body, 8..10));
+    let time = digits(body, 11..13)
+        .zip(digits(body, 14..16))
+        .zip(digits(body, 17..SECONDS_END));
+    separated
+        && date.is_some_and(|((year, month), day)| {
+            year >= FIRST_YEAR && (1..=days_in_month(year, month)).contains(&day)
+        })
+        && time.is_some_and(|((hour, minute), second)| hour <= 23 && minute <= 59 && second <= 60)
+}
+
+/// The number that the digits at `range` of `body` write; `None` when a byte there is not an
+/// ASCII digit (a sign, a letter, a byte of a wider character) or `range` lies outside `body`.
+/// A field holds at most four digits, so the number stays at most 9999 and no step saturates.
+fn digits(body: &[u8], range: Range<usize>) -> Option<u16> {
+    body.get(range)?.iter().try_fold(0, |number: u16, &byte| {
+        byte.is_ascii_digit().then(|| {
+            number
+                .saturating_mul(10)
+                .saturating_add(u16::from(byte.saturating_sub(b'0')))
+        })
+    })
+}
+
+/// The days of `month` in `year`; 0 for a month outside 1 to 12.
+const fn days_in_month(year: u16, month: u16) -> u16 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Divisible by 4 and not by 100, or divisible by 400.
+const fn is_leap_year(year: u16) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 #[cfg(test)]

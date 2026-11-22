@@ -234,19 +234,31 @@ impl TailEvents {
     }
 
     /// One round: the start-up steps until the first seek, then a tail round. The state is
-    /// published at the end of every round.
+    /// published at the end of every round. The entries of a change of the fault, of readiness
+    /// or of health (`event topic invalid`, `event topic unreachable`, `event tail ready`,
+    /// `event tail failed`, `event tail recovered`) are written only after it, so that whoever
+    /// reads one of them already finds the state it describes on the status route (FR-17,
+    /// FR-20). The entries of single records and jumps (`event record rejected`,
+    /// `events lost to retention`, `subscribers fell behind`) are written while the round reads,
+    /// so the first two can come before the published state holds the `rejected` and
+    /// `retention_losses` counts they add to.
     ///
     /// # Errors
     ///
     /// Returns [`RoundFailed`] when a step of the round failed; the loop pauses before the next
     /// round.
     pub async fn round(&mut self) -> Result<(), RoundFailed> {
-        let result = match self.state.position {
+        let was_started = self.state.started;
+        let (result, fault_changed) = match self.state.position {
             None => self.start_up().await,
-            Some(position) => self.tail_round(position).await,
+            Some(position) => (self.tail_round(position).await, false),
         };
-        self.note_health(&result);
         self.sender.send_replace(self.state.clone());
+        if fault_changed && let Err(error) = &result {
+            log_fault(error);
+        }
+        self.log_ready(was_started);
+        self.note_health(&result);
         if result.is_ok() {
             Ok(())
         } else {
@@ -254,13 +266,11 @@ impl TailEvents {
         }
     }
 
-    /// The start-up steps; a fault is recorded and logged when it changes.
-    async fn start_up(&mut self) -> Result<Cursor, RoundError> {
+    /// The start-up steps; a fault is recorded, and the round learns whether it changed.
+    async fn start_up(&mut self) -> (Result<Cursor, RoundError>, bool) {
         let result = self.first_seek().await;
-        if let Err(error) = &result {
-            self.note_fault(error);
-        }
-        result
+        let changed = result.as_ref().is_err_and(|error| self.note_fault(error));
+        (result, changed)
     }
 
     /// The metadata check, the first observation, the start position and the first seek.
@@ -278,17 +288,17 @@ impl TailEvents {
         Ok(start)
     }
 
-    /// Records the fault of a failed start-up round and logs it when it differs from the last.
-    fn note_fault(&mut self, error: &RoundError) {
+    /// Records the fault of a failed start-up round; returns whether it differs from the last, so
+    /// that the round logs it once it has published it.
+    fn note_fault(&mut self, error: &RoundError) -> bool {
         let fault = error.fault();
         if fault == TopicFault::Unreachable {
             self.state.broker_reachable = false;
         }
         self.state.fault = Some(fault);
-        if self.last_fault != Some(fault) {
-            self.last_fault = Some(fault);
-            log_fault(fault, error);
-        }
+        let changed = self.last_fault != Some(fault);
+        self.last_fault = Some(fault);
+        changed
     }
 
     /// The fetch, the observation when it is due and the re-seek when it is due.
@@ -411,7 +421,8 @@ impl TailEvents {
         self.state.observed_at = Some(self.clock.now());
     }
 
-    /// At or above the goal: the node caught up now and, the first time, it is started.
+    /// At or above the goal: the node caught up now and, the first time, it is started; the round
+    /// logs `event tail ready` once it has published that.
     fn catch_up(&mut self, position: Cursor) {
         if position < self.goal {
             return;
@@ -420,11 +431,21 @@ impl TailEvents {
         if !self.state.started {
             self.state.started = true;
             self.publisher.started(position);
+        }
+    }
+
+    /// Logs `event tail ready` when the round started the node, at the position it started at.
+    fn log_ready(&self, was_started: bool) {
+        if !was_started
+            && self.state.started
+            && let Some(position) = self.state.position
+        {
             log_tail_ready(position);
         }
     }
 
-    /// Logs the first failed round after a success and the first success after a logged failure.
+    /// Logs the first failed round after a success and the first success after a logged failure;
+    /// called after the round published its state.
     fn note_health(&mut self, result: &Result<Cursor, RoundError>) {
         self.health = match (self.health, result) {
             (Health::Failing, Ok(position)) => {
@@ -463,8 +484,8 @@ fn reseek_due(fetched: Fetched, observed: Observed, position: Cursor) -> bool {
     }
 }
 
-fn log_fault(fault: TopicFault, error: &RoundError) {
-    match fault {
+fn log_fault(error: &RoundError) {
+    match error.fault() {
         TopicFault::Unreachable => log_topic_unreachable(error),
         TopicFault::Missing => log_topic_invalid("topic-not-found"),
         TopicFault::Partitions(_) => log_topic_invalid("partition-count"),

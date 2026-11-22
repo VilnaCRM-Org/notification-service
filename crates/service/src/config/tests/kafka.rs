@@ -151,16 +151,17 @@ const FETCH: DurationField = |a, v| a.fetch_max_wait = some(v);
 const RETRY: DurationField = |a, v| a.retry_delay = some(v);
 
 #[rstest]
-#[case::request_low(REQUEST, "1s", "KAFKA_REQUEST_TIMEOUT")]
-#[case::request_high(REQUEST, "30s", "KAFKA_REQUEST_TIMEOUT")]
-#[case::connect_low(CONNECT, "100ms", "KAFKA_CONNECT_TIMEOUT")]
-#[case::fetch_low(FETCH, "50ms", "KAFKA_FETCH_MAX_WAIT")]
-#[case::fetch_high(FETCH, "5s", "KAFKA_FETCH_MAX_WAIT")]
-#[case::retry_low(RETRY, "100ms", "KAFKA_RETRY_DELAY")]
-#[case::retry_high(RETRY, "1m", "KAFKA_RETRY_DELAY")]
+#[case::request_low(REQUEST, "1s", Duration::from_secs(1), "KAFKA_REQUEST_TIMEOUT")]
+#[case::request_high(REQUEST, "30s", Duration::from_secs(30), "KAFKA_REQUEST_TIMEOUT")]
+#[case::connect_low(CONNECT, "100ms", Duration::from_millis(100), "KAFKA_CONNECT_TIMEOUT")]
+#[case::fetch_low(FETCH, "50ms", Duration::from_millis(50), "KAFKA_FETCH_MAX_WAIT")]
+#[case::fetch_high(FETCH, "5s", Duration::from_secs(5), "KAFKA_FETCH_MAX_WAIT")]
+#[case::retry_low(RETRY, "100ms", Duration::from_millis(100), "KAFKA_RETRY_DELAY")]
+#[case::retry_high(RETRY, "1m", Duration::from_secs(60), "KAFKA_RETRY_DELAY")]
 fn each_kafka_duration_accepts_its_bounds(
     #[case] field: DurationField,
     #[case] raw: &str,
+    #[case] expected: Duration,
     #[case] variable: &str,
 ) {
     let config = Config::from_args(with_kafka(|a| {
@@ -169,7 +170,6 @@ fn each_kafka_duration_accepts_its_bounds(
     }))
     .unwrap();
 
-    let expected = humantime::parse_duration(raw).unwrap();
     let actual = match variable {
         "KAFKA_REQUEST_TIMEOUT" => config.kafka.request_timeout,
         "KAFKA_CONNECT_TIMEOUT" => config.kafka.connect_timeout,

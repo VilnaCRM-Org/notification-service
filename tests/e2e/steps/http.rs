@@ -128,3 +128,39 @@ fn json_field_should_equal(world: &mut AppWorld, field: String, expected: String
         world.reply().body
     );
 }
+
+#[then("the OpenAPI document should hold exactly these operations:")]
+#[expect(
+    clippy::needless_pass_by_ref_mut,
+    reason = "cucumber fixes the step signature"
+)]
+fn document_should_hold_operations(world: &mut AppWorld, step: &Step) {
+    let table = step.table.as_ref().expect("the step has a table");
+    assert_eq!(
+        table.rows[0],
+        ["method", "path", "operationId", "tag"],
+        "the table has the columns method, path, operationId and tag"
+    );
+    let document = world.reply().json();
+    let mut found = Vec::new();
+    for (path, item) in document["paths"]
+        .as_object()
+        .expect("the document has paths")
+    {
+        for (method, operation) in item.as_object().expect("a path item is an object") {
+            found.push(vec![
+                method.to_uppercase(),
+                path.clone(),
+                operation["operationId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                operation["tags"][0].as_str().unwrap_or_default().to_owned(),
+            ]);
+        }
+    }
+    let mut expected = table.rows[1..].to_vec();
+    found.sort_unstable();
+    expected.sort_unstable();
+    assert_eq!(found, expected);
+}

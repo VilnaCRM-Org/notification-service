@@ -4,7 +4,6 @@ exclude = [
     "target/**",
     "mutants.out*/**",
     "**/node_modules/**",
-    ".sqlx/**",
     ".tools/**",
     "_bmad/**",
     ".ralph/**",

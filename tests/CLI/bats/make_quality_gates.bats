@@ -176,7 +176,7 @@ FIXTURES="${BATS_TEST_DIRNAME}/fixtures"
 
 @test "G8: unused-dependencies names an unused dependency and leaves Cargo.lock as it found it" {
   require_command cargo
-  sed 's/^\[dependencies\]$/&\nhumantime.workspace = true/' xtask/Cargo.toml >"${tmp}/Cargo.toml"
+  sed 's/^\[dependencies\]$/&\njiff.workspace = true/' xtask/Cargo.toml >"${tmp}/Cargo.toml"
   run ! cmp -s "${tmp}/Cargo.toml" xtask/Cargo.toml
   plant_keep Cargo.lock
   plant_replace xtask/Cargo.toml "${tmp}/Cargo.toml"
@@ -186,7 +186,7 @@ FIXTURES="${BATS_TEST_DIRNAME}/fixtures"
   lock_before="$(cksum <Cargo.lock)"
   run make --no-print-directory unused-dependencies
   assert_failure
-  assert_output --partial 'humantime'
+  assert_output --partial 'jiff'
   assert_equal "$(cksum <Cargo.lock)" "${lock_before}"
 }
 
